@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Turkey Business Activity — Live</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <style>
+    :root { color-scheme: dark; }
+    body { font-family: system-ui, sans-serif; margin: 0; background: #0f1115; color: #e7e9ee; }
+    header { padding: 18px 24px; border-bottom: 1px solid #222; }
+    h1 { font-size: 20px; margin: 0; }
+    .sub { color: #8b909a; font-size: 13px; margin-top: 4px; }
+    main { padding: 24px; max-width: 1100px; margin: 0 auto; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; }
+    .card { background: #171a21; border: 1px solid #232733; border-radius: 12px; padding: 16px; cursor: pointer; }
+    .card.sel { border-color: #4f8cff; }
+    .card h3 { margin: 0 0 8px; font-size: 14px; }
+    .big { font-size: 30px; font-weight: 700; }
+    .muted { color: #8b909a; font-size: 12px; }
+    .row { display: flex; gap: 18px; align-items: baseline; }
+    .veh { color: #f0a35e; }
+    .chart-wrap { background: #171a21; border: 1px solid #232733; border-radius: 12px; padding: 16px; margin-top: 20px; }
+    #status { font-size: 12px; color: #8b909a; }
+    .live { color: #36d399; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Turkey Business Activity — Live Footfall</h1>
+    <div class="sub">YOLO people/vehicle counts, streamed live from Firestore ·
+      <span id="status">connecting…</span></div>
+  </header>
+  <main>
+    <div class="cards" id="cards"></div>
+    <div class="chart-wrap">
+      <div class="muted" id="chart-title">Select a camera</div>
+      <canvas id="chart" height="110"></canvas>
+    </div>
+  </main>
+
+  <!-- Copy firebase-config.example.js to firebase-config.js and fill in your project values -->
+  <script type="module" src="./firebase-config.js"></script>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

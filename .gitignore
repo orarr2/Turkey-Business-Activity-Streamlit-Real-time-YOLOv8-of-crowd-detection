@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# YOLO weights (downloaded on demand)
+*.pt
+
+# Collected data / outputs
+data/
+*.csv
+*.mp4
+*.jpg
+
+# Firebase secrets / local env — never commit
+firebase-service-account.json
+*serviceAccount*.json
+web/firebase-config.js
+.env
+.env.local
+.env.*.local
