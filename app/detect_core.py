@@ -179,6 +179,87 @@ def grab_frame(stream_url: str):
         cap.release()
 
 
+def iter_frames(stream_url: str, max_frames: int):
+    """Yield up to `max_frames` consecutive frames from a live HLS stream.
+
+    For header-required hosts (content.tvkur.com, livestream.ibb.gov.tr, skylinewebcams.com)
+    cv2.VideoCapture(url) can't pass Referer/Origin on Windows, so we download the latest
+    few .ts segments with the right headers and decode them locally — yielding frames in
+    arrival order. For normal HLS we open the URL directly with cv2 and read.
+
+    Used by the dwell-time / tracking section of the notebook so ByteTrack can see the
+    consecutive frames it needs.
+    """
+    # header-required host: fetch enough segments to cover max_frames at ~25-30 fps
+    matching_headers = None
+    for host, headers in HEADER_HOSTS.items():
+        if host in stream_url:
+            matching_headers = headers
+            break
+
+    if matching_headers is not None:
+        base = stream_url.rsplit("/", 1)[0] + "/"
+        try:
+            pl = _http_get(stream_url, matching_headers).decode("utf-8", "replace")
+        except Exception:
+            return
+        if "#EXT-X-STREAM-INF" in pl:
+            variant = next((l.strip() for l in pl.splitlines()
+                            if l.strip() and not l.startswith("#")), None)
+            if not variant:
+                return
+            variant_url = variant if variant.startswith("http") else base + variant
+            try:
+                pl = _http_get(variant_url, matching_headers).decode("utf-8", "replace")
+            except Exception:
+                return
+            base = variant_url.rsplit("/", 1)[0] + "/"
+
+        segs = [l.strip() for l in pl.splitlines() if l.strip() and not l.startswith("#")]
+        if not segs:
+            return
+        # tail segments give the freshest live view; pull ~enough to cover the request
+        approx_frames_per_seg = 60   # 2 s @ 30 fps is a typical segment
+        n_segs = max(1, min(len(segs), -(-max_frames // approx_frames_per_seg)))
+        yielded = 0
+        for seg in segs[-n_segs:]:
+            if yielded >= max_frames:
+                break
+            seg_url = seg if seg.startswith("http") else base + seg
+            try:
+                data = _http_get(seg_url, matching_headers)
+            except Exception:
+                continue
+            with tempfile.NamedTemporaryFile(suffix=".ts", delete=False) as f:
+                f.write(data); tmp = f.name
+            try:
+                cap = cv2.VideoCapture(tmp)
+                while yielded < max_frames:
+                    ok, fr = cap.read()
+                    if not ok:
+                        break
+                    yielded += 1
+                    yield fr
+                cap.release()
+            finally:
+                try: os.unlink(tmp)
+                except OSError: pass
+        return
+
+    # normal HLS / RTSP: stream directly
+    cap = cv2.VideoCapture(stream_url)
+    yielded = 0
+    try:
+        while yielded < max_frames:
+            ok, fr = cap.read()
+            if not ok:
+                break
+            yielded += 1
+            yield fr
+    finally:
+        cap.release()
+
+
 def detect_and_count(model, frame, conf: float = 0.35) -> dict:
     """Run YOLO on one frame -> {class_name: count} for the classes we track."""
     counts, _ = detect_with_boxes(model, frame, conf=conf)
