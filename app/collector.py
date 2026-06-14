@@ -116,6 +116,10 @@ def sample_once(model, conn, cam_id: str, cam: dict, firebase=None,
     if firebase is not None:
         try:
             firebase.write(record)
+            if reid is not None and ok:
+                # Push the per-camera re-ID summary too, so the HTML dashboard's
+                # bottom table updates in real time alongside the count/anomaly tiles.
+                firebase.write_reid_stats(cam_id, reid.stats(cam_id))
         except Exception as e:  # never let a backend hiccup kill the collector
             print(f"[{ts}] {cam_id}: firebase write failed ({e})")
     if ok:

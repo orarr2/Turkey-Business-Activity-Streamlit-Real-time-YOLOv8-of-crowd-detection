@@ -48,19 +48,34 @@ Expect lines like `konya_hukumet: person=23 vehicles=2` every 20s. `Ctrl+C` to s
 (First run downloads the YOLO weights `yolov8n.pt`, ~6 MB.)
 
 ## 6. Run for real — two terminals
-**Terminal 1 — collector (crowded cameras, leave running):**
+
+> **This is the path that gives you the shared, persistent 4-camera HTML dashboard.**
+> Anyone who opens the page will see the same counts and charts the collector has
+> been accumulating in Firestore — it does *not* reset per visitor.
+
+**Terminal 1 — collector (the 4 grid cameras, leave running):**
 ```bash
 python -m app.collector --backend firebase --interval 20 \
     --only konya_hukumet,giresun_gazi,otogar_kavsagi,kadikoy
 ```
-**Terminal 2 — dashboards:**
+The collector pushes three things to Firestore each sample:
+- `footfall/{auto-id}` — append-only history (24h chart + anomaly z-score)
+- `latest/{cam_id}` — overwritten each sample (the big "now" numbers)
+- `reid_stats/{cam_id}` — unique entities + total sightings + regulars
+
+**Terminal 2 — the 4-camera live HTML dashboard:**
 ```bash
-streamlit run app/streamlit_app.py        # 4 cameras side by side, last 24h
-cd web && python -m http.server 8000      # or the Firebase web cards
+cd web && python -m http.server 8000
 ```
-Open the Streamlit URL it prints (or **http://localhost:8000** for the web cards) — both update live.
-The Streamlit grid shows the four `GRID_CAMERAS` (Konya, Giresun, Otogar Kavsagi, Kadikoy) so collect
-those four to fill it.
+Open **http://localhost:8000**. You'll see a 2×2 grid: live video iframe + people/vehicles
+counts + anomaly badge + mini chart per camera, a combined 24h chart for all four cameras,
+and the re-ID summary table. Everything updates in real time via `onSnapshot` — no polling,
+no refresh button.
+
+If you also want the local Streamlit view (handy when you're iterating on the Python side):
+```bash
+streamlit run app/streamlit_app.py    # reads local SQLite, --backend sqlite only
+```
 
 ## Camera ids (from `app/cameras.py`)
 **Dashboard grid (`GRID_CAMERAS`):** `konya_hukumet`, `giresun_gazi`, `otogar_kavsagi`, `kadikoy`.

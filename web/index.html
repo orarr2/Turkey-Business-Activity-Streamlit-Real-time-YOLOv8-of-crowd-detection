@@ -3,44 +3,117 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Turkey Business Activity — Live</title>
+  <title>Turkey Business Activity — Live (4 cameras)</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
   <style>
     :root { color-scheme: dark; }
-    body { font-family: system-ui, sans-serif; margin: 0; background: #0f1115; color: #e7e9ee; }
-    header { padding: 18px 24px; border-bottom: 1px solid #222; }
-    h1 { font-size: 20px; margin: 0; }
-    .sub { color: #8b909a; font-size: 13px; margin-top: 4px; }
-    main { padding: 24px; max-width: 1100px; margin: 0 auto; }
-    .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; }
-    .card { background: #171a21; border: 1px solid #232733; border-radius: 12px; padding: 16px; cursor: pointer; }
-    .card.sel { border-color: #4f8cff; }
-    .card h3 { margin: 0 0 8px; font-size: 14px; }
-    .big { font-size: 30px; font-weight: 700; }
-    .muted { color: #8b909a; font-size: 12px; }
-    .row { display: flex; gap: 18px; align-items: baseline; }
-    .veh { color: #f0a35e; }
-    .chart-wrap { background: #171a21; border: 1px solid #232733; border-radius: 12px; padding: 16px; margin-top: 20px; }
-    #status { font-size: 12px; color: #8b909a; }
-    .live { color: #36d399; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0;
+           background: #0f1115; color: #e7e9ee; }
+    header { padding: 18px 24px; border-bottom: 1px solid #222;
+             display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+    header h1 { font-size: 20px; margin: 0; }
+    .sub { color: #8b909a; font-size: 13px; }
+    #status .live { color: #36d399; }
+    #status .stale { color: #f0a35e; }
+    #status .down { color: #ef4444; }
+    main { padding: 20px; max-width: 1400px; margin: 0 auto; }
+
+    .grid { display: grid; gap: 18px;
+            grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+
+    .tile { background: #171a21; border: 1px solid #232733; border-radius: 14px;
+            padding: 14px; display: flex; flex-direction: column; gap: 10px;
+            min-height: 380px; }
+    .tile h2 { margin: 0; font-size: 15px; font-weight: 600; }
+    .tile .city { color: #8b909a; font-size: 12px; }
+    .video-wrap { position: relative; width: 100%; aspect-ratio: 16/9;
+                  background: #0c0e13; border-radius: 8px; overflow: hidden; }
+    .video-wrap iframe, .video-wrap img { width: 100%; height: 100%; border: 0;
+                                          object-fit: cover; }
+    .video-fallback { display: flex; align-items: center; justify-content: center;
+                      width: 100%; height: 100%; padding: 14px; text-align: center;
+                      color: #8b909a; font-size: 13px; }
+    .video-fallback a { color: #4f8cff; text-decoration: none; }
+
+    .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;
+               align-items: end; }
+    .metric .lbl { color: #8b909a; font-size: 11px; text-transform: uppercase;
+                   letter-spacing: 0.04em; }
+    .metric .val { font-size: 22px; font-weight: 700; line-height: 1.1; }
+    .metric.vehicles .val { color: #f0a35e; }
+
+    .anomaly-badge { display: inline-flex; align-items: center; gap: 6px;
+                     padding: 4px 10px; border-radius: 999px; font-size: 12px; }
+    .anomaly-badge.ok   { background: rgba(54, 211, 153, 0.12); color: #36d399; }
+    .anomaly-badge.warn { background: rgba(239, 68, 68, 0.15);   color: #ef4444; }
+    .anomaly-badge.unk  { background: rgba(139, 144, 154, 0.12); color: #8b909a; }
+    .anomaly-badge .dot { width: 8px; height: 8px; border-radius: 50%;
+                          background: currentColor; }
+
+    .chart-mini { height: 110px; }
+    .footnote { color: #6f7480; font-size: 11px; }
+
+    .big-chart-wrap, .reid-wrap {
+        background: #171a21; border: 1px solid #232733; border-radius: 14px;
+        padding: 16px; margin-top: 20px;
+    }
+    .big-chart-wrap h2, .reid-wrap h2 { margin: 0 0 10px; font-size: 16px; }
+    #chart-all { height: 260px; }
+
+    table.reid { width: 100%; border-collapse: collapse; font-size: 13px; }
+    table.reid th, table.reid td { padding: 8px 10px; text-align: left;
+                                    border-bottom: 1px solid #232733; }
+    table.reid th { color: #8b909a; font-weight: 500; font-size: 11px;
+                    text-transform: uppercase; letter-spacing: 0.04em; }
+    .empty { color: #8b909a; padding: 18px; text-align: center; font-size: 13px; }
+
+    .config-warning { background: #2a1313; border: 1px solid #ef4444; color: #ef4444;
+                      padding: 14px 18px; border-radius: 10px; margin: 16px 0;
+                      font-size: 13px; line-height: 1.5; }
+    .config-warning code { background: #3a1818; padding: 1px 6px; border-radius: 4px; }
   </style>
 </head>
 <body>
   <header>
-    <h1>Turkey Business Activity — Live Footfall</h1>
-    <div class="sub">YOLO people/vehicle counts, streamed live from Firestore ·
-      <span id="status">connecting…</span></div>
+    <div>
+      <h1>Turkey Business Activity — Live Footfall</h1>
+      <div class="sub">4 cameras · YOLO counts streamed from Firestore in real time</div>
+    </div>
+    <div id="status" class="sub">connecting…</div>
   </header>
+
   <main>
-    <div class="cards" id="cards"></div>
-    <div class="chart-wrap">
-      <div class="muted" id="chart-title">Select a camera</div>
-      <canvas id="chart" height="110"></canvas>
+    <div id="config-warning" class="config-warning" style="display:none">
+      <strong>Firebase not configured.</strong>
+      Copy <code>web/firebase-config.example.js</code> to <code>web/firebase-config.js</code>
+      and paste your project's web SDK values from
+      Firebase&nbsp;Console&nbsp;→&nbsp;Project&nbsp;settings&nbsp;→&nbsp;Your&nbsp;apps&nbsp;→&nbsp;Web&nbsp;app.
+      Until then the dashboard layout renders but no live counts arrive.
+    </div>
+
+    <!-- 2x2 grid of camera tiles. Cells filled by app.js. -->
+    <div class="grid" id="tiles"></div>
+
+    <!-- Combined 24h chart of all four cameras -->
+    <div class="big-chart-wrap">
+      <h2>Footfall — last 24h, all four cameras</h2>
+      <canvas id="chart-all"></canvas>
+    </div>
+
+    <!-- Re-ID summary table -->
+    <div class="reid-wrap">
+      <h2>Re-identification — unique vs returning entities per camera</h2>
+      <div id="reid-table-wrap">
+        <div class="empty">Waiting for the collector to publish re-ID stats…</div>
+      </div>
     </div>
   </main>
 
-  <!-- Copy firebase-config.example.js to firebase-config.js and fill in your project values -->
+  <!-- firebase-config.js is gitignored — copy from firebase-config.example.js -->
   <script type="module" src="./firebase-config.js"></script>
+  <script type="module" src="./cameras.js"></script>
   <script type="module" src="./app.js"></script>
 </body>
 </html>
