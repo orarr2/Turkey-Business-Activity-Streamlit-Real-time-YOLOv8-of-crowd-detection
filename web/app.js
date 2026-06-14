@@ -31,6 +31,8 @@ const ANOMALY_Z      = 2.5;
 // ---------- 1. Render tile skeletons (works even without Firebase) ----------
 
 const tileState = {};   // cam_id -> { latestEl, chartEl, chart, anomalyEl, samplesEl, history }
+let combinedChart = null;   // declared at module top to avoid TDZ when start() calls
+                            // renderCombinedChart before reaching its previous declaration site
 
 for (const cam of GRID_CAMERAS) {
   const tile = document.createElement("div");
@@ -115,27 +117,34 @@ function start(cfg) {
         : `<span class="down">● no recent writes</span> · is the collector running?`;
   }, (err) => statusEl.textContent = "error: " + err.message);
 
-  // 3b. One history subscription per camera (last 24h).
+  // 3b. ONE subscription to the footfall history collection (last 24h), then
+  //     fan out to the 4 tiles client-side. This avoids the composite index
+  //     Firestore would otherwise require for
+  //         where(cam_id, ==) + orderBy(ts, desc) + where(ts, >=)
+  //     and reads each Firestore document once instead of four times.
   const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
-  for (const cam of GRID_CAMERAS) {
-    const q = query(
-      collection(db, "footfall"),
-      where("cam_id", "==", cam.id),
-      where("ts", ">=", since),
-      orderBy("ts", "desc"),
-      limit(HISTORY_LIMIT),
-    );
-    onSnapshot(q, (snap) => {
-      const rows = snap.docs
-          .map((d) => d.data())
-          .filter((r) => r.ok)
-          .sort((a, b) => a.ts.localeCompare(b.ts));
-      const st = tileState[cam.id];
-      st.history = rows;
+  const gridIds = new Set(GRID_CAMERAS.map((c) => c.id));
+  const histQ = query(
+    collection(db, "footfall"),
+    where("ts", ">=", since),
+    orderBy("ts", "desc"),
+    limit(HISTORY_LIMIT * GRID_CAMERAS.length),
+  );
+  onSnapshot(histQ, (snap) => {
+    const byCam = Object.fromEntries(GRID_CAMERAS.map((c) => [c.id, []]));
+    for (const doc of snap.docs) {
+      const r = doc.data();
+      if (!r.ok) continue;
+      if (!gridIds.has(r.cam_id)) continue;
+      byCam[r.cam_id].push(r);
+    }
+    for (const cam of GRID_CAMERAS) {
+      const rows = byCam[cam.id].sort((a, b) => a.ts.localeCompare(b.ts));
+      tileState[cam.id].history = rows;
       renderTileChart(cam.id, rows);
       updateAggregates(cam.id, rows);
-    });
-  }
+    }
+  }, (err) => console.error("footfall history query failed:", err));
 
   // 3c. Combined 24h chart at the bottom — rebuild from each tile's history
   //     each time anything updates. (Cheap; we have at most 4×360 rows.)
@@ -230,7 +239,6 @@ function renderTileChart(camId, rows) {
 
 // ---------- 5. Combined chart of all four cameras ---------------------------
 
-let combinedChart = null;
 function renderCombinedChart() {
   // Build a label axis from the union of timestamps, downsampled.
   const seriesByCam = {};

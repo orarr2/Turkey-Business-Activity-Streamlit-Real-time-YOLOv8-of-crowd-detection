@@ -17,6 +17,8 @@ data/
 # Firebase secrets / local env — never commit
 firebase-service-account.json
 *serviceAccount*.json
+*firebase-adminsdk*.json
+*-firebase-*.json
 web/firebase-config.js
 .env
 .env.local
