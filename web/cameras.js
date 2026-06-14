@@ -7,9 +7,8 @@
 //           cam_id field on `footfall/` docs).
 //   name  : display name in the tile header.
 //   city  : small grey subtitle.
-//   embed : iframe URL for the live player, or null if the platform sets
-//           X-Frame-Options and blocks iframing.
-//   page  : the public webcam page (clickable fallback when embed is null).
+//   embed : iframe URL for the live player (all four are tvkur, globally reachable).
+//   page  : the public webcam page (clickable fallback / source link).
 
 export const GRID_CAMERAS = [
   {
@@ -20,24 +19,24 @@ export const GRID_CAMERAS = [
     page:  "https://webcamera24.com/camera/turkey/8043-sarraflar-yeralti-carsisi/",
   },
   {
-    id:    "giresun_gazi",
-    name:  "Giresun — Gazi Caddesi",
-    city:  "Giresun",
-    embed: "https://www.skylinewebcams.com/en/embed/turkey/giresun/giresun/gazi-street.html",
-    page:  "https://www.skylinewebcams.com/en/webcam/turkey/giresun/giresun/gazi-street.html",
-  },
-  {
     id:    "otogar_kavsagi",
-    name:  "Otogar Kavşağı",
-    city:  "Turkey",
-    embed: null,            // webcamera24 page sets X-Frame-Options
+    name:  "Konya — Otogar Kavşağı",
+    city:  "Konya",
+    embed: "https://player.tvkur.com/l/c77i91vbb2nj4i0fr81g",
     page:  "https://webcamera24.com/camera/turkey/8044-otogar-kavsagi/",
   },
   {
-    id:    "kadikoy",
-    name:  "Kadıköy",
-    city:  "Istanbul",
-    embed: null,            // İBB hosts set X-Frame-Options
-    page:  "https://istanbuluseyret.ibb.gov.tr/kadikoy/",
+    id:    "konya_kulturpark",
+    name:  "Konya — Kültürpark",
+    city:  "Konya",
+    embed: "https://player.tvkur.com/l/c77i6hb84cnrb6mlji3g",
+    page:  "https://webcamera24.com/camera/turkey/8058-kulturpark/",
+  },
+  {
+    id:    "konya_millet_caddesi",
+    name:  "Konya — Millet Caddesi / Hastane Kavşağı",
+    city:  "Konya",
+    embed: "https://player.tvkur.com/l/c77i9cfbb2nj4i0fr82g",
+    page:  "https://webcamera24.com/camera/turkey/8046-millet-caddesi/",
   },
 ];

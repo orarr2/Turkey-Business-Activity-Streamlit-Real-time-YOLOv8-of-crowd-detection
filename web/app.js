@@ -12,13 +12,24 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/fireba
 import {
   getFirestore, collection, onSnapshot, query, where, orderBy, limit,
 } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
-import { GRID_CAMERAS } from "./cameras.js";
+
+// Cache-busting for sibling modules. Browsers cache ES-module specifiers by exact
+// URL — if the HTML's <script src="./cameras.js?v=5"> bumps version but app.js still
+// imports "./cameras.js" (no query), the import resolves to a different URL and can
+// serve a stale module. Extract the same ?v=N from this file's own URL so both
+// imports below share it. Pages can also set `?ver=N` on the page URL to override.
+const _u = new URL(import.meta.url);
+const _ver = (_u.searchParams.get("v") || _u.searchParams.get("ver")
+              || new URLSearchParams(location.search).get("ver") || "dev");
+const _q = "?v=" + encodeURIComponent(_ver);
+
+const { GRID_CAMERAS } = await import("./cameras.js" + _q);
 
 // firebase-config.js is gitignored — if it's missing the dashboard still renders
 // the layout but shows a config warning.
 let firebaseConfig;
 try {
-  firebaseConfig = (await import("./firebase-config.js")).firebaseConfig;
+  firebaseConfig = (await import("./firebase-config.js" + _q)).firebaseConfig;
 } catch (_) { /* handled below */ }
 
 const statusEl = document.getElementById("status");
@@ -67,7 +78,7 @@ for (const cam of GRID_CAMERAS) {
       </span>
       <span class="footnote" data-samples></span>
     </div>
-    <canvas class="chart-mini"></canvas>
+    <div class="chart-mini"><canvas></canvas></div>
   `;
   tilesEl.appendChild(tile);
 
@@ -197,11 +208,18 @@ function updateAggregates(camId, rows) {
   st.samplesEl.textContent = ` · ${rows.length} samples in 24h`;
 }
 
+// How many recent samples to show in the per-tile chart. The metrics above
+// (24h avg / 24h peak / anomaly) still aggregate the full 24h window in `rows`;
+// only the chart trims to the most-recent N points so they spread across the
+// canvas instead of bunching into a single vertical "spike" on the right.
+const TILE_CHART_LAST_N = 30;
+
 function renderTileChart(camId, rows) {
   const st = tileState[camId];
-  const labels   = rows.map((r) => fmtTime(r.ts));
-  const people   = rows.map((r) => r.person);
-  const vehicles = rows.map((r) => r.vehicles);
+  const view = rows.slice(-TILE_CHART_LAST_N);
+  const labels   = view.map((r) => fmtTime(r.ts));
+  const people   = view.map((r) => r.person);
+  const vehicles = view.map((r) => r.vehicles);
 
   if (st.chart) {
     st.chart.data.labels = labels;
@@ -216,9 +234,9 @@ function renderTileChart(camId, rows) {
       labels,
       datasets: [
         { label: "people",   data: people,   borderColor: "#4f8cff",
-          tension: 0.25, pointRadius: 0, borderWidth: 2 },
+          tension: 0, pointRadius: 2, pointHoverRadius: 4, borderWidth: 2 },
         { label: "vehicles", data: vehicles, borderColor: "#f0a35e",
-          tension: 0.25, pointRadius: 0, borderWidth: 2 },
+          tension: 0, pointRadius: 2, pointHoverRadius: 4, borderWidth: 2 },
       ],
     },
     options: {
@@ -258,7 +276,7 @@ function renderCombinedChart() {
       label: cam.name.split(" — ")[0],
       data: labels.map((t) => byTs.has(t) ? byTs.get(t) : null),
       borderColor: palette[i % palette.length],
-      tension: 0.2, pointRadius: 0, borderWidth: 2, spanGaps: true,
+      tension: 0, pointRadius: 2, pointHoverRadius: 4, borderWidth: 2, spanGaps: true,
     };
   });
 
@@ -330,8 +348,13 @@ function flagAnomalies(rows) {
 }
 
 function fmtTime(iso) {
-  try { return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
-  catch { return String(iso).slice(11, 16); }
+  // HH:MM:SS — keeping seconds means each 20s sample gets a unique x-axis label
+  // so the chart doesn't squash same-minute samples into a single vertical spike.
+  try {
+    return new Date(iso).toLocaleTimeString([], {
+      hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+    });
+  } catch { return String(iso).slice(11, 19); }
 }
 
 function escapeHtml(s) {

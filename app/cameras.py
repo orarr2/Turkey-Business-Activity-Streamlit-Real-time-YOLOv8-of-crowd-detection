@@ -102,40 +102,54 @@ CAMERAS = {
         "url": "https://livestream.ibb.gov.tr/cam_turistik/b_uskudar.stream/playlist.m3u8",
         "type": "square/transport",
     },
-    # --- Giresun: Gazi Caddesi, the city's main commercial street (skylinewebcams). ---
-    # skylinewebcams serves a tokenized HLS (hd-auth.skylinewebcams.com/live.m3u8?a=<token>)
-    # that rotates, so we resolve it from the page each cycle rather than hard-coding it.
-    # Run `python -m app.detect_core --resolve giresun_gazi` on an open network to verify;
-    # the resolver lives in detect_core.resolve_skyline.
+    # --- Otogar Kavsagi (webcamera24, entry 8044). Like the Konya cam this page embeds a
+    # tvkur live player. tvkur player id resolved 2026-06: c77i91vbb2nj4i0fr81g. ---
+    "otogar_kavsagi": {
+        "name": "Otogar Kavsagi",
+        "city": "Konya",
+        "kind": "webcamera24",
+        "url": "https://webcamera24.com/camera/turkey/8044-otogar-kavsagi/",
+        "page": "https://webcamera24.com/camera/turkey/8044-otogar-kavsagi/",
+        "embed": "https://player.tvkur.com/l/c77i91vbb2nj4i0fr81g",
+        "type": "junction/transit",
+    },
+    # --- Konya Kulturpark (webcamera24 8058) — replaces Giresun in the grid because
+    # skylinewebcams geo-blocks Israel. tvkur id: c77i6hb84cnrb6mlji3g. ---
+    "konya_kulturpark": {
+        "name": "Konya - Kulturpark",
+        "city": "Konya",
+        "kind": "webcamera24",
+        "url": "https://webcamera24.com/camera/turkey/8058-kulturpark/",
+        "page": "https://webcamera24.com/camera/turkey/8058-kulturpark/",
+        "embed": "https://player.tvkur.com/l/c77i6hb84cnrb6mlji3g",
+        "type": "park/commercial",
+    },
+    # --- Konya Millet Caddesi / Hastane Kavsagi (webcamera24 8046) — replaces Kadikoy
+    # in the grid because IBB streams geo-block Israel. tvkur id: c77i9cfbb2nj4i0fr82g. ---
+    "konya_millet_caddesi": {
+        "name": "Konya - Millet Caddesi / Hastane Kavsagi",
+        "city": "Konya",
+        "kind": "webcamera24",
+        "url": "https://webcamera24.com/camera/turkey/8046-millet-caddesi/",
+        "page": "https://webcamera24.com/camera/turkey/8046-millet-caddesi/",
+        "embed": "https://player.tvkur.com/l/c77i9cfbb2nj4i0fr82g",
+        "type": "hospital junction / vehicular",
+    },
+    # --- Kept for runs from a Turkey-routed IP, where these unblock. Not in the grid. ---
     "giresun_gazi": {
         "name": "Giresun - Gazi Caddesi",
         "city": "Giresun",
         "kind": "skyline",
         "url": "https://www.skylinewebcams.com/en/webcam/turkey/giresun/giresun/gazi-street.html",
         "page": "https://www.skylinewebcams.com/en/webcam/turkey/giresun/giresun/gazi-street.html",
-        # skyline exposes an embeddable player at /embed/<slug>.html
         "embed": "https://www.skylinewebcams.com/en/embed/turkey/giresun/giresun/gazi-street.html",
-        "type": "commercial street",
-    },
-    # --- Otogar Kavsagi (webcamera24, entry 8044). Like the Konya cam this page embeds a
-    # tvkur (or sometimes YouTube) live player; the underlying HLS is resolved from the page
-    # by detect_core.resolve_webcamera24. webcamera24 returns 403 to bare fetchers, so the
-    # resolver sends a browser User-Agent + Referer. If the page ever stops resolving,
-    # open it once, copy the player id, and pin `url`/`embed` here by hand. ---
-    "otogar_kavsagi": {
-        "name": "Otogar Kavsagi",
-        "city": "Turkey",
-        "kind": "webcamera24",
-        "url": "https://webcamera24.com/camera/turkey/8044-otogar-kavsagi/",
-        "page": "https://webcamera24.com/camera/turkey/8044-otogar-kavsagi/",
-        # filled in once the tvkur/YouTube player id is known (see resolver notes above).
-        "embed": None,
-        "type": "junction/transit",
+        "type": "commercial street (geo-restricted)",
     },
 }
 
 # Cameras the live dashboard shows side by side (2x2 grid), in display order.
-GRID_CAMERAS = ["konya_hukumet", "giresun_gazi", "otogar_kavsagi", "kadikoy"]
+# All four are webcamera24-backed tvkur streams — globally reachable, not geo-blocked.
+GRID_CAMERAS = ["konya_hukumet", "otogar_kavsagi", "konya_kulturpark", "konya_millet_caddesi"]
 
 
 def active_cameras():

@@ -3,6 +3,11 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- During development, never cache the HTML shell so JS+CSS edits show up
+       on the next normal reload. Drop these three if you ever deploy to a CDN. -->
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
   <title>Turkey Business Activity — Live (4 cameras)</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
   <style>
@@ -52,7 +57,9 @@
     .anomaly-badge .dot { width: 8px; height: 8px; border-radius: 50%;
                           background: currentColor; }
 
-    .chart-mini { height: 110px; }
+    .chart-mini { position: relative; height: 160px; width: 100%; }
+    .chart-mini canvas { position: absolute; top: 0; left: 0; width: 100% !important; height: 100% !important; }
+    .big-chart-wrap canvas { width: 100% !important; height: 280px !important; }
     .footnote { color: #6f7480; font-size: 11px; }
 
     .big-chart-wrap, .reid-wrap {
@@ -60,7 +67,6 @@
         padding: 16px; margin-top: 20px;
     }
     .big-chart-wrap h2, .reid-wrap h2 { margin: 0 0 10px; font-size: 16px; }
-    #chart-all { height: 260px; }
 
     table.reid { width: 100%; border-collapse: collapse; font-size: 13px; }
     table.reid th, table.reid td { padding: 8px 10px; text-align: left;
@@ -114,8 +120,8 @@
   <!-- firebase-config.js is gitignored — copy from firebase-config.example.js -->
   <!-- ?v=N is a cache-buster: bump it whenever any of the JS files changes,
        so the browser doesn't serve a stale ES-module from disk cache. -->
-  <script type="module" src="./firebase-config.js?v=2"></script>
-  <script type="module" src="./cameras.js?v=2"></script>
-  <script type="module" src="./app.js?v=2"></script>
+  <script type="module" src="./firebase-config.js?v=8"></script>
+  <script type="module" src="./cameras.js?v=8"></script>
+  <script type="module" src="./app.js?v=8"></script>
 </body>
 </html>
