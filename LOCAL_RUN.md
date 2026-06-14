@@ -86,7 +86,7 @@ Drop `--only` to run all of them.
 - **Dashboard shows "no data"** → the collector isn't writing yet, or `web/firebase-config.js` is missing.
 - **`firebase write failed ... PERMISSION_DENIED`** → you are not using the service-account key (the
   Admin SDK bypasses the read-only rules; the web apiKey does not).
-- **Notebook instead of app** → `jupyter lab notebooks/turkey_business_activity.ipynb` for the analysis
+- **Notebook instead of app** → `jupyter lab turkey_business_activity.ipynb` for the analysis
   (footfall, peak hours, anomalies, dwell-time, site score).
 
 ## Local files NOT in git (you provide them)

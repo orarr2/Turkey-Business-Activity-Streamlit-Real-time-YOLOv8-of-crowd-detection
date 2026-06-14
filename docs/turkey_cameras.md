@@ -1,6 +1,6 @@
 # Turkey Commercial Cameras + Live Architecture
 
-Cameras and access methods used by `notebooks/turkey_business_activity.ipynb` and the
+Cameras and access methods used by `turkey_business_activity.ipynb` and the
 `app/` collector + dashboard. Focus: **high-footfall commercial / market / square areas** for
 business-activity analysis.
 

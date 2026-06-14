@@ -9,7 +9,7 @@
 | קובץ | תיאור |
 |------|--------|
 | [`LOCAL_RUN.md`](LOCAL_RUN.md) | **Quickstart** — run the collector + live dashboard locally, end to end |
-| [`notebooks/turkey_business_activity.ipynb`](notebooks/turkey_business_activity.ipynb) | **Turkey business-activity notebook** — footfall, peak hours, anomalies, dwell-time / prolonged stops, site score |
+| [`turkey_business_activity.ipynb`](turkey_business_activity.ipynb) | **Turkey business-activity notebook** — footfall, peak hours, anomalies, dwell-time / prolonged stops, site score |
 | [`app/collector.py`](app/collector.py) | **Continuous collector** — samples cameras 24/7, pushes to Firestore (footfall + latest + re-ID stats) |
 | [`web/`](web/) | **Real-time HTML dashboard** — 2×2 grid of live video tiles, per-camera anomaly badge + mini chart, combined 24h chart, re-ID summary. Backed by Firestore so a returning visitor sees all accumulated data, not a fresh local file. |
 | [`app/cameras.py`](app/cameras.py) · [`app/detect_core.py`](app/detect_core.py) · [`app/firebase_store.py`](app/firebase_store.py) | Camera catalog · shared detection core · Firestore writer |
@@ -44,7 +44,7 @@ security rules, cost): [`docs/firebase_setup.md`](docs/firebase_setup.md).
 
 ### Just the analysis
 
-`jupyter lab notebooks/turkey_business_activity.ipynb` — footfall, peak hours, anomaly
+`jupyter lab turkey_business_activity.ipynb` — footfall, peak hours, anomaly
 z-score, dwell-time tracking, re-identification, and a site-selection score. Run locally
 so the streams resolve.
 
