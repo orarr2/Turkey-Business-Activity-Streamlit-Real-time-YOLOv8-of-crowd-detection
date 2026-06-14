@@ -7,17 +7,14 @@ yt-dlp>=2024.4.9            # resolves YouTube Live -> HLS (.m3u8) URLs
 streamlink>=6.7.0           # alternative resolver for many live platforms
 requests>=2.31              # snapshot/JPEG cameras + REST camera APIs (e.g. TfL)
 
-# Data / analysis
+# Notebook analysis only — the production pipeline (collector + HTML dashboard)
+# doesn't need pandas/matplotlib; the dashboard does its own charting in JS.
 pandas>=2.2
 numpy>=1.26
 matplotlib>=3.8
 
-# Live dashboard (app/streamlit_app.py)
-streamlit>=1.33
-streamlit-autorefresh>=1.0   # hands-free live refresh
+# Firebase backend (collector pushes here; web/ HTML dashboard subscribes to it)
+firebase-admin>=6.5
 
-# Firebase backend (app/collector.py --backend firebase) + web/ real-time dashboard
-firebase-admin>=6.5          # writes footfall counts to Firestore
-
-# Optional: nicer time handling
+# Optional: nicer time handling for the notebook
 python-dateutil>=2.9

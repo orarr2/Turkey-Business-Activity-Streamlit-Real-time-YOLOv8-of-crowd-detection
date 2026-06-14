@@ -42,20 +42,19 @@ export FIREBASE_CREDENTIALS="$PWD/serviceAccount.json"          # Mac/Linux
 
 ## 5. Smoke test (one camera)
 ```bash
-python -m app.collector --backend firebase --interval 20 --only konya_hukumet
+python -m app.collector --interval 20 --only konya_hukumet
 ```
-Expect lines like `konya_hukumet: person=23 vehicles=2` every 20s. `Ctrl+C` to stop.
-(First run downloads the YOLO weights `yolov8n.pt`, ~6 MB.)
+Expect lines like `konya_hukumet: person=23 vehicles=2  new=… seen_again=…` every 20s.
+`Ctrl+C` to stop. (First run downloads the YOLO weights `yolov8n.pt`, ~6 MB.)
 
 ## 6. Run for real — two terminals
 
-> **This is the path that gives you the shared, persistent 4-camera HTML dashboard.**
-> Anyone who opens the page will see the same counts and charts the collector has
-> been accumulating in Firestore — it does *not* reset per visitor.
+Anyone who opens the dashboard sees the counts and charts the collector has been
+accumulating in Firestore — it does *not* reset per visitor.
 
 **Terminal 1 — collector (the 4 grid cameras, leave running):**
 ```bash
-python -m app.collector --backend firebase --interval 20 \
+python -m app.collector --interval 20 \
     --only konya_hukumet,giresun_gazi,otogar_kavsagi,kadikoy
 ```
 The collector pushes three things to Firestore each sample:
@@ -67,15 +66,9 @@ The collector pushes three things to Firestore each sample:
 ```bash
 cd web && python -m http.server 8000
 ```
-Open **http://localhost:8000**. You'll see a 2×2 grid: live video iframe + people/vehicles
-counts + anomaly badge + mini chart per camera, a combined 24h chart for all four cameras,
-and the re-ID summary table. Everything updates in real time via `onSnapshot` — no polling,
-no refresh button.
-
-If you also want the local Streamlit view (handy when you're iterating on the Python side):
-```bash
-streamlit run app/streamlit_app.py    # reads local SQLite, --backend sqlite only
-```
+Open **http://localhost:8000**. 2×2 grid: live video iframe + people/vehicle counts +
+anomaly badge + mini chart per camera, a combined 24h chart for all four cameras, and
+the re-ID summary table. Everything updates via `onSnapshot` — no polling, no refresh.
 
 ## Camera ids (from `app/cameras.py`)
 **Dashboard grid (`GRID_CAMERAS`):** `konya_hukumet`, `giresun_gazi`, `otogar_kavsagi`, `kadikoy`.

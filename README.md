@@ -10,27 +10,27 @@
 |------|--------|
 | [`LOCAL_RUN.md`](LOCAL_RUN.md) | **Quickstart** — run the collector + live dashboard locally, end to end |
 | [`notebooks/turkey_business_activity.ipynb`](notebooks/turkey_business_activity.ipynb) | **Turkey business-activity notebook** — footfall, peak hours, anomalies, dwell-time / prolonged stops, site score |
-| [`app/collector.py`](app/collector.py) | **Continuous collector** — samples cameras 24/7 into SQLite or Firestore (makes the data live) |
-| [`app/streamlit_app.py`](app/streamlit_app.py) | **Live dashboard (local)** — 4 cameras side by side (2×2 grid), last 24h, with per-camera live player + YOLO frame, footfall/anomaly view from SQLite |
-| [`web/`](web/) | **Real-time HTML dashboard (the main one)** — 2×2 grid of live video tiles, per-camera anomaly badge + mini chart, combined 24h chart, re-ID summary. Backed by Firestore so a returning visitor sees all accumulated data, not a fresh local file. |
+| [`app/collector.py`](app/collector.py) | **Continuous collector** — samples cameras 24/7, pushes to Firestore (footfall + latest + re-ID stats) |
+| [`web/`](web/) | **Real-time HTML dashboard** — 2×2 grid of live video tiles, per-camera anomaly badge + mini chart, combined 24h chart, re-ID summary. Backed by Firestore so a returning visitor sees all accumulated data, not a fresh local file. |
 | [`app/cameras.py`](app/cameras.py) · [`app/detect_core.py`](app/detect_core.py) · [`app/firebase_store.py`](app/firebase_store.py) | Camera catalog · shared detection core · Firestore writer |
 | [`docs/turkey_cameras.md`](docs/turkey_cameras.md) | Verified Turkey commercial/market camera streams + **live-data architecture** |
 | [`docs/firebase_setup.md`](docs/firebase_setup.md) | Firebase project, service account, security rules, cost |
 
-## Turkey business activity — quick start (Firebase dashboard, the persistent one)
+## Quick start
 
-This is the path you want if anyone returning to the dashboard should see **all the
-data accumulated so far** (not a fresh local file). The collector writes to Firestore;
-the HTML page subscribes via `onSnapshot` and updates in real time — no polling.
+The collector writes to Firestore; the HTML page subscribes via `onSnapshot` and
+updates in real time. Any visitor who opens the dashboard sees the full history the
+collector has accumulated, not a fresh local file — that's what makes the data
+shared and aggregative.
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env                                       # fill in Firebase values
+cp .env.example .env                                       # fill in your Firebase values
 cp web/firebase-config.example.js web/firebase-config.js   # same web SDK values
 export FIREBASE_CREDENTIALS=/path/to/serviceAccount.json   # Admin SDK key
 
 # terminal 1 — collector pushing the 4 grid cameras into Firestore (leave running)
-python -m app.collector --backend firebase --interval 20 \
+python -m app.collector --interval 20 \
     --only konya_hukumet,giresun_gazi,otogar_kavsagi,kadikoy
 
 # terminal 2 — serve the HTML dashboard
@@ -39,21 +39,8 @@ cd web && python -m http.server 8000                       # open http://localho
 
 The dashboard shows a 2×2 grid (live video iframe + people/vehicle counts + anomaly
 badge + mini chart per camera), a combined 24h chart for all four cameras, and a
-re-ID summary table. Setup walkthrough (project creation, service account, security
-rules, cost): [`docs/firebase_setup.md`](docs/firebase_setup.md).
-
-### Local-only alternative (no Firebase)
-
-For iterating on the Python side without setting up Firestore, the Streamlit dashboard
-reads a local SQLite file the collector fills:
-
-```bash
-python -m app.collector --backend sqlite --db data/footfall.db --interval 20  # terminal 1
-streamlit run app/streamlit_app.py                                            # terminal 2
-```
-
-Same 4-camera grid as the HTML version, but the data is **local to your machine** —
-deleting `data/footfall.db` resets it. Good for development; bad for shared/returning visitors.
+re-ID summary table. Firebase setup walkthrough (project creation, service account,
+security rules, cost): [`docs/firebase_setup.md`](docs/firebase_setup.md).
 
 ### Just the analysis
 
