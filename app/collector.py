@@ -32,7 +32,7 @@ from app.detect_core import (
     detect_with_boxes,
     grab_frame,
     load_model,
-    resolve_youtube,
+    resolve_stream,
 )
 from app.reid import ReidStore
 
@@ -60,10 +60,12 @@ def init_db(path: Path) -> sqlite3.Connection:
 
 
 def resolve_url(cam: dict) -> str:
-    """HLS cameras use their URL directly; YouTube-backed cameras get resolved each cycle."""
-    if cam["kind"] == "youtube":
-        return resolve_youtube(cam["url"])
-    return cam["url"]
+    """Resolve any camera (hls / youtube / skyline / webcamera24) to a stream URL.
+
+    Page-backed kinds (skyline, webcamera24, youtube) are re-resolved each cycle because
+    their tokenized HLS URLs rotate.
+    """
+    return resolve_stream(cam)
 
 
 def sample_once(model, conn, cam_id: str, cam: dict, firebase=None,

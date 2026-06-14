@@ -1,16 +1,19 @@
-"""Live business-activity dashboard.
+"""Live business-activity dashboard — 4 cameras side by side, last 24 hours.
 
-  +---------------------------------------+----------------------------+
-  |  LIVE CAMERA  (tvkur iframe)          |  INSIGHTS                  |
-  |                                       |  - latest counts           |
-  |                                       |  - 1h avg, peak hour       |
-  |                                       |  - anomaly flag            |
-  |                                       |  - re-ID stats             |
-  +---------------------------------------+----------------------------+
-  |  FOOTFALL OVER TIME (line chart, last 200 samples)                 |
-  +--------------------------------------------------------------------+
-  |  MODEL PREDICTION (latest annotated YOLO frame)  |  TOP REGULARS  |
-  +--------------------------------------------------------------------+
+  +---------------------------+---------------------------+
+  |  Konya  (live + YOLO)     |  Giresun (live + YOLO)    |
+  |  24h metrics + anomaly    |  24h metrics + anomaly    |
+  +---------------------------+---------------------------+
+  |  Otogar (live + YOLO)     |  Kadikoy (live + YOLO)    |
+  |  24h metrics + anomaly    |  24h metrics + anomaly    |
+  +---------------------------+---------------------------+
+  |  FOOTFALL — last 24h, all four cameras (line chart)   |
+  +-------------------------------------------------------+
+  |  RE-ID SUMMARY per camera                             |
+  +-------------------------------------------------------+
+
+Each tile shows the live player (iframe embed where available) next to the latest
+annotated YOLO frame, plus the camera's last-24h counts, peak hour and anomaly flag.
 
 Reads `data/footfall.db` (filled by collector.py), `data/reid.db` (re-ID registry),
 and `data/frames/latest_{cam_id}.jpg` (annotated YOLO output written by the collector).
@@ -30,22 +33,18 @@ import streamlit as st
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from app.cameras import CAMERAS
+from app.cameras import CAMERAS, GRID_CAMERAS
 
 DB_PATH = ROOT / "data" / "footfall.db"
 REID_DB = ROOT / "data" / "reid.db"
 FRAMES_DIR = ROOT / "data" / "frames"
 REFRESH_SEC = 15
-
-# tvkur iframe URL for each camera (only filled for cameras we've resolved).
-LIVE_PLAYER_URL = {
-    "konya_hukumet": "https://player.tvkur.com/l/c77i84vbb2nj4i0fr80g",
-}
+WINDOW_HOURS = 24
 
 st.set_page_config(page_title="Turkey Business Activity — Live",
                    layout="wide", initial_sidebar_state="collapsed")
 
-st.title("Turkey Business Activity — Live Footfall + Re-ID")
+st.title("Turkey Business Activity — Live Footfall (4 cameras · last 24h)")
 
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -58,13 +57,16 @@ except ImportError:
 
 @st.cache_data(ttl=REFRESH_SEC)
 def load_footfall() -> pd.DataFrame:
+    """All decoded footfall rows within the last WINDOW_HOURS."""
     if not DB_PATH.exists():
         return pd.DataFrame()
     with sqlite3.connect(str(DB_PATH)) as conn:
         df = pd.read_sql_query("SELECT * FROM footfall WHERE ok = 1", conn)
     if df.empty:
         return df
-    df["ts"] = pd.to_datetime(df["ts"])
+    df["ts"] = pd.to_datetime(df["ts"], utc=True)
+    cutoff = df["ts"].max() - pd.Timedelta(hours=WINDOW_HOURS)
+    df = df[df["ts"] >= cutoff].copy()
     df["hour"] = df["ts"].dt.hour
     return df
 
@@ -82,16 +84,10 @@ def load_reid_stats(cam_id: str) -> dict:
                             "regulars": r[3]} for r in cur.fetchall()}
         total = conn.execute("SELECT COUNT(*), SUM(sightings) FROM entities "
                              "WHERE cam_id=?", (cam_id,)).fetchone()
-        regulars = conn.execute(
-            "SELECT entity_id, cls, sightings, first_seen, last_seen "
-            "FROM entities WHERE cam_id=? ORDER BY sightings DESC LIMIT 10",
-            (cam_id,)).fetchall()
     return {
         "per_class":       per_class,
         "total_unique":    total[0] or 0,
         "total_sightings": total[1] or 0,
-        "top_regulars":    [{"entity_id": r[0], "cls": r[1], "sightings": r[2],
-                             "first_seen": r[3], "last_seen": r[4]} for r in regulars],
     }
 
 
@@ -101,113 +97,114 @@ def rolling_z(s: pd.Series, window: int = 12, thresh: float = 2.5) -> pd.Series:
     return ((s - mu) / sd).abs() > thresh
 
 
-# ---------------- camera select ----------------
+# ---------------- per-camera tile ----------------
 
-df = load_footfall()
-if df.empty:
-    st.warning("No data yet. Start the collector first:\n\n"
-               "    python -m app.collector --backend sqlite --interval 15 --only konya_hukumet\n")
-    st.stop()
+def render_tile(cam_id: str, df: pd.DataFrame) -> None:
+    cam = CAMERAS.get(cam_id, {})
+    cam_name = cam.get("name", cam_id)
+    st.markdown(f"#### {cam_name}")
 
-cams = sorted(df["cam_id"].unique())
-cam_id = st.selectbox("Camera",
-                      cams,
-                      format_func=lambda c: CAMERAS.get(c, {}).get("name", c))
-cam_name = CAMERAS.get(cam_id, {}).get("name", cam_id)
-d = df[df["cam_id"] == cam_id].sort_values("ts")
-d["anomaly"] = rolling_z(d["person"])
-latest = d.iloc[-1]
+    live_col, det_col = st.columns(2, gap="small")
 
+    # left: live player (iframe) where we have an embeddable URL
+    with live_col:
+        embed = cam.get("embed")
+        if embed:
+            st.components.v1.iframe(embed, height=220, scrolling=False)
+            st.caption("Live stream")
+        else:
+            st.info("No iframe embed for this camera — the YOLO frame (right) is the live view.")
+            if cam.get("page"):
+                st.caption(f"Source: {cam['page']}")
 
-# ---------------- row 1: live camera + insights side by side ----------------
+    # right: latest annotated YOLO frame = the live detection
+    with det_col:
+        annotated = FRAMES_DIR / f"latest_{cam_id}.jpg"
+        if annotated.exists():
+            st.image(str(annotated), caption="Latest YOLO detection",
+                     use_container_width=True)
+        else:
+            st.info("No annotated frame yet (collector writes one per sample).")
 
-cam_col, insights_col = st.columns([3, 2], gap="large")
+    # metrics for this camera over the last 24h
+    d = df[df["cam_id"] == cam_id].sort_values("ts")
+    if d.empty:
+        st.caption("No footfall data in the last 24h for this camera. "
+                   f"Run the collector with `--only {cam_id}` (open network required).")
+        st.divider()
+        return
 
-with cam_col:
-    st.subheader(f"Live: {cam_name}")
-    embed_url = LIVE_PLAYER_URL.get(cam_id)
-    if embed_url:
-        st.components.v1.iframe(embed_url, height=400, scrolling=False)
-        st.caption(f"Stream source: {embed_url}")
-    else:
-        st.info("No live-player URL configured for this camera. "
-                "Add it to `LIVE_PLAYER_URL` in app/streamlit_app.py to enable the embed.")
+    d = d.copy()
+    d["anomaly"] = rolling_z(d["person"])
+    latest = d.iloc[-1]
 
-with insights_col:
-    st.subheader("Insights")
-    c1, c2 = st.columns(2)
-    c1.metric("People (latest)", int(latest["person"]))
-    c2.metric("Vehicles (latest)", int(latest["vehicles"]))
-
-    one_hour = d[d["ts"] >= d["ts"].max() - pd.Timedelta(hours=1)]
-    c3, c4 = st.columns(2)
-    c3.metric("People — 1h avg", round(one_hour["person"].mean(), 1))
-    if not d.groupby("hour")["person"].mean().empty:
-        peak_hour = int(d.groupby("hour")["person"].mean().idxmax())
-        c4.metric("Peak hour (UTC)", f"{peak_hour:02d}:00")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("People (now)", int(latest["person"]))
+    m2.metric("Vehicles (now)", int(latest["vehicles"]))
+    m3.metric("People — 24h avg", round(d["person"].mean(), 1))
+    hourly = d.groupby("hour")["person"].mean()
+    if not hourly.empty:
+        m4.metric("Peak hour (UTC)", f"{int(hourly.idxmax()):02d}:00")
 
     anomalies = d[d["anomaly"]]
     if not anomalies.empty:
         last_an = anomalies.iloc[-1]
-        st.error(f"Anomaly at {last_an['ts'].strftime('%H:%M:%S')}: "
-                 f"{int(last_an['person'])} people (z-score > 2.5). "
-                 f"{len(anomalies)} total in window.")
+        st.error(f"⚠ Anomaly at {last_an['ts'].strftime('%H:%M:%S')} UTC: "
+                 f"{int(last_an['person'])} people (z>2.5). {len(anomalies)} in 24h.")
     else:
-        st.success("No anomalies in the current window.")
+        st.success("No anomalies in the last 24h.")
 
-    st.caption(f"Last update: {latest['ts'].strftime('%Y-%m-%d %H:%M:%S')} UTC · "
-               f"{len(d)} samples in DB · auto-refresh every {REFRESH_SEC}s")
-
-    # re-ID block
-    reid = load_reid_stats(cam_id)
-    if reid:
-        st.markdown("##### Re-identification")
-        r1, r2, r3 = st.columns(3)
-        r1.metric("Unique entities", reid["total_unique"])
-        r2.metric("Total sightings", int(reid["total_sightings"] or 0))
-        regulars = sum(s["regulars"] for s in reid["per_class"].values())
-        r3.metric("Regulars (≥3 sightings)", regulars)
-        if reid["per_class"]:
-            for cls, s in reid["per_class"].items():
-                st.caption(f"{cls}: {s['unique']} unique · "
-                           f"{s['total_sightings']} sightings · "
-                           f"{s['regulars']} regulars")
+    st.caption(f"Last update {latest['ts'].strftime('%H:%M:%S')} UTC · "
+               f"{len(d)} samples / 24h")
+    st.divider()
 
 
-# ---------------- row 2: footfall time series ----------------
+# ---------------- layout ----------------
 
-st.subheader("Footfall over time")
-chart = d.set_index("ts")[["person", "vehicles"]].tail(200)
-st.line_chart(chart, height=240)
+df = load_footfall()
+if df.empty:
+    st.warning(
+        "No data yet. Start the collector (open network required) — it samples all four "
+        "grid cameras:\n\n"
+        "    python -m app.collector --interval 20 "
+        "--only konya_hukumet,giresun_gazi,otogar_kavsagi,kadikoy\n")
+    st.stop()
 
+st.caption(f"Auto-refresh every {REFRESH_SEC}s · window = last {WINDOW_HOURS}h · "
+           f"{df['ts'].min():%Y-%m-%d %H:%M} → {df['ts'].max():%Y-%m-%d %H:%M} UTC")
 
-# ---------------- row 3: model prediction + top regulars ----------------
+# 2x2 grid of the four cameras
+row1 = st.columns(2, gap="large")
+row2 = st.columns(2, gap="large")
+cells = [row1[0], row1[1], row2[0], row2[1]]
+for cell, cam_id in zip(cells, GRID_CAMERAS):
+    with cell:
+        render_tile(cam_id, df)
 
-pred_col, regs_col = st.columns([3, 2], gap="large")
+# combined 24h footfall comparison
+st.subheader("Footfall over the last 24h — all cameras")
+pivot = (df[df["cam_id"].isin(GRID_CAMERAS)]
+         .assign(cam=lambda x: x["cam_id"].map(
+             lambda c: CAMERAS.get(c, {}).get("name", c)))
+         .pivot_table(index="ts", columns="cam", values="person"))
+if not pivot.empty:
+    st.line_chart(pivot, height=280)
+else:
+    st.info("No comparable footfall series yet for the grid cameras.")
 
-with pred_col:
-    st.subheader("Model prediction — latest YOLO frame")
-    annotated = FRAMES_DIR / f"latest_{cam_id}.jpg"
-    if annotated.exists():
-        st.image(str(annotated),
-                 caption=f"YOLO @ conf=0.25 on {cam_name} — boxes show classified detections",
-                 use_container_width=True)
-    else:
-        st.info(f"No annotated frame yet at `{annotated}`. The collector writes one per "
-                f"sample (`--frames-dir data/frames`).")
-
-with regs_col:
-    st.subheader("Top returning entities")
-    if reid and reid["top_regulars"]:
-        regulars_df = pd.DataFrame(reid["top_regulars"])
-        regulars_df["last_seen"] = pd.to_datetime(regulars_df["last_seen"]).dt.strftime("%H:%M:%S")
-        regulars_df["first_seen"] = pd.to_datetime(regulars_df["first_seen"]).dt.strftime("%H:%M:%S")
-        st.dataframe(
-            regulars_df[["entity_id", "cls", "sightings", "first_seen", "last_seen"]],
-            hide_index=True, use_container_width=True,
-        )
-        st.caption("Entity IDs are persistent across collector restarts (stored in "
-                   "`data/reid.db`). Demo-grade HSV embedding — tune the threshold in "
-                   "the collector if you see too many merges or splits.")
-    else:
-        st.info("Re-ID registry empty. The collector populates it as detections come in.")
+# re-ID summary across the grid
+st.subheader("Re-identification — unique vs returning (per camera)")
+reid_rows = []
+for cam_id in GRID_CAMERAS:
+    s = load_reid_stats(cam_id)
+    if not s:
+        continue
+    regulars = sum(c["regulars"] for c in s["per_class"].values())
+    reid_rows.append({"camera": CAMERAS.get(cam_id, {}).get("name", cam_id),
+                      "unique entities": s["total_unique"],
+                      "total sightings": int(s["total_sightings"] or 0),
+                      "regulars (≥3)": regulars})
+if reid_rows:
+    st.dataframe(pd.DataFrame(reid_rows), hide_index=True, use_container_width=True)
+else:
+    st.info("Re-ID registry empty. The collector populates it as detections come in.")

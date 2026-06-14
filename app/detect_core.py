@@ -6,6 +6,7 @@ detection logic lives in exactly one place.
 from __future__ import annotations
 
 import os
+import re
 import ssl
 import tempfile
 import urllib.request
@@ -43,6 +44,70 @@ def resolve_youtube(url: str) -> str:
     return info["url"]
 
 
+# Browser-ish headers: webcamera24 and skylinewebcams both 403 bare urllib fetchers.
+_BROWSER_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+# skylinewebcams page -> the tokenized HLS it points at (token rotates, so resolve live).
+_SKYLINE_RE = re.compile(r'(?:source|src)\s*[:=]\s*["\']([^"\']*?live[^"\']*?\.m3u8[^"\']*)["\']',
+                         re.IGNORECASE)
+_SKYLINE_HOST = "https://hd-auth.skylinewebcams.com/"
+
+# webcamera24 pages embed a tvkur player; pull its id and build the master playlist.
+_TVKUR_ID_RE = re.compile(r'(?:player\.tvkur\.com/l/|content\.tvkur\.com/l/)([a-z0-9]+)',
+                          re.IGNORECASE)
+_YOUTUBE_RE = re.compile(r'(?:youtube\.com/(?:embed/|watch\?v=)|youtu\.be/)([\w-]{11})')
+
+
+def resolve_skyline(page_url: str) -> str:
+    """Resolve a skylinewebcams.com webcam page to its tokenized HLS .m3u8 URL.
+
+    The page embeds the playlist as `source:"livee.m3u8?a=<token>"` (relative to
+    hd-auth.skylinewebcams.com). The token rotates, so call this each cycle.
+    """
+    html = _http_get(page_url, _BROWSER_HEADERS).decode("utf-8", "replace")
+    m = _SKYLINE_RE.search(html)
+    if not m:
+        raise RuntimeError("skyline: no HLS source found on page (layout changed or geo-blocked)")
+    src = m.group(1)
+    if src.startswith("http"):
+        return src
+    return _SKYLINE_HOST + src.lstrip("/")
+
+
+def resolve_webcamera24(page_url: str) -> str:
+    """Resolve a webcamera24.com page to an HLS URL via its embedded tvkur/YouTube player."""
+    html = _http_get(page_url, _BROWSER_HEADERS).decode("utf-8", "replace")
+    m = _TVKUR_ID_RE.search(html)
+    if m:
+        return f"https://content.tvkur.com/l/{m.group(1)}/master.m3u8"
+    y = _YOUTUBE_RE.search(html)
+    if y:
+        return resolve_youtube(f"https://www.youtube.com/watch?v={y.group(1)}")
+    raise RuntimeError("webcamera24: no tvkur/YouTube player found on page")
+
+
+def resolve_stream(cam: dict) -> str:
+    """Resolve any catalog camera dict to a directly-openable stream URL by `kind`.
+
+    Direct HLS is returned as-is; YouTube/skyline/webcamera24 pages are resolved live.
+    """
+    kind = cam.get("kind", "hls")
+    url = cam["url"]
+    if kind == "hls":
+        return url
+    if kind == "youtube":
+        return resolve_youtube(url)
+    if kind == "skyline":
+        return resolve_skyline(cam.get("page", url))
+    if kind == "webcamera24":
+        return resolve_webcamera24(cam.get("page", url))
+    raise ValueError(f"unknown camera kind: {kind!r}")
+
+
 _SSL_CTX = ssl._create_unverified_context()
 
 # Some live-CDN HLS endpoints (e.g. content.tvkur.com) require a Referer/Origin header
@@ -53,6 +118,8 @@ HEADER_HOSTS = {
                               "Origin":  "https://player.tvkur.com"},
     "livestream.ibb.gov.tr": {"Referer": "https://istanbuluseyret.ibb.gov.tr/",
                               "Origin":  "https://istanbuluseyret.ibb.gov.tr"},
+    "skylinewebcams.com":    {"Referer": "https://www.skylinewebcams.com/",
+                              "Origin":  "https://www.skylinewebcams.com"},
 }
 
 def _http_get(url: str, extra_headers: dict | None = None) -> bytes:
@@ -151,3 +218,24 @@ def annotate(model, frame, conf: float = 0.35):
         frame, conf=conf, classes=list(CLASSES_OF_INTEREST.values()), verbose=False
     )[0]
     return res.plot()
+
+
+if __name__ == "__main__":  # one-time stream-resolution check (run on an open network)
+    import argparse
+
+    from app.cameras import CAMERAS
+
+    ap = argparse.ArgumentParser(description="Resolve a catalog camera to its live HLS URL")
+    ap.add_argument("--resolve", default="", help="comma-separated cam ids (default: all)")
+    args = ap.parse_args()
+
+    ids = [c.strip() for c in args.resolve.split(",") if c.strip()] or list(CAMERAS)
+    for cid in ids:
+        cam = CAMERAS.get(cid)
+        if not cam:
+            print(f"{cid:16s} -> UNKNOWN camera id")
+            continue
+        try:
+            print(f"{cid:16s} -> {resolve_stream(cam)}")
+        except Exception as e:
+            print(f"{cid:16s} -> FAILED ({e})")

@@ -11,7 +11,7 @@
 | [`LOCAL_RUN.md`](LOCAL_RUN.md) | **Quickstart** — run the collector + live dashboard locally, end to end |
 | [`notebooks/turkey_business_activity.ipynb`](notebooks/turkey_business_activity.ipynb) | **Turkey business-activity notebook** — footfall, peak hours, anomalies, dwell-time / prolonged stops, site score |
 | [`app/collector.py`](app/collector.py) | **Continuous collector** — samples cameras 24/7 into SQLite or Firestore (makes the data live) |
-| [`app/streamlit_app.py`](app/streamlit_app.py) | **Live dashboard (local)** — auto-refreshing footfall/anomaly view from SQLite |
+| [`app/streamlit_app.py`](app/streamlit_app.py) | **Live dashboard (local)** — 4 cameras side by side (2×2 grid), last 24h, with per-camera live player + YOLO frame, footfall/anomaly view from SQLite |
 | [`web/`](web/) | **Real-time web dashboard** — Firebase `onSnapshot` live cards + chart |
 | [`app/cameras.py`](app/cameras.py) · [`app/detect_core.py`](app/detect_core.py) · [`app/firebase_store.py`](app/firebase_store.py) | Camera catalog · shared detection core · Firestore writer |
 | [`docs/turkey_cameras.md`](docs/turkey_cameras.md) | Verified Turkey commercial/market camera streams + **live-data architecture** |
@@ -42,7 +42,7 @@ For a true live web app, write counts to Firestore and let the browser subscribe
 ```bash
 export FIREBASE_CREDENTIALS=/path/to/firebase-service-account.json
 python -m app.collector --backend firebase --interval 20 \
-    --only konya_hukumet,kapali_carsi,misir_carsisi,eminonu,istiklal_1   # collector
+    --only konya_hukumet,giresun_gazi,otogar_kavsagi,kadikoy   # collector (the 4 grid cams)
 
 cp web/firebase-config.example.js web/firebase-config.js   # paste your web config
 cd web && python -m http.server 8000                       # open http://localhost:8000

@@ -22,6 +22,32 @@ Confirmed via the community catalog [ramazansancar/canli-kameralar](https://gith
 Full URLs live in `app/cameras.py`. The densest *commerce* (vs. pure tourism) is **Grand Bazaar, Spice
 Bazaar, Eminonu, Istiklal** — start there for business-activity work.
 
+## Other cities (non-IBB sources)
+
+| Location | Type | Source page | `kind` | How it resolves |
+|----------|------|-------------|--------|-----------------|
+| Giresun — Gazi Caddesi | commercial street | `skylinewebcams.com/.../gazi-street.html` | `skyline` | `detect_core.resolve_skyline` scrapes the tokenized `hd-auth.skylinewebcams.com/live.m3u8?a=<token>` playlist from the page (token rotates, so resolved each cycle). |
+| Otogar Kavsagi | junction / transit | `webcamera24.com/.../8044-otogar-kavsagi/` | `webcamera24` | `detect_core.resolve_webcamera24` finds the embedded tvkur (or YouTube) player on the page and builds its HLS master. |
+| Kadikoy | commerce / transit | `istanbuluseyret.ibb.gov.tr/kadikoy/` | `hls` | Direct IBB `livestream.ibb.gov.tr/.../b_kadikoy.stream` playlist (same family as the squares above). |
+
+These three plus **Konya — Hukumet Meydani** are `GRID_CAMERAS` in `app/cameras.py`: the four feeds the
+Streamlit dashboard shows **side by side (2×2 grid) over the last 24 hours**, each with its live player and
+the latest annotated YOLO frame. Start the collector for all four with:
+
+```bash
+python -m app.collector --interval 20 --only konya_hukumet,giresun_gazi,otogar_kavsagi,kadikoy
+```
+
+skylinewebcams and webcamera24 both 403 bare fetchers and rotate tokens, so the resolvers send a browser
+User-Agent + Referer and run on every cycle. Verify resolution once on an open network with:
+
+```bash
+python -m app.detect_core --resolve giresun_gazi,otogar_kavsagi
+```
+
+If a page layout ever changes and a resolver returns nothing, open the page, copy the player id / m3u8 by
+hand, and pin `url`/`embed` directly on the catalog entry.
+
 ## The two sources you gave me
 
 1. **`webcamera24.com/.../sarraflar-yeralti-carsisi` (Konya, Hukumet Meydani).** webcamera24 pages are

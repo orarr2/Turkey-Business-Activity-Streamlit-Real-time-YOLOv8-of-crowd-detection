@@ -51,18 +51,25 @@ Expect lines like `konya_hukumet: person=23 vehicles=2` every 20s. `Ctrl+C` to s
 **Terminal 1 — collector (crowded cameras, leave running):**
 ```bash
 python -m app.collector --backend firebase --interval 20 \
-    --only konya_hukumet,kapali_carsi,misir_carsisi,eminonu,istiklal_1
+    --only konya_hukumet,giresun_gazi,otogar_kavsagi,kadikoy
 ```
-**Terminal 2 — dashboard:**
+**Terminal 2 — dashboards:**
 ```bash
-cd web && python -m http.server 8000
+streamlit run app/streamlit_app.py        # 4 cameras side by side, last 24h
+cd web && python -m http.server 8000      # or the Firebase web cards
 ```
-Open **http://localhost:8000** — live cards + chart, updating in real time.
+Open the Streamlit URL it prints (or **http://localhost:8000** for the web cards) — both update live.
+The Streamlit grid shows the four `GRID_CAMERAS` (Konya, Giresun, Otogar Kavsagi, Kadikoy) so collect
+those four to fill it.
 
 ## Camera ids (from `app/cameras.py`)
-`konya_hukumet`, `konya_yeralti`, `taksim`, `beyazit_meydan`, `eminonu`,
-`kapali_carsi` (Grand Bazaar), `misir_carsisi` (Spice Bazaar), `istiklal_1`, `sultanahmet_1`.
+**Dashboard grid (`GRID_CAMERAS`):** `konya_hukumet`, `giresun_gazi`, `otogar_kavsagi`, `kadikoy`.
+Others: `taksim`, `beyazit_meydan`, `kapali_carsi` (Grand Bazaar), `misir_carsisi` (Spice Bazaar),
+`sultanahmet_1`, `eyup_sultan`, `uskudar`.
 Drop `--only` to run all of them.
+
+> `giresun_gazi` (skylinewebcams) and `otogar_kavsagi` (webcamera24) resolve from their public pages
+> and rotate tokens — verify once with `python -m app.detect_core --resolve giresun_gazi,otogar_kavsagi`.
 
 ## Troubleshooting
 - **`MISS (empty frame)`** on every round → that stream is down or your network blocks it. Try another
