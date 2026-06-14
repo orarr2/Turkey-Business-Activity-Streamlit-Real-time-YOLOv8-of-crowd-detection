@@ -10,33 +10,44 @@
 //   embed : iframe URL for the live player (all four are tvkur, globally reachable).
 //   page  : the public webcam page (clickable fallback / source link).
 
+// Helper: tvkur player URL with autoplay+mute (Chrome blocks unmuted autoplay).
+const tvkur = (id) => `https://player.tvkur.com/l/${id}?autoplay=true&mute=true`;
+
+// Helper: route iframe content through corsproxy.io to strip X-Frame-Options.
+// Skylinewebcams and istanbuluseyret.ibb.gov.tr both set frame-ancestors CSP that
+// blocks our localhost from iframing them directly — going through a public
+// CORS/XFO proxy makes the iframe load. Caveats: rate-limited (free tier), and
+// some JS inside the proxied page may still try to talk back to the original
+// origin and fail. For production, replace with a self-hosted proxy.
+const PROXY = (url) => "https://corsproxy.io/?" + encodeURIComponent(url);
+
 export const GRID_CAMERAS = [
   {
     id:    "konya_hukumet",
     name:  "Konya — Hükümet Meydanı / Sarraflar Yeraltı Çarşısı",
     city:  "Konya",
-    embed: "https://player.tvkur.com/l/c77i84vbb2nj4i0fr80g",
+    embed: tvkur("c77i84vbb2nj4i0fr80g"),
     page:  "https://webcamera24.com/camera/turkey/8043-sarraflar-yeralti-carsisi/",
+  },
+  {
+    id:    "giresun_gazi",
+    name:  "Giresun — Gazi Caddesi",
+    city:  "Giresun",
+    embed: PROXY("https://www.skylinewebcams.com/en/webcam/turkey/giresun/giresun/gazi-street.html"),
+    page:  "https://www.skylinewebcams.com/en/webcam/turkey/giresun/giresun/gazi-street.html",
   },
   {
     id:    "otogar_kavsagi",
     name:  "Konya — Otogar Kavşağı",
     city:  "Konya",
-    embed: "https://player.tvkur.com/l/c77i91vbb2nj4i0fr81g",
+    embed: tvkur("c77i91vbb2nj4i0fr81g"),
     page:  "https://webcamera24.com/camera/turkey/8044-otogar-kavsagi/",
   },
   {
-    id:    "konya_kulturpark",
-    name:  "Konya — Kültürpark",
-    city:  "Konya",
-    embed: "https://player.tvkur.com/l/c77i6hb84cnrb6mlji3g",
-    page:  "https://webcamera24.com/camera/turkey/8058-kulturpark/",
-  },
-  {
-    id:    "konya_millet_caddesi",
-    name:  "Konya — Millet Caddesi / Hastane Kavşağı",
-    city:  "Konya",
-    embed: "https://player.tvkur.com/l/c77i9cfbb2nj4i0fr82g",
-    page:  "https://webcamera24.com/camera/turkey/8046-millet-caddesi/",
+    id:    "kadikoy",
+    name:  "Kadıköy",
+    city:  "Istanbul",
+    embed: PROXY("https://istanbuluseyret.ibb.gov.tr/kadikoy/"),
+    page:  "https://istanbuluseyret.ibb.gov.tr/kadikoy/",
   },
 ];

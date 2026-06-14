@@ -148,8 +148,13 @@ CAMERAS = {
 }
 
 # Cameras the live dashboard shows side by side (2x2 grid), in display order.
-# All four are webcamera24-backed tvkur streams — globally reachable, not geo-blocked.
-GRID_CAMERAS = ["konya_hukumet", "otogar_kavsagi", "konya_kulturpark", "konya_millet_caddesi"]
+# Konya + Otogar are tvkur-backed (the collector + dashboard both work end-to-end).
+# Giresun + Kadikoy are reachable in the user's BROWSER via a CORS/XFO proxy
+# (corsproxy.io) — the iframe shows live video, but the Python collector still
+# cannot fetch their HLS m3u8 from this network, so their footfall/anomaly tiles
+# stay empty. To get YOLO counts for Giresun/Kadikoy too, run the collector from
+# a Turkey-routed IP.
+GRID_CAMERAS = ["konya_hukumet", "giresun_gazi", "otogar_kavsagi", "kadikoy"]
 
 
 def active_cameras():
