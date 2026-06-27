@@ -14,7 +14,13 @@ data/
 *.mp4
 *.jpg
 
-# Firebase secrets / local env — never commit
+# Dashboard runtime snapshots (anomalies + returning visitors). Keep the
+# directory structure (via .gitkeep), drop the images and manifests.
+web/snapshots/**/*.jpg
+web/snapshots/**/*.json
+!web/snapshots/**/.gitkeep
+
+# Firebase secrets / local env - never commit
 firebase-service-account.json
 *serviceAccount*.json
 *firebase-adminsdk*.json

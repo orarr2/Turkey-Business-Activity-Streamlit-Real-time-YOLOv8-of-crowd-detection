@@ -1,7 +1,7 @@
-# Firebase setup — live updating data
+# Firebase setup - live updating data
 
 Architecture with Firebase (Firestore pushes updates to the browser in real time, so the
-dashboard is truly live — no polling):
+dashboard is truly live - no polling):
 
 ```
  live streams → app/collector.py → Firestore ─┬─ web/  (onSnapshot, instant updates)
@@ -15,7 +15,7 @@ dashboard is truly live — no polling):
 
 1. https://console.firebase.google.com → **Add project**.
 2. **Build → Firestore Database → Create database** (start in *test mode* for development;
-   lock down rules before any public deploy — see §5).
+   lock down rules before any public deploy - see §5).
 
 ## 2. Backend credentials (for the collector)
 
@@ -51,7 +51,7 @@ cd web && python -m http.server 8000
 # open http://localhost:8000
 ```
 
-The page subscribes with `onSnapshot` — every collector write appears immediately, no refresh.
+The page subscribes with `onSnapshot` - every collector write appears immediately, no refresh.
 
 ## 5. Security rules (before deploying publicly) — **this is what protects your DB**
 

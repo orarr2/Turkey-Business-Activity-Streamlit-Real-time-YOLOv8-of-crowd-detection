@@ -1,4 +1,4 @@
-# Run locally — Turkey footfall (Firebase)
+# Run locally - Turkey footfall (Firebase)
 
 Everything you need to run the collector + live dashboard on your own machine.
 
@@ -22,7 +22,7 @@ pip install -r requirements.txt
 
 ## 3. Provide your own Firebase config
 
-The repo ships two placeholder templates — fill in **your** project values from
+The repo ships two placeholder templates - fill in **your** project values from
 **Firebase Console → Project settings → Your apps → Web app → SDK setup**.
 
 ```bash
@@ -47,28 +47,35 @@ python -m app.collector --interval 20 --only konya_hukumet
 Expect lines like `konya_hukumet: person=23 vehicles=2  new=… seen_again=…` every 20s.
 `Ctrl+C` to stop. (First run downloads the YOLO weights `yolov8n.pt`, ~6 MB.)
 
-## 6. Run for real — two terminals
+## 6. Run for real - two terminals
 
 Anyone who opens the dashboard sees the counts and charts the collector has been
-accumulating in Firestore — it does *not* reset per visitor.
+accumulating in Firestore - it does *not* reset per visitor.
 
-**Terminal 1 — collector (the 4 grid cameras, leave running):**
+**Terminal 1 - collector (the 4 grid cameras, leave running):**
 ```bash
 python -m app.collector --interval 20 \
     --only konya_hukumet,giresun_gazi,otogar_kavsagi,kadikoy
 ```
 The collector pushes three things to Firestore each sample:
-- `footfall/{auto-id}` — append-only history (24h chart + anomaly z-score)
-- `latest/{cam_id}` — overwritten each sample (the big "now" numbers)
-- `reid_stats/{cam_id}` — unique entities + total sightings + regulars
+- `footfall/{auto-id}` - append-only history (24h chart + anomaly z-score)
+- `latest/{cam_id}` - overwritten each sample (the big "now" numbers)
+- `reid_stats/{cam_id}` - unique entities + total sightings + regulars
 
-**Terminal 2 — the 4-camera live HTML dashboard:**
+**Terminal 2 - the 4-camera live HTML dashboard:**
 ```bash
-cd web && python -m http.server 8000
+python serve.py             # one-shot launcher: serves web/ on :8000 and opens the browser
+# alternatives:
+#   python serve.py --port 8765        pick a different port
+#   python serve.py --no-browser       skip auto-opening the browser
+#   cd web && python -m http.server 8000   plain http.server, same result, no niceties
 ```
 Open **http://localhost:8000**. 2×2 grid: live video iframe + people/vehicle counts +
 anomaly badge + mini chart per camera, a combined 24h chart for all four cameras, and
-the re-ID summary table. Everything updates via `onSnapshot` — no polling, no refresh.
+the re-ID summary table. Everything updates via `onSnapshot` - no polling, no refresh.
+
+If the browser shows `ERR_CONNECTION_REFUSED` you just don't have anything bound to
+port 8000 yet - run `python serve.py` from the project root and refresh.
 
 ## Camera ids (from `app/cameras.py`)
 **Dashboard grid (`GRID_CAMERAS`):** `konya_hukumet`, `giresun_gazi`, `otogar_kavsagi`, `kadikoy`.
@@ -77,7 +84,7 @@ Others: `taksim`, `beyazit_meydan`, `kapali_carsi` (Grand Bazaar), `misir_carsis
 Drop `--only` to run all of them.
 
 > `giresun_gazi` (skylinewebcams) and `otogar_kavsagi` (webcamera24) resolve from their public pages
-> and rotate tokens — verify once with `python -m app.detect_core --resolve giresun_gazi,otogar_kavsagi`.
+> and rotate tokens - verify once with `python -m app.detect_core --resolve giresun_gazi,otogar_kavsagi`.
 
 ## Troubleshooting
 - **`MISS (empty frame)`** on every round → that stream is down or your network blocks it. Try another

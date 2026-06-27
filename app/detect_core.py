@@ -114,12 +114,14 @@ _SSL_CTX = ssl._create_unverified_context()
 # that ffmpeg-via-cv2 can't always pass on Windows. For those hosts we fetch the latest
 # .ts segment manually and decode locally.
 HEADER_HOSTS = {
-    "content.tvkur.com":     {"Referer": "https://player.tvkur.com/",
-                              "Origin":  "https://player.tvkur.com"},
-    "livestream.ibb.gov.tr": {"Referer": "https://istanbuluseyret.ibb.gov.tr/",
-                              "Origin":  "https://istanbuluseyret.ibb.gov.tr"},
-    "skylinewebcams.com":    {"Referer": "https://www.skylinewebcams.com/",
-                              "Origin":  "https://www.skylinewebcams.com"},
+    "content.tvkur.com":          {"Referer": "https://player.tvkur.com/",
+                                   "Origin":  "https://player.tvkur.com"},
+    "livestream.ibb.gov.tr":      {"Referer": "https://istanbuluseyret.ibb.gov.tr/",
+                                   "Origin":  "https://istanbuluseyret.ibb.gov.tr"},
+    "kamerayayin.ibb.istanbul":   {"Referer": "https://istanbuluseyret.ibb.gov.tr/",
+                                   "Origin":  "https://istanbuluseyret.ibb.gov.tr"},
+    "skylinewebcams.com":         {"Referer": "https://www.skylinewebcams.com/",
+                                   "Origin":  "https://www.skylinewebcams.com"},
 }
 
 def _http_get(url: str, extra_headers: dict | None = None) -> bytes:
@@ -184,7 +186,7 @@ def iter_frames(stream_url: str, max_frames: int):
 
     For header-required hosts (content.tvkur.com, livestream.ibb.gov.tr, skylinewebcams.com)
     cv2.VideoCapture(url) can't pass Referer/Origin on Windows, so we download the latest
-    few .ts segments with the right headers and decode them locally — yielding frames in
+    few .ts segments with the right headers and decode them locally - yielding frames in
     arrival order. For normal HLS we open the URL directly with cv2 and read.
 
     Used by the dwell-time / tracking section of the notebook so ByteTrack can see the

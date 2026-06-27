@@ -1,7 +1,7 @@
 """Firebase (Firestore) backend for the live footfall app.
 
 Firestore is a great fit for "live updating data": the web frontend subscribes with
-onSnapshot() and receives every new write in real time — no polling. The collector
+onSnapshot() and receives every new write in real time - no polling. The collector
 writes here; the browser updates instantly.
 
 Collections this writes (the HTML dashboard in web/ subscribes to all three):
