@@ -58,45 +58,111 @@ FREE_TIER_WRITES_PER_DAY = 20_000
 SNAPSHOTS_ROOT     = Path("web/snapshots")
 ANOMALY_DIR        = SNAPSHOTS_ROOT / "anomalies"
 RETURNING_DIR      = SNAPSHOTS_ROOT / "returning"
-RETURNING_GAP_SEC  = 300   # save a returning-visitor image only when gap >= 5 min
+
+# ---- Returning-visitor gates (each saved image is a real return event) -----
+# The previous defaults (gap >= 5 min, no other gates) flooded the folders.
+# These four gates intersect to require: long absence + strong appearance
+# match + a real history (not a first-time match) + per-entity cooldown so
+# the same entity doesn't get saved every cycle.
+RETURNING_GAP_SEC              = 900   # >= 15 min absence (was 5 min)
+RETURNING_MIN_SIMILARITY       = 0.96  # >= 0.96 cosine (was 0.92 default match)
+RETURNING_MIN_PRIOR_SIGHTINGS  = 2     # entity must have been seen >= 2 times before
+RETURNING_PER_ENTITY_COOLDOWN  = 1800  # don't save same eid more than once per 30 min
 
 
 class AnomalyTracker:
-    """Per-camera rolling-window z-score detector.
+    """Per-camera anomaly detector with layered gates that ALL must pass.
 
-    Matches the dashboard's flagAnomalies() so the same samples get flagged in
-    Python and JS: window=12 most recent people counts, trip if |z| > 2.5.
+    The bare z-score (the previous default of z>2.5 over a 12-sample window)
+    fires on every minor wobble during quiet periods - 1 person walking past
+    an empty plaza yields z=8 because the baseline std was 0.3. This class
+    intersects six gates so only meaningful crowd spikes light up:
+
+      * window           : larger context (default 30 samples = 10 min)
+      * z_threshold      : higher significance bar (default 3.5, was 2.5)
+      * spike_only       : ignore drops to zero (occlusion / detection misses)
+      * min_people       : absolute floor on the spike value (default 5 people)
+      * min_delta        : spike must exceed baseline by at least this many
+                           people (default 5) - kills the "noise math" gate
+      * min_std          : optional opt-in gate. Set > 0 only when you also
+                           want to suppress *busy-baseline-but-low-variance*
+                           cameras; the other gates already kill the
+                           low-activity noise cases without it (default 0).
+      * cooldown_sec     : after a flagged anomaly, suppress flags on the same
+                           camera for cooldown_sec (default 300 = 5 min) - one
+                           real event no longer paints the next 4 frames red
+
+    All thresholds are CLI-tunable (see --anomaly-* flags). The dashboard's
+    JS-side fallback in web/app.js applies the same gates so legacy rows
+    written before this fix don't show up as anomalies either.
     """
 
-    def __init__(self, window: int = 12, z_threshold: float = 2.5, warmup: int = 6):
-        self.window  = window
-        self.z       = z_threshold
-        self.warmup  = warmup
+    def __init__(self, window: int = 30, z_threshold: float = 3.5, warmup: int = 10,
+                 min_people: int = 5, min_delta: float = 5.0, min_std: float = 0.0,
+                 spike_only: bool = True, cooldown_sec: float = 300):
+        self.window       = window
+        self.z            = z_threshold
+        self.warmup       = warmup
+        self.min_people   = min_people
+        self.min_delta    = min_delta
+        self.min_std      = min_std
+        self.spike_only   = spike_only
+        self.cooldown_sec = cooldown_sec
         self._history: dict[str, list[int]] = {}
+        # last "real time" we flagged a given camera, for the cooldown gate.
+        self._last_flagged: dict[str, float] = {}
 
     def push_and_check(self, cam_id: str, people: int | None) -> tuple[bool, dict]:
-        """Append `people` and report whether it is an anomaly vs the window.
+        """Append `people` and report whether it is a *real* anomaly.
 
-        Returns (is_anomaly, debug) where debug has window stats for logging.
+        Returns (is_anomaly, debug) where debug names the gate that decided.
         """
         if people is None:
-            return False, {}
+            return False, {"reason": "no_sample"}
         hist = self._history.setdefault(cam_id, [])
+        debug: dict = {"window_size": len(hist), "people": int(people)}
+
         # Score *before* appending - we compare the new value to the window
         # that preceded it (otherwise the value would skew its own baseline).
-        is_anom = False
-        debug = {"window_size": len(hist)}
-        if len(hist) >= self.warmup:
-            mu = sum(hist) / len(hist)
-            sd = (sum((x - mu) ** 2 for x in hist) / len(hist)) ** 0.5
-            if sd > 0:
-                z = abs((people - mu) / sd)
-                debug.update({"mean": round(mu, 2), "std": round(sd, 2), "z": round(z, 2)})
-                is_anom = z > self.z
-        hist.append(int(people))
-        if len(hist) > self.window:
-            hist.pop(0)
-        return is_anom, debug
+        try:
+            if len(hist) < self.warmup:
+                return False, {**debug, "reason": "warmup"}
+            mu  = sum(hist) / len(hist)
+            sd  = (sum((x - mu) ** 2 for x in hist) / len(hist)) ** 0.5
+            delta = people - mu
+            z = (delta / sd) if sd > 0 else 0.0
+            debug.update({"mean": round(mu, 2), "std": round(sd, 2),
+                          "delta": round(delta, 2), "z": round(z, 2)})
+
+            # --- Gate 1: spike only (drops to zero are usually misses) ------
+            if self.spike_only and delta <= 0:
+                return False, {**debug, "reason": "not_a_spike"}
+            # --- Gate 2: absolute floor on people in the spike --------------
+            if people < self.min_people:
+                return False, {**debug, "reason": "below_min_people"}
+            # --- Gate 3: baseline must actually have variation --------------
+            if sd < self.min_std:
+                return False, {**debug, "reason": "quiet_baseline"}
+            # --- Gate 4: spike must be substantial in absolute terms --------
+            if abs(delta) < self.min_delta:
+                return False, {**debug, "reason": "small_delta"}
+            # --- Gate 5: z must clear the significance bar ------------------
+            z_check = z if self.spike_only else abs(z)
+            if z_check < self.z:
+                return False, {**debug, "reason": "below_z"}
+            # --- Gate 6: cooldown since the previous flag on this camera ---
+            now  = time.time()
+            last = self._last_flagged.get(cam_id, 0.0)
+            if now - last < self.cooldown_sec:
+                return False, {**debug, "reason": "cooldown",
+                               "cooldown_remaining": round(self.cooldown_sec - (now - last), 1)}
+
+            self._last_flagged[cam_id] = now
+            return True, {**debug, "reason": "anomaly"}
+        finally:
+            hist.append(int(people))
+            if len(hist) > self.window:
+                hist.pop(0)
 
 
 def _ts_filename(ts_iso: str) -> str:
@@ -152,14 +218,50 @@ def _save_returning_visitor(cam_id: str, ts_iso: str, entity_id: int,
     manifest.write_text(json.dumps(items, indent=2))
 
 
+def _passes_returning_gates(r, gap_min_sec: float, sim_min: float,
+                            min_prior: int, cooldown_sec: float,
+                            last_save_for_eid: dict) -> tuple[bool, str]:
+    """Return (passes, reason). All four gates must pass for a save.
+
+    - r.gap_seconds  : absence since previous sighting at this camera
+    - r.similarity   : cosine of the match (1.0 = brand new entity)
+    - r.sightings    : sightings AFTER this match (so prior == sightings-1)
+    - cooldown       : per-entity rate-limit to avoid runs of identical saves
+    """
+    if r.is_new:                              return False, "new_entity"
+    if r.gap_seconds is None:                 return False, "no_gap"
+    if r.gap_seconds < gap_min_sec:           return False, "short_gap"
+    if r.similarity is not None and r.similarity < sim_min:
+                                              return False, "weak_match"
+    prior = max(0, (r.sightings or 1) - 1)
+    if prior < min_prior:                     return False, "few_prior_sightings"
+    now  = time.time()
+    last = last_save_for_eid.get(r.entity_id, 0.0)
+    if now - last < cooldown_sec:             return False, "per_entity_cooldown"
+    last_save_for_eid[r.entity_id] = now
+    return True, "save"
+
+
 def sample_once(model, cam_id: str, cam: dict, firebase,
                 reid: ReidStore | None = None, conf: float = 0.35,
                 anomaly: AnomalyTracker | None = None,
-                save_snapshots: bool = True) -> None:
+                save_snapshots: bool = True,
+                returning_gap_sec: float = RETURNING_GAP_SEC,
+                returning_sim_min: float = RETURNING_MIN_SIMILARITY,
+                returning_min_prior: int  = RETURNING_MIN_PRIOR_SIGHTINGS,
+                returning_cooldown_sec: float = RETURNING_PER_ENTITY_COOLDOWN,
+                _returning_last_save: dict | None = None) -> None:
     ts = dt.datetime.now(dt.timezone.utc).isoformat()
     new_ids: list[int] = []
     seen_again: list[int] = []
     frame = None
+    # Per-entity-cooldown state. Caller can pin a shared dict across calls
+    # via _returning_last_save; if omitted we attach one to sample_once itself.
+    if _returning_last_save is None:
+        _returning_last_save = getattr(sample_once, "_returning_state",
+                                       {}).setdefault(cam_id, {})
+        sample_once._returning_state = getattr(sample_once, "_returning_state", {})
+        sample_once._returning_state[cam_id] = _returning_last_save
     try:
         frame = grab_frame(resolve_stream(cam))
         if frame is None:
@@ -171,20 +273,23 @@ def sample_once(model, cam_id: str, cam: dict, firebase,
             results = reid.update_from_frame(cam_id, frame, boxes)
             for i, r in enumerate(results):
                 (new_ids if r.is_new else seen_again).append(r.entity_id)
-                # Save a "returning visitor" image only when the entity hasn't
-                # been seen for at least RETURNING_GAP_SEC: this gates out the
-                # noisy short-term re-matches (someone lingering, neighbours in
-                # the same frame) and keeps the folder full of genuine returns.
-                if save_snapshots and (not r.is_new) \
-                        and r.gap_seconds is not None \
-                        and r.gap_seconds >= RETURNING_GAP_SEC \
-                        and i < len(boxes):
-                    try:
-                        _save_returning_visitor(cam_id, ts, r.entity_id,
-                                                r.sightings, r.gap_seconds,
-                                                frame, boxes[i])
-                    except Exception as e:
-                        print(f"  ! returning save failed for {cam_id} eid{r.entity_id}: {e}")
+                # Save a "returning visitor" image only when ALL four gates
+                # pass: long absence + strong appearance match + the entity
+                # already has a history + per-entity cooldown isn't active.
+                # This kills the previous flood where every consecutive match
+                # produced a folder entry.
+                if save_snapshots and i < len(boxes):
+                    passes, _why = _passes_returning_gates(
+                        r, returning_gap_sec, returning_sim_min,
+                        returning_min_prior, returning_cooldown_sec,
+                        _returning_last_save)
+                    if passes:
+                        try:
+                            _save_returning_visitor(cam_id, ts, r.entity_id,
+                                                    r.sightings, r.gap_seconds,
+                                                    frame, boxes[i])
+                        except Exception as e:
+                            print(f"  ! returning save failed for {cam_id} eid{r.entity_id}: {e}")
     except Exception as e:
         # network blip / stream hiccup -> record a miss, keep going
         print(f"[{ts}] {cam_id}: MISS ({e})")
@@ -244,7 +349,51 @@ def main() -> None:
                     help="YOLO confidence threshold (lower = catches more small/distant objects)")
     ap.add_argument("--no-snapshots", action="store_true",
                     help="skip writing anomaly / returning-visitor images to web/snapshots/")
+    ap.add_argument("--prune-snapshots", action="store_true",
+                    help="delete every file under web/snapshots/{anomalies,returning}/* "
+                         "before starting - useful after tuning the gates")
+    # ---- anomaly tuning ---------------------------------------------------
+    ag = ap.add_argument_group("anomaly gating (each gate must pass for a snapshot)")
+    ag.add_argument("--anomaly-z",          type=float, default=3.5,
+                    help="z-score significance bar (default 3.5; was 2.5)")
+    ag.add_argument("--anomaly-window",     type=int,   default=30,
+                    help="rolling window length in samples (default 30 = 10 min @ 20s)")
+    ag.add_argument("--anomaly-min-people", type=int,   default=5,
+                    help="absolute people-count floor for the spike (default 5)")
+    ag.add_argument("--anomaly-min-delta",  type=float, default=5.0,
+                    help="spike must exceed baseline by this many people (default 5)")
+    ag.add_argument("--anomaly-min-std",    type=float, default=0.0,
+                    help="baseline must have std >= this (default 0 = no gate; only "
+                         "enable if a stable busy camera is over-flagging)")
+    ag.add_argument("--anomaly-cooldown",   type=float, default=300.0,
+                    help="seconds between flagged anomalies per camera (default 300 = 5 min)")
+    ag.add_argument("--anomaly-allow-drops", action="store_true",
+                    help="also flag sharp DROPS (z<0); default is spikes only")
+    # ---- returning-visitor tuning ----------------------------------------
+    rg = ap.add_argument_group("returning-visitor gating")
+    rg.add_argument("--returning-gap-min",       type=float, default=15.0,
+                    help="minimum absence before a re-match counts as 'returning', "
+                         "in minutes (default 15)")
+    rg.add_argument("--returning-min-similarity", type=float, default=0.96,
+                    help="match must be >= this cosine for save (default 0.96)")
+    rg.add_argument("--returning-min-prior",     type=int, default=2,
+                    help="entity must have >= this many prior sightings before save (default 2)")
+    rg.add_argument("--returning-per-entity-cooldown-min", type=float, default=30.0,
+                    help="don't save the same entity_id more than once per N minutes (default 30)")
     args = ap.parse_args()
+
+    if args.prune_snapshots:
+        import shutil
+        n = 0
+        for d in [ANOMALY_DIR, RETURNING_DIR]:
+            if d.is_dir():
+                for sub in d.iterdir():
+                    if sub.is_dir():
+                        for f in sub.iterdir():
+                            if f.is_file():
+                                try: f.unlink(); n += 1
+                                except Exception: pass
+        print(f"Pruned {n} existing snapshot files from web/snapshots/.")
 
     # Rate-limit guard: never let the collector hammer Firestore faster than the
     # floor, regardless of what the user passed.
@@ -267,12 +416,29 @@ def main() -> None:
     if not args.no_reid:
         reid = ReidStore(args.reid_db, threshold=args.reid_threshold)
 
-    anomaly        = AnomalyTracker()
-    save_snapshots = not args.no_snapshots
+    anomaly = AnomalyTracker(
+        window       = args.anomaly_window,
+        z_threshold  = args.anomaly_z,
+        min_people   = args.anomaly_min_people,
+        min_delta    = args.anomaly_min_delta,
+        min_std      = args.anomaly_min_std,
+        spike_only   = not args.anomaly_allow_drops,
+        cooldown_sec = args.anomaly_cooldown,
+    )
+    save_snapshots          = not args.no_snapshots
+    returning_gap_sec       = args.returning_gap_min * 60
+    returning_cooldown_sec  = args.returning_per_entity_cooldown_min * 60
 
     print(f"Collector started. {len(cams)} camera(s): {list(cams)}")
     print(f"interval={args.interval}s, reid={'on' if reid else 'off'}, "
           f"conf={args.conf}, snapshots={'on' if save_snapshots else 'off'}")
+    print(f"anomaly gates: z>={args.anomaly_z}, window={args.anomaly_window}, "
+          f"min_people={args.anomaly_min_people}, min_delta={args.anomaly_min_delta}, "
+          f"min_std={args.anomaly_min_std}, cooldown={args.anomaly_cooldown}s")
+    print(f"returning gates: gap>={args.returning_gap_min}min, "
+          f"similarity>={args.returning_min_similarity}, "
+          f"prior_sightings>={args.returning_min_prior}, "
+          f"per-entity cooldown={args.returning_per_entity_cooldown_min}min")
 
     # Project the daily write volume and warn if it would exceed the free tier.
     writes_per_round = len(cams) * (3 if reid else 2)
@@ -290,7 +456,11 @@ def main() -> None:
             for cam_id, cam in cams.items():
                 sample_once(model, cam_id, cam, firebase, reid=reid,
                             conf=args.conf, anomaly=anomaly,
-                            save_snapshots=save_snapshots)
+                            save_snapshots=save_snapshots,
+                            returning_gap_sec      = returning_gap_sec,
+                            returning_sim_min      = args.returning_min_similarity,
+                            returning_min_prior    = args.returning_min_prior,
+                            returning_cooldown_sec = returning_cooldown_sec)
             time.sleep(max(0, args.interval - (time.time() - round_start)))
     except KeyboardInterrupt:
         print("\nStopped.")
