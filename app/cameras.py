@@ -6,7 +6,7 @@ points at `livestream.ibb.gov.tr/cam_turistik/b_*.stream/playlist.m3u8`. The Emi
 Istiklal cameras are no longer listed and have been removed.
 
 Note: livestream.ibb.gov.tr returns HTTP 404 (not 403) for these stream paths when accessed
-from non-Turkey IPs — they appear to be geo-restricted. Run from a Turkey-routed IP for live
+from non-Turkey IPs - they appear to be geo-restricted. Run from a Turkey-routed IP for live
 data; on any other network you'll just see MISS rows in the collector.
 
 Each entry: kind = one of
@@ -43,10 +43,24 @@ CAMERAS = {
     },
     # --- Istanbul: high-footfall commerce & markets (IBB public HLS, new b_* prefix) ---
     "taksim": {
-        "name": "Taksim Meydani",
+        "name": "Taksim Meydani (legacy host - 404 outside Turkey)",
         "city": "Istanbul",
         "kind": "hls",
         "url": "https://livestream.ibb.gov.tr/cam_turistik/b_taksim_meydan.stream/playlist.m3u8",
+        "type": "square/retail",
+    },
+    # --- IBB migrated to kamerayayin.ibb.istanbul (2025-2026). The new -yeni pages
+    # use this domain, return CORS *, and are reachable from any country - much
+    # better than the legacy livestream.ibb.gov.tr endpoints above. ---
+    "taksim_yeni": {
+        "name": "Taksim Meydani (live)",
+        "city": "Istanbul",
+        "kind": "hls",
+        "url": "https://kamerayayin.ibb.istanbul/turistikcam/taksim.stream/playlist.m3u8",
+        "page": "https://istanbuluseyret.ibb.gov.tr/taksim-yeni/",
+        # the public page sets X-Frame-Options: SAMEORIGIN, so no iframe embed.
+        # The web/ dashboard plays this HLS directly with hls.js in its own <video>.
+        "embed": None,
         "type": "square/retail",
     },
     "beyazit_meydan": {
@@ -71,10 +85,19 @@ CAMERAS = {
         "type": "market",
     },
     "sultanahmet_1": {
-        "name": "Sultanahmet",
+        "name": "Sultanahmet (legacy host - 404 outside Turkey)",
         "city": "Istanbul",
         "kind": "hls",
         "url": "https://livestream.ibb.gov.tr/cam_turistik/b_sultanahmet.stream/playlist.m3u8",
+        "type": "tourist square",
+    },
+    "sultanahmet_1_yeni": {
+        "name": "Sultanahmet (live)",
+        "city": "Istanbul",
+        "kind": "hls",
+        "url": "https://kamerayayin.ibb.istanbul/turistikcam/sultanahmet1.stream/playlist.m3u8",
+        "page": "https://istanbuluseyret.ibb.gov.tr/sultanahmet-1-yeni/",
+        "embed": None,
         "type": "tourist square",
     },
     "kadikoy": {
@@ -113,7 +136,7 @@ CAMERAS = {
         "embed": "https://player.tvkur.com/l/c77i91vbb2nj4i0fr81g",
         "type": "junction/transit",
     },
-    # --- Konya Kulturpark (webcamera24 8058) — replaces Giresun in the grid because
+    # --- Konya Kulturpark (webcamera24 8058) - replaces Giresun in the grid because
     # skylinewebcams geo-blocks Israel. tvkur id: c77i6hb84cnrb6mlji3g. ---
     "konya_kulturpark": {
         "name": "Konya - Kulturpark",
@@ -124,7 +147,7 @@ CAMERAS = {
         "embed": "https://player.tvkur.com/l/c77i6hb84cnrb6mlji3g",
         "type": "park/commercial",
     },
-    # --- Konya Millet Caddesi / Hastane Kavsagi (webcamera24 8046) — replaces Kadikoy
+    # --- Konya Millet Caddesi / Hastane Kavsagi (webcamera24 8046) - replaces Kadikoy
     # in the grid because IBB streams geo-block Israel. tvkur id: c77i9cfbb2nj4i0fr82g. ---
     "konya_millet_caddesi": {
         "name": "Konya - Millet Caddesi / Hastane Kavsagi",
@@ -148,13 +171,16 @@ CAMERAS = {
 }
 
 # Cameras the live dashboard shows side by side (2x2 grid), in display order.
-# Konya + Otogar are tvkur-backed (the collector + dashboard both work end-to-end).
-# Giresun + Kadikoy are reachable in the user's BROWSER via a CORS/XFO proxy
-# (corsproxy.io) — the iframe shows live video, but the Python collector still
-# cannot fetch their HLS m3u8 from this network, so their footfall/anomaly tiles
-# stay empty. To get YOLO counts for Giresun/Kadikoy too, run the collector from
-# a Turkey-routed IP.
-GRID_CAMERAS = ["konya_hukumet", "giresun_gazi", "otogar_kavsagi", "kadikoy"]
+# All four are tvkur-backed: the collector reaches the HLS master playlist from
+# any network, and the browser embeds the live player iframe directly (no proxy).
+#
+# Previous grid used giresun_gazi (skylinewebcams) and kadikoy (IBB), but both
+# are geo-restricted to Turkey IPs *and* set frame-ancestors CSP that blocks
+# localhost iframing - they could neither display nor receive counts from this
+# network. They remain in CAMERAS above for runs from a Turkey-routed IP and
+# can be put back in this list if/when you deploy from that geography.
+GRID_CAMERAS = ["konya_hukumet", "otogar_kavsagi",
+                "sultanahmet_1_yeni", "taksim_yeni"]
 
 
 def active_cameras():

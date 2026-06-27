@@ -1,10 +1,10 @@
 """Appearance-based re-identification ("have I seen this person/car before?").
 
-Approach — deliberately dependency-free so the notebook + collector + dashboard can all
+Approach - deliberately dependency-free so the notebook + collector + dashboard can all
 use it without a torch detour:
 
   1. Per detection, crop the bounding box and normalize the crop size.
-  2. Build a *masked* HSV color histogram (8x8x8 bins) — pixels with V<30 are dropped
+  2. Build a *masked* HSV color histogram (8x8x8 bins) - pixels with V<30 are dropped
      so the night-time sodium-light dominant background doesn't swamp the signature.
   3. Append (aspect_ratio, normalized_area) so persons of similar color but different
      build don't collide.
@@ -16,7 +16,7 @@ use it without a torch detour:
 This is a *demo-grade* signature. It will work well in daylight where each person has
 distinct clothing colour; it will produce false matches at night (the saved frame from
 the Konya camera shows the whole scene is yellow-tinted). For production-grade re-ID
-swap embed_crop() for an OSNet/torchreid forward pass — the rest of the registry stays.
+swap embed_crop() for an OSNet/torchreid forward pass - the rest of the registry stays.
 """
 from __future__ import annotations
 
@@ -67,7 +67,11 @@ class ReidResult:
     cls: str
     is_new: bool
     sightings: int
-    similarity: float       # 1.0 for brand-new entities (self-similarity)
+    similarity: float            # 1.0 for brand-new entities (self-similarity)
+    # Seconds since the *previous* sighting at this camera, or None for new
+    # entities. Lets the collector save a "returning visitor" image only when
+    # the gap is meaningful (>= 5 min) instead of every consecutive sample.
+    gap_seconds: float | None = None
 
 
 def embed_crop(crop_bgr: np.ndarray, cls: str) -> np.ndarray | None:
@@ -98,6 +102,22 @@ def _blob_to_vec(blob: bytes) -> np.ndarray:
     return np.frombuffer(blob, dtype=np.float32)
 
 
+def _gap_seconds(prev_iso: str | None, now_iso: str) -> float | None:
+    """Seconds between two stored timestamp strings (UTC), None if unparseable."""
+    if not prev_iso:
+        return None
+    try:
+        from datetime import datetime
+        # stored strings use either '%Y-%m-%dT%H:%M:%SZ' (this module) or the
+        # full ISO including microseconds (the collector record). Both parse.
+        def _parse(s: str):
+            s2 = s.replace("Z", "+00:00")
+            return datetime.fromisoformat(s2)
+        return max(0.0, (_parse(now_iso) - _parse(prev_iso)).total_seconds())
+    except Exception:
+        return None
+
+
 class ReidStore:
     """SQLite-backed appearance memory. Safe to share across processes via the file."""
 
@@ -118,18 +138,22 @@ class ReidStore:
         """
         ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         # Fast path: pull all same-cam same-class entities and score them.
+        # We pull `last_seen` too so we can report the gap to the caller, which
+        # uses it to decide whether to save a "returning visitor" image.
         cur = self.conn.execute(
-            "SELECT entity_id, sightings, embedding FROM entities "
+            "SELECT entity_id, sightings, last_seen, embedding FROM entities "
             "WHERE cam_id=? AND cls=?", (cam_id, cls))
-        best_id, best_sim, best_sight = None, -1.0, 0
-        for eid, n_sight, blob in cur.fetchall():
+        best_id, best_sim, best_sight, best_last = None, -1.0, 0, None
+        for eid, n_sight, last_seen, blob in cur.fetchall():
             vec = _blob_to_vec(blob)
             sim = float(np.dot(vec, embedding))  # both L2-normalized -> cosine
             if sim > best_sim:
-                best_sim, best_id, best_sight = sim, eid, n_sight
+                best_sim, best_id, best_sight, best_last = sim, eid, n_sight, last_seen
 
         if best_id is not None and best_sim >= self.threshold:
-            # match: bump sightings + last_seen
+            # match: compute the gap from the prior last_seen *before* we
+            # overwrite it, then bump sightings + last_seen.
+            gap = _gap_seconds(best_last, ts)
             new_sight = best_sight + 1
             self.conn.execute(
                 "UPDATE entities SET last_seen=?, sightings=? WHERE entity_id=?",
@@ -139,7 +163,7 @@ class ReidStore:
                 (best_id, ts, best_sim))
             self.conn.commit()
             return ReidResult(best_id, cls, is_new=False, sightings=new_sight,
-                              similarity=best_sim)
+                              similarity=best_sim, gap_seconds=gap)
 
         # new entity
         cur = self.conn.execute(
@@ -151,7 +175,8 @@ class ReidStore:
             "INSERT INTO sightings (entity_id, ts, similarity) VALUES (?, ?, NULL)",
             (eid, ts))
         self.conn.commit()
-        return ReidResult(eid, cls, is_new=True, sightings=1, similarity=1.0)
+        return ReidResult(eid, cls, is_new=True, sightings=1, similarity=1.0,
+                          gap_seconds=None)
 
     def update_from_frame(self, cam_id: str, frame_bgr: np.ndarray,
                           boxes: list[dict]) -> list[ReidResult]:

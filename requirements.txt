@@ -7,7 +7,7 @@ yt-dlp>=2024.4.9            # resolves YouTube Live -> HLS (.m3u8) URLs
 streamlink>=6.7.0           # alternative resolver for many live platforms
 requests>=2.31              # snapshot/JPEG cameras + REST camera APIs (e.g. TfL)
 
-# Notebook analysis only — the production pipeline (collector + HTML dashboard)
+# Notebook analysis only - the production pipeline (collector + HTML dashboard)
 # doesn't need pandas/matplotlib; the dashboard does its own charting in JS.
 pandas>=2.2
 numpy>=1.26

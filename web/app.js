@@ -17,7 +17,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
 // Cache-busting for sibling modules. Browsers cache ES-module specifiers by exact
-// URL — if the HTML's <script src="./cameras.js?v=5"> bumps version but app.js still
+// URL - if the HTML's <script src="./cameras.js?v=5"> bumps version but app.js still
 // imports "./cameras.js" (no query), the import resolves to a different URL and can
 // serve a stale module. Extract the same ?v=N from this file's own URL so both
 // imports below share it. Pages can also set `?ver=N` on the page URL to override.
@@ -28,7 +28,7 @@ const _q = "?v=" + encodeURIComponent(_ver);
 
 const { GRID_CAMERAS } = await import("./cameras.js" + _q);
 
-// firebase-config.js is gitignored — if it's missing the dashboard still renders
+// firebase-config.js is gitignored - if it's missing the dashboard still renders
 // the layout but shows a config warning.
 let firebaseConfig;
 try {
@@ -51,34 +51,56 @@ let combinedChart = null;   // declared at module top to avoid TDZ when start() 
 for (const cam of GRID_CAMERAS) {
   const tile = document.createElement("div");
   tile.className = "tile";
+  // Per-tile video markup. Three shapes:
+  //   cam.embed -> tvkur (or any iframe-friendly) live player in an <iframe>.
+  //   cam.hls   -> direct HLS .m3u8 played in a <video> via hls.js (no iframe).
+  //               Used when the camera's owner page sets X-Frame-Options but
+  //               the underlying CDN exposes Access-Control-Allow-Origin: *
+  //               (IBB's kamerayayin.ibb.istanbul does both).
+  //   neither   -> a clickable "open camera page" fallback.
+  let videoMarkup;
+  if (cam.embed) {
+    videoMarkup =
+      `<iframe src="${cam.embed}" allow="autoplay; encrypted-media"
+               allowfullscreen loading="lazy"></iframe>`;
+  } else if (cam.hls) {
+    videoMarkup =
+      `<video data-hls="${cam.hls}" autoplay muted playsinline
+              controls preload="metadata"></video>`;
+  } else {
+    videoMarkup =
+      `<div class="video-fallback">
+         Live stream not embeddable from this site -
+         <a href="${cam.page}" target="_blank" rel="noopener">open camera page ↗</a>
+       </div>`;
+  }
   tile.innerHTML = `
     <div>
       <h2>${escapeHtml(cam.name)}</h2>
       <div class="city">${escapeHtml(cam.city ?? "")}</div>
     </div>
-    <div class="video-wrap">
-      ${cam.embed
-        ? `<iframe src="${cam.embed}" allow="autoplay; encrypted-media"
-                   allowfullscreen loading="lazy"></iframe>`
-        : `<div class="video-fallback">
-             Live stream not embeddable from this site —
-             <a href="${cam.page}" target="_blank" rel="noopener">open camera page ↗</a>
-           </div>`}
-    </div>
+    <div class="video-wrap">${videoMarkup}</div>
     <div class="metrics">
       <div class="metric"><div class="lbl">People (now)</div>
-        <div class="val" data-k="person">–</div></div>
+        <div class="val" data-k="person">-</div></div>
       <div class="metric vehicles"><div class="lbl">Vehicles (now)</div>
-        <div class="val" data-k="vehicles">–</div></div>
+        <div class="val" data-k="vehicles">-</div></div>
       <div class="metric"><div class="lbl">24h avg</div>
-        <div class="val" data-k="avg">–</div></div>
+        <div class="val" data-k="avg">-</div></div>
       <div class="metric"><div class="lbl">24h peak</div>
-        <div class="val" data-k="peak">–</div></div>
+        <div class="val" data-k="peak">-</div></div>
     </div>
     <div>
+      <span class="activity-badge act-unknown" data-activity>
+        <span class="dot"></span><span data-activity-text>activity -/10</span>
+      </span>
       <span class="anomaly-badge unk" data-anomaly>
         <span class="dot"></span><span data-anomaly-text>no data yet</span>
       </span>
+      <a class="anomaly-thumb" data-anomaly-thumb target="_blank" rel="noopener"
+         style="display:none" title="open snapshot of latest anomaly">
+        <img alt="" />
+      </a>
       <span class="footnote" data-samples></span>
     </div>
     <div class="chart-mini"><canvas></canvas></div>
@@ -87,14 +109,40 @@ for (const cam of GRID_CAMERAS) {
 
   tileState[cam.id] = {
     tile,
-    latestVals: tile.querySelectorAll(".metric .val"),
+    latestVals:   tile.querySelectorAll(".metric .val"),
+    activityBadge: tile.querySelector("[data-activity]"),
+    activityText:  tile.querySelector("[data-activity-text]"),
     anomalyBadge: tile.querySelector("[data-anomaly]"),
     anomalyText:  tile.querySelector("[data-anomaly-text]"),
+    anomalyThumb: tile.querySelector("[data-anomaly-thumb]"),
     samplesEl:    tile.querySelector("[data-samples]"),
     chartCanvas:  tile.querySelector("canvas"),
     chart: null,
     history: [],
   };
+}
+
+// ---------- 1b. Attach hls.js to any <video data-hls=...> tile ---------------
+// We use hls.js for Chrome/Edge/Firefox (no native HLS) and fall back to native
+// <video src=...> on Safari. The CDN script is in index.html; if it didn't load
+// we leave the <video> blank and the user still has the "open camera page" link
+// via the title bar.
+for (const video of document.querySelectorAll("video[data-hls]")) {
+  const src = video.dataset.hls;
+  if (window.Hls && window.Hls.isSupported()) {
+    const hls = new window.Hls({ lowLatencyMode: true, liveSyncDuration: 4 });
+    hls.loadSource(src);
+    hls.attachMedia(video);
+    hls.on(window.Hls.Events.ERROR, (_, data) => {
+      // Recoverable network/media errors hls.js can heal; fatal ones we just log
+      // and leave a black tile - the YOLO counts keep flowing regardless.
+      if (data.fatal) console.warn("hls.js fatal error on", src, data);
+    });
+  } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+    video.src = src;   // Safari / iOS native HLS
+  } else {
+    console.warn("No HLS playback support in this browser for", src);
+  }
 }
 
 // ---------- 2. Bail out cleanly if Firebase isn't configured -----------------
@@ -178,7 +226,7 @@ function start(cfg) {
     }
   }, (err) => console.error("footfall history query failed:", err));
 
-  // 3c. Combined 24h chart at the bottom — rebuild from each tile's history
+  // 3c. Combined 24h chart at the bottom - rebuild from each tile's history
   //     each time anything updates. (Cheap; we have at most 4×360 rows.)
   setInterval(renderCombinedChart, 4000);
   renderCombinedChart();
@@ -194,7 +242,7 @@ function start(cfg) {
 function setLatest(st, d) {
   const set = (k, v) => {
     const el = [...st.latestVals].find((x) => x.dataset.k === k);
-    if (el) el.textContent = (v ?? v === 0) ? v : "–";
+    if (el) el.textContent = (v ?? v === 0) ? v : "-";
   };
   set("person",   d.person);
   set("vehicles", d.vehicles);
@@ -204,6 +252,7 @@ function updateAggregates(camId, rows) {
   const st = tileState[camId];
   if (!rows.length) {
     st.samplesEl.textContent = "no samples in the last 24h";
+    setActivityBadge(st, null);
     return;
   }
   const ppl = rows.map((r) => r.person ?? 0);
@@ -216,17 +265,78 @@ function updateAggregates(camId, rows) {
   setAgg("avg",  avg.toFixed(1));
   setAgg("peak", peak);
 
-  const anomalies = flagAnomalies(rows);
+  // Anomalies: prefer the collector's flag (is_anomaly + snapshot_url) when
+  // present; fall back to the JS-side rolling z-score for rows the older
+  // collector wrote without the flag. Only the LATEST anomaly gets its
+  // snapshot thumbnail shown - we don't clutter the tile with all of them.
+  const anomalies = pickAnomalies(rows);
   if (anomalies.length) {
     const last = anomalies[anomalies.length - 1];
     st.anomalyBadge.className = "anomaly-badge warn";
     st.anomalyText.textContent =
-        `⚠ anomaly at ${fmtTime(last.ts)} — ${last.person} people (${anomalies.length} in 24h)`;
+        `⚠ anomaly at ${fmtTime(last.ts)} - ${last.person} people (${anomalies.length} in 24h)`;
+    const snap = last.snapshot_annotated_url || last.snapshot_url;
+    if (snap) {
+      st.anomalyThumb.href = snap;
+      st.anomalyThumb.querySelector("img").src = snap;
+      st.anomalyThumb.style.display = "inline-block";
+    } else {
+      st.anomalyThumb.style.display = "none";
+    }
   } else {
     st.anomalyBadge.className = "anomaly-badge ok";
     st.anomalyText.textContent = "no anomalies in the last 24h";
+    st.anomalyThumb.style.display = "none";
   }
   st.samplesEl.textContent = ` · ${rows.length} samples in 24h`;
+
+  setActivityBadge(st, computeActivity(rows));
+}
+
+// Pick anomalies from a 24h row set. Trust the collector-side flag first
+// (single source of truth, same z-score the dashboard would compute), fall
+// back to a JS-side rolling z-score so legacy rows still light up.
+function pickAnomalies(rows) {
+  const flagged = rows.filter((r) => r.is_anomaly === true);
+  if (flagged.length) return flagged;
+  return flagAnomalies(rows);
+}
+
+// ---------- Activity Index ---------------------------------------------------
+// Normalize the current people count against the camera's own 24h history so
+// each camera grades against its own baseline (a "busy" Konya square is not
+// the same scale as a "busy" Sultanahmet square).
+//
+//   index = round( now / p90_24h * 8 ),  clipped to 0..10.
+//
+// Why p90 instead of max: peaks can be one-off spikes that would push every
+// normal sample to a low index. The 90th percentile is a more stable ceiling.
+function computeActivity(rows) {
+  const ppl = rows.map((r) => r.person ?? 0).filter((x) => x >= 0);
+  if (ppl.length < 4) return null;
+  const sorted = [...ppl].sort((a, b) => a - b);
+  const p90Idx = Math.max(0, Math.floor(sorted.length * 0.9) - 1);
+  const p90    = sorted[p90Idx] || 1;
+  const now    = ppl[ppl.length - 1];
+  const idx    = Math.max(0, Math.min(10, Math.round((now / p90) * 8)));
+  const label  = idx <= 2 ? "Quiet"
+               : idx <= 5 ? "Moderate"
+               : idx <= 7 ? "Busy"
+               : "Crowded";
+  return { idx, label, now, p90 };
+}
+
+function setActivityBadge(st, act) {
+  const badge = st.activityBadge;
+  const text  = st.activityText;
+  if (!act) {
+    badge.className = "activity-badge act-unknown";
+    text.textContent = "activity -/10";
+    return;
+  }
+  const cls = act.label.toLowerCase();   // quiet | moderate | busy | crowded
+  badge.className = `activity-badge act-${cls}`;
+  text.textContent = `activity ${act.idx}/10 - ${act.label}`;
 }
 
 // How many recent samples to show in the per-tile chart. The metrics above
@@ -294,7 +404,7 @@ function renderCombinedChart() {
   const datasets = GRID_CAMERAS.map((cam, i) => {
     const byTs = new Map(seriesByCam[cam.id].map((r) => [r.ts, r.person]));
     return {
-      label: cam.name.split(" — ")[0],
+      label: cam.name.split(" - ")[0],
       data: labels.map((t) => byTs.has(t) ? byTs.get(t) : null),
       borderColor: palette[i % palette.length],
       tension: 0, pointRadius: 2, pointHoverRadius: 4, borderWidth: 2, spanGaps: true,
@@ -329,7 +439,7 @@ function renderReidTable(docs) {
   const wrap = document.getElementById("reid-table-wrap");
   const rows = docs.filter((d) => GRID_CAMERAS.some((c) => c.id === d.id));
   if (!rows.length) {
-    wrap.innerHTML = `<div class="empty">No re-ID stats yet — the collector publishes
+    wrap.innerHTML = `<div class="empty">No re-ID stats yet - the collector publishes
       them as detections come in.</div>`;
     return;
   }
@@ -345,9 +455,9 @@ function renderReidTable(docs) {
       <tbody>
         ${rows.map((r) => tr([
           escapeHtml(camName(r.id)),
-          r.total_unique ?? total(r, "unique") ?? "–",
-          r.total_sightings ?? total(r, "total_sightings") ?? "–",
-          r.regulars ?? total(r, "regulars") ?? "–",
+          r.total_unique ?? total(r, "unique") ?? "-",
+          r.total_sightings ?? total(r, "total_sightings") ?? "-",
+          r.regulars ?? total(r, "regulars") ?? "-",
         ])).join("")}
       </tbody>
     </table>`;
@@ -369,7 +479,7 @@ function flagAnomalies(rows) {
 }
 
 function fmtTime(iso) {
-  // HH:MM:SS — keeping seconds means each 20s sample gets a unique x-axis label
+  // HH:MM:SS - keeping seconds means each 20s sample gets a unique x-axis label
   // so the chart doesn't squash same-minute samples into a single vertical spike.
   try {
     return new Date(iso).toLocaleTimeString([], {
