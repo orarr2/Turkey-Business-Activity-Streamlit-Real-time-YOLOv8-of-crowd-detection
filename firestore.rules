@@ -1,0 +1,40 @@
+rules_version = '2';
+
+// Firestore security rules for the Turkey Business Activity live dashboard.
+//
+// Why this file matters: the web SDK config (apiKey, projectId in
+// web/firebase-config.js) is PUBLIC by design — it ships in every visitor's
+// browser and is not a secret. These rules, not the apiKey, are what actually
+// protect your database. They:
+//   * expose ONLY the three collections the dashboard reads, and only for read,
+//   * deny ALL client writes — the collector writes via the Admin SDK, which
+//     bypasses rules entirely, so blocking client writes does not affect it,
+//   * deny every other path, so nobody can turn your project into free storage.
+//
+// Deploy:  firebase deploy --only firestore:rules
+//   (uses firebase.json -> firestore.rules; set your project in .firebaserc)
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // --- Public, read-only dashboard collections (written only by the collector) ---
+    match /footfall/{doc} {
+      allow read: if true;
+      allow write: if false;
+    }
+    match /latest/{doc} {
+      allow read: if true;
+      allow write: if false;
+    }
+    match /reid_stats/{doc} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // --- Everything else: locked. No reads, no writes. ---
+    // Prevents anyone from reading collections you didn't intend to expose or
+    // writing junk into arbitrary new collections.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
