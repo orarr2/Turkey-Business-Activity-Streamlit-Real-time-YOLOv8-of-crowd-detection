@@ -55,7 +55,11 @@ FREE_TIER_WRITES_PER_DAY = 20_000
 
 # Roots for the runtime snapshot folders. These sit under web/ on purpose so
 # serve.py exposes them at /snapshots/... without any extra route.
-SNAPSHOTS_ROOT     = Path("web/snapshots")
+# Anchored relative to this file (src/app/collector.py -> src/web/snapshots)
+# so the paths resolve correctly regardless of which directory the user runs
+# the collector from (`python -m app.collector` from src/, or via the notebook).
+_SRC_ROOT          = Path(__file__).resolve().parent.parent
+SNAPSHOTS_ROOT     = _SRC_ROOT / "web" / "snapshots"
 ANOMALY_DIR        = SNAPSHOTS_ROOT / "anomalies"
 RETURNING_DIR      = SNAPSHOTS_ROOT / "returning"
 
