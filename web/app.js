@@ -39,8 +39,18 @@ const statusEl = document.getElementById("status");
 const tilesEl  = document.getElementById("tiles");
 
 const HISTORY_LIMIT  = 360;     // ~6h at 1 sample/min, 1.5h at 1/15s
-const ANOMALY_WINDOW = 12;
-const ANOMALY_Z      = 2.5;
+
+// Anomaly gates - keep in lock-step with AnomalyTracker in app/collector.py.
+// The Python collector now writes is_anomaly to Firestore so this JS-side
+// detector only runs as a fallback for legacy rows that don't have the flag
+// (so the dashboard doesn't re-flag noise that the collector wisely skipped).
+const ANOMALY_WINDOW    = 30;       // 10 min @ 20s sampling
+const ANOMALY_WARMUP    = 10;       // need real history before flagging
+const ANOMALY_Z         = 3.5;      // higher significance bar (was 2.5)
+const ANOMALY_MIN_PEOPLE = 5;       // absolute people floor for the spike
+const ANOMALY_MIN_DELTA  = 5;       // spike must be >= 5 above baseline
+const ANOMALY_MIN_STD    = 0.0;     // off by default - other gates handle noise
+const ANOMALY_COOLDOWN_S = 300;     // 5 min between flags per series
 
 // ---------- 1. Render tile skeletons (works even without Firebase) ----------
 
@@ -293,12 +303,14 @@ function updateAggregates(camId, rows) {
   setActivityBadge(st, computeActivity(rows));
 }
 
-// Pick anomalies from a 24h row set. Trust the collector-side flag first
-// (single source of truth, same z-score the dashboard would compute), fall
-// back to a JS-side rolling z-score so legacy rows still light up.
+// Pick anomalies from a 24h row set. We *always* run the JS-side gates rather
+// than trusting `is_anomaly` from Firestore: rows written before the gates
+// were tightened may have is_anomaly=true under the old lax criteria, and we
+// don't want those legacy false positives to keep painting the tile red.
+// If the JS-flagged row also carries a snapshot_url, the thumbnail shows up;
+// otherwise the badge is still meaningful (collector ran without snapshots
+// or the snapshot was pruned).
 function pickAnomalies(rows) {
-  const flagged = rows.filter((r) => r.is_anomaly === true);
-  if (flagged.length) return flagged;
   return flagAnomalies(rows);
 }
 
@@ -466,14 +478,30 @@ function renderReidTable(docs) {
 // ---------- helpers ---------------------------------------------------------
 
 function flagAnomalies(rows) {
-  // Rolling z-score on people counts; flag any |z| > 2.5.
+  // Multi-gate fallback that mirrors AnomalyTracker.push_and_check in
+  // app/collector.py. ALL gates must pass for a row to count as an anomaly:
+  // z>=ANOMALY_Z (positive only, not drops), people>=ANOMALY_MIN_PEOPLE,
+  // delta from baseline mean >= ANOMALY_MIN_DELTA, baseline std >= ANOMALY_MIN_STD,
+  // and a per-series cooldown of ANOMALY_COOLDOWN_S between flags.
   const xs = rows.map((r) => r.person ?? 0);
   const out = [];
-  for (let i = ANOMALY_WINDOW; i < xs.length; i++) {
-    const win = xs.slice(i - ANOMALY_WINDOW, i);
+  let lastFlaggedTs = -Infinity;
+  for (let i = ANOMALY_WARMUP; i < xs.length; i++) {
+    const win = xs.slice(Math.max(0, i - ANOMALY_WINDOW), i);
+    if (win.length < ANOMALY_WARMUP) continue;
     const mu  = win.reduce((a, b) => a + b, 0) / win.length;
     const sd  = Math.sqrt(win.reduce((a, b) => a + (b - mu) ** 2, 0) / win.length);
-    if (sd > 0 && Math.abs((xs[i] - mu) / sd) > ANOMALY_Z) out.push(rows[i]);
+    const people = xs[i];
+    const delta  = people - mu;
+    if (delta <= 0) continue;                              // spike only
+    if (people < ANOMALY_MIN_PEOPLE) continue;             // absolute floor
+    if (sd < ANOMALY_MIN_STD) continue;                    // quiet baseline
+    if (delta < ANOMALY_MIN_DELTA) continue;               // small delta
+    if (sd <= 0 || delta / sd < ANOMALY_Z) continue;       // below z bar
+    const ts = new Date(rows[i].ts).getTime() / 1000;
+    if (ts - lastFlaggedTs < ANOMALY_COOLDOWN_S) continue; // cooldown
+    lastFlaggedTs = ts;
+    out.push(rows[i]);
   }
   return out;
 }
