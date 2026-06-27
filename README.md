@@ -10,6 +10,9 @@ YOLOv8 on each frame, writes the counts and a per-detection appearance signature
 Firestore, and pushes the result to a browser dashboard via `onSnapshot` - no polling,
 no refresh, everything updates the moment the collector posts a new sample.
 
+
+> All source, configs and the notebook live in [`src/`](src/). The repo root only carries this `README.md` and the gitignore so the GitHub landing page stays clean.
+
 ---
 
 ## What the program does, end to end
@@ -46,6 +49,7 @@ Firestore, every visitor sees the full accumulated history, not a fresh local fi
 
 ```bash
 # 0. setup
+cd src/
 pip install -r requirements.txt
 cp .env.example .env                                          # fill in Firebase values
 cp web/firebase-config.example.js web/firebase-config.js      # same web-SDK values
@@ -64,19 +68,19 @@ with `--port`, suppress the browser pop with `--no-browser`, auto-falls-back to 
 next free port if 8000 is busy). It also warns if `web/firebase-config.js` is missing.
 
 Full step-by-step (Python venv, Windows PowerShell variants, troubleshooting): see
-[`LOCAL_RUN.md`](LOCAL_RUN.md). Firebase project/service-account setup and security
-rules: see [`docs/firebase_setup.md`](docs/firebase_setup.md).
+[`LOCAL_RUN.md`](src/LOCAL_RUN.md). Firebase project/service-account setup and security
+rules: see [`docs/firebase_setup.md`](src/docs/firebase_setup.md).
 
 ---
 
 ## What the model predicts
 
 **Detector - YOLOv8n (Ultralytics)** loaded once per process with
-[`load_model("yolov8n.pt")`](app/detect_core.py:30). Nano variant for CPU-friendly
+[`load_model("yolov8n.pt")`](src/app/detect_core.py:30). Nano variant for CPU-friendly
 inference; swap to `yolov8s.pt` / `yolov8m.pt` for better small-object recall.
 
 Each call returns boxes + class ids + confidences for the **COCO classes the project
-cares about** ([`CLASSES_OF_INTEREST`](app/detect_core.py:18)):
+cares about** ([`CLASSES_OF_INTEREST`](src/app/detect_core.py:18)):
 
 | COCO id | name        | role                                       |
 |:-------:|-------------|--------------------------------------------|
@@ -113,11 +117,11 @@ For each tile the dashboard maintains a rolling window of 12 samples and flags a
 sample whose people count has |z-score| > 2.5 against the window mean. Default
 behaviour: green badge ("no anomalies in the last 24h"), turns red the moment a
 spike (or unusual drop) clears the threshold, with the offending timestamp + count.
-See [`flagAnomalies`](web/app.js:337) and tweak `ANOMALY_WINDOW` / `ANOMALY_Z`.
+See [`flagAnomalies`](src/web/app.js:337) and tweak `ANOMALY_WINDOW` / `ANOMALY_Z`.
 
 ### Re-identification ("have I seen this person/car before?")
 
-Implemented in [`app/reid.py`](app/reid.py) - deliberately dependency-free
+Implemented in [`app/reid.py`](src/app/reid.py) - deliberately dependency-free
 (no torchreid / no OSNet, so the notebook + collector + dashboard all share it):
 
 1. Crop each detection box and resize (`64×128` for persons, `96×96` for vehicles).
@@ -137,7 +141,7 @@ need production accuracy; the SQLite registry stays the same.
 
 ### Stream resolution
 
-Cameras come in several `kind`s - [`resolve_stream`](app/detect_core.py:93) routes
+Cameras come in several `kind`s - [`resolve_stream`](src/app/detect_core.py:93) routes
 each one through the right resolver:
 
 | kind          | example                          | how it's resolved              |
@@ -150,14 +154,14 @@ each one through the right resolver:
 Some HLS hosts (`content.tvkur.com`, `livestream.ibb.gov.tr`, `skylinewebcams.com`)
 require `Referer` / `Origin` headers that `cv2.VideoCapture` can't set on Windows;
 for those the collector downloads the latest `.ts` segment manually with the right
-headers and decodes locally ([`_grab_via_segment`](app/detect_core.py:133)).
+headers and decodes locally ([`_grab_via_segment`](src/app/detect_core.py:133)).
 
 ---
 
 ## The dashboard (`web/`)
 
 Pure static page - no build step. Module ES imports, Firebase web SDK v10,
-Chart.js 4. Opens with [`python serve.py`](serve.py) and renders:
+Chart.js 4. Opens with [`python serve.py`](src/serve.py) and renders:
 
 - **2×2 camera grid** - each tile has a live iframe (tvkur player or a
   corsproxy.io-wrapped page for hosts with strict `X-Frame-Options`), four KPIs
@@ -170,7 +174,7 @@ Chart.js 4. Opens with [`python serve.py`](serve.py) and renders:
   means the collector isn't running).
 
 Connection state is `connection refused` when nothing is bound to port 8000 - that
-is the role of [`serve.py`](serve.py). The dashboard itself doesn't open any port;
+is the role of [`serve.py`](src/serve.py). The dashboard itself doesn't open any port;
 it just talks to Firestore from the browser tab.
 
 ---
@@ -192,7 +196,7 @@ numbers reconcile.
 
 ## Camera catalog
 
-[`app/cameras.py`](app/cameras.py) is the source of truth. The four cameras shipped
+[`app/cameras.py`](src/app/cameras.py) is the source of truth. The four cameras shipped
 in the dashboard grid (`GRID_CAMERAS`):
 
 | id                       | name                                   | host         |
@@ -235,14 +239,14 @@ python -m app.detect_core --resolve konya_hukumet,otogar_kavsagi
 
 | Path | Purpose |
 |------|---------|
-| [`serve.py`](serve.py) | One-shot launcher for the dashboard (no-cache static server). |
-| [`turkey_business_activity.ipynb`](turkey_business_activity.ipynb) | Offline analytics notebook. |
-| [`app/collector.py`](app/collector.py) | 24/7 sampler that writes to Firestore. |
-| [`app/detect_core.py`](app/detect_core.py) | YOLO loading, stream resolution, frame grabbing, detection. |
-| [`app/reid.py`](app/reid.py) | Appearance-based re-identification (SQLite + HSV histograms). |
-| [`app/cameras.py`](app/cameras.py) | Verified camera catalog. |
-| [`app/firebase_store.py`](app/firebase_store.py) | Firestore writer (`footfall` / `latest` / `reid_stats`). |
-| [`web/`](web/) | Static HTML/JS dashboard. |
-| [`docs/firebase_setup.md`](docs/firebase_setup.md) | Firebase project + security rules walkthrough. |
-| [`docs/turkey_cameras.md`](docs/turkey_cameras.md) | Camera sources and architecture notes. |
-| [`LOCAL_RUN.md`](LOCAL_RUN.md) | Step-by-step local-machine quickstart. |
+| [`serve.py`](src/serve.py) | One-shot launcher for the dashboard (no-cache static server). |
+| [`turkey_business_activity.ipynb`](src/turkey_business_activity.ipynb) | Offline analytics notebook. |
+| [`app/collector.py`](src/app/collector.py) | 24/7 sampler that writes to Firestore. |
+| [`app/detect_core.py`](src/app/detect_core.py) | YOLO loading, stream resolution, frame grabbing, detection. |
+| [`app/reid.py`](src/app/reid.py) | Appearance-based re-identification (SQLite + HSV histograms). |
+| [`app/cameras.py`](src/app/cameras.py) | Verified camera catalog. |
+| [`app/firebase_store.py`](src/app/firebase_store.py) | Firestore writer (`footfall` / `latest` / `reid_stats`). |
+| [`web/`](src/web/) | Static HTML/JS dashboard. |
+| [`docs/firebase_setup.md`](src/docs/firebase_setup.md) | Firebase project + security rules walkthrough. |
+| [`docs/turkey_cameras.md`](src/docs/turkey_cameras.md) | Camera sources and architecture notes. |
+| [`LOCAL_RUN.md`](src/LOCAL_RUN.md) | Step-by-step local-machine quickstart. |

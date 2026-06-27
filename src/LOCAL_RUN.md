@@ -10,7 +10,8 @@ Everything you need to run the collector + live dashboard on your own machine.
 ## 1. Get the code
 ```bash
 git clone <your-repo-url> turkey-footfall
-cd turkey-footfall
+cd turkey-footfall/src        # all code + configs live in src/; the repo
+                              # root only carries README.md
 ```
 
 ## 2. Install dependencies
