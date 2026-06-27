@@ -20,6 +20,8 @@ firebase-service-account.json
 *firebase-adminsdk*.json
 *-firebase-*.json
 web/firebase-config.js
+# Firebase CLI project binding — copy .firebaserc.example to .firebaserc
+.firebaserc
 .env
 .env.local
 .env.*.local

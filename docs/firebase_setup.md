@@ -53,25 +53,53 @@ cd web && python -m http.server 8000
 
 The page subscribes with `onSnapshot` — every collector write appears immediately, no refresh.
 
-## 5. Security rules (before deploying publicly)
+## 5. Security rules (before deploying publicly) — **this is what protects your DB**
 
-Test mode allows anyone to read/write. For a read-only public dashboard, lock writes to the
-backend (service account bypasses rules) and allow only reads:
+Test mode lets **anyone on the internet read *and write*** your database — they could fill your
+quota or run up a bill. Note that the web SDK config (`apiKey`, `projectId`) is **public by
+design** and ships in every visitor's browser; it is *not* a secret. The security rules — not the
+apiKey — are what actually protect your data.
 
+The locked-down rules live in [`firestore.rules`](../firestore.rules) at the repo root: **public
+read on the three dashboard collections, all client writes denied** (the collector uses the Admin
+SDK, which bypasses rules, so blocking client writes doesn't affect it), and everything else locked.
+
+Deploy them with the Firebase CLI:
+
+```bash
+npm install -g firebase-tools          # one-time
+firebase login
+cp .firebaserc.example .firebaserc      # set "default" to your project id
+firebase deploy --only firestore:rules
 ```
-rules_version = '2';
-service cloud.firestore {
-  match /databases/{db}/documents {
-    match /{document=**} {
-      allow read: if true;     // public dashboard
-      allow write: if false;   // only the collector (Admin SDK) writes
-    }
-  }
-}
-```
 
-## Cost note
+Verify afterwards in **Firebase console → Firestore → Rules** that writes show `if false`.
 
-Firestore free tier ≈ 20k writes/day. One write per camera per round: at 20s interval that is
-~4,300 writes/day/camera. Keep camera count modest on the free tier, or raise `--interval`, or
-batch. For many cameras at high frequency, move history to BigQuery / keep only `latest` in Firestore.
+## 6. App Check (anti-abuse / read-quota protection)
+
+Rules make the data read-only, but a scraper can still hammer **reads** and burn your read quota.
+App Check stops that by requiring every request to carry a reCAPTCHA-v3 attestation token proving it
+came from *your* web app.
+
+1. Firebase console → **App Check → Apps** → register the web app with the **reCAPTCHA v3** provider.
+2. Copy the **site key** into `web/firebase-config.js` as `recaptchaSiteKey` (see
+   `web/firebase-config.example.js`). `web/app.js` initializes App Check automatically when it's set.
+3. When you're confident the dashboard works, console → **App Check → Firestore → Enforce**.
+
+> Enable enforcement only *after* the site key is live in the page — otherwise enforced reads are
+> rejected and the dashboard goes blank. Until you enforce, App Check runs in monitor-only mode.
+
+## 7. Rate limit & cost cap
+
+Firestore free (Spark) tier ≈ **20k writes/day**. Each camera writes ~2 docs/round (footfall +
+latest), or ~3 with re-ID on. At a 20s interval that's ~4,300–13,000 writes/day/camera.
+
+- **Writer side (built in):** `app/collector.py` clamps `--interval` to a 5s floor and prints the
+  projected daily write count on startup, warning if it would exceed the free tier. Raise
+  `--interval` or run fewer cameras to stay under it.
+- **Platform side (set this up):** add a **budget alert** in Google Cloud console → *Billing →
+  Budgets & alerts*, and if you're on the Blaze plan, an **App Engine daily spending limit**, so a
+  runaway process or abuse can't run up an unbounded bill. This is the real hard cap — Firestore has
+  no per-user request rate limit of its own.
+
+For many cameras at high frequency, move history to BigQuery / keep only `latest` in Firestore.

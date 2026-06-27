@@ -35,6 +35,14 @@ from app.detect_core import (
 )
 from app.reid import ReidStore
 
+# --- Write rate-limit guard (protects your Firestore write quota / billing) ---
+# The Firestore free (Spark) tier allows ~20k document writes/day. Each camera
+# makes ~2 writes/round (footfall history + latest), or ~3 with re-ID on
+# (+reid_stats). A too-small --interval (e.g. a typo of 1) could blow past that
+# in minutes, so we clamp to a floor and warn on the projected daily total.
+MIN_INTERVAL_S = 5
+FREE_TIER_WRITES_PER_DAY = 20_000
+
 
 def resolve_url(cam: dict) -> str:
     """Resolve any camera (hls / youtube / skyline / webcamera24) to a stream URL.
@@ -106,6 +114,13 @@ def main() -> None:
                     help="YOLO confidence threshold (lower = catches more small/distant objects)")
     args = ap.parse_args()
 
+    # Rate-limit guard: never let the collector hammer Firestore faster than the
+    # floor, regardless of what the user passed.
+    if args.interval < MIN_INTERVAL_S:
+        print(f"--interval {args.interval}s is below the {MIN_INTERVAL_S}s floor; "
+              f"clamping to {MIN_INTERVAL_S}s to protect your Firestore write quota.")
+        args.interval = MIN_INTERVAL_S
+
     from app.firebase_store import FirebaseStore
     firebase = FirebaseStore()
     print("Firebase backend initialized.")
@@ -122,6 +137,15 @@ def main() -> None:
 
     print(f"Collector started. {len(cams)} camera(s): {list(cams)}")
     print(f"interval={args.interval}s, reid={'on' if reid else 'off'}, conf={args.conf}")
+
+    # Project the daily write volume and warn if it would exceed the free tier.
+    writes_per_round = len(cams) * (3 if reid else 2)
+    projected = writes_per_round * (86400 / args.interval)
+    print(f"~{projected:,.0f} Firestore writes/day projected "
+          f"(free tier ≈ {FREE_TIER_WRITES_PER_DAY:,}).")
+    if projected > FREE_TIER_WRITES_PER_DAY:
+        print("  ⚠ Above the free tier — raise --interval, run fewer cameras, or set a "
+              "billing budget alert / daily cap (see docs/firebase_setup.md §7).")
     print("Ctrl+C to stop.\n")
 
     try:

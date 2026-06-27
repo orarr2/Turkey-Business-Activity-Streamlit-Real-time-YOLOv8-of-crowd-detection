@@ -10,6 +10,9 @@
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
 import {
+  initializeAppCheck, ReCaptchaV3Provider,
+} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app-check.js";
+import {
   getFirestore, collection, onSnapshot, query, where, orderBy, limit,
 } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
@@ -107,6 +110,24 @@ if (!firebaseConfig) {
 
 function start(cfg) {
   const app = initializeApp(cfg);
+
+  // App Check (anti-abuse): attest that reads come from your real web app, not a
+  // bot scraping the database to burn your read quota. Initialized right after
+  // initializeApp() and before getFirestore() so the App Check token rides along
+  // with every Firestore request. Only active if a reCAPTCHA v3 site key is set
+  // in firebase-config.js; enforcement itself is toggled in the Firebase console
+  // (App Check -> Firestore -> Enforce). See docs/firebase_setup.md §6.
+  if (cfg.recaptchaSiteKey) {
+    try {
+      initializeAppCheck(app, {
+        provider: new ReCaptchaV3Provider(cfg.recaptchaSiteKey),
+        isTokenAutoRefreshEnabled: true,
+      });
+    } catch (e) {
+      console.warn("App Check init failed — continuing without it:", e);
+    }
+  }
+
   const db  = getFirestore(app);
 
   // 3a. latest/{cam_id} -> KPI cards. One snapshot covers all cameras.
