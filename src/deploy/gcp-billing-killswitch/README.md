@@ -34,12 +34,21 @@ services stopped billing you three minutes after crossing $5" (this).
      --display-name "Billing kill-switch runtime" \
      --project=turkey-footfall
    ```
-5. **Grant it Project Billing Manager on the billing account** (this is
-   what lets it detach the project from the billing account).
-   In GCP Console → Billing → Manage billing account → Permissions →
-   Add principal:
+5. **Grant it Project Billing Manager on the target project**. This is
+   what lets it detach `turkey-footfall` from any billing account.
+   Note: `roles/billing.projectManager` is a *project-level* role - GCP
+   rejects it if you try to attach it to the billing account directly
+   (`Role roles/billing.projectManager is not supported for this resource.`).
+   Easiest way, from Cloud Shell:
+   ```
+   gcloud projects add-iam-policy-binding turkey-footfall \
+     --member=serviceAccount:billing-killswitch@turkey-footfall.iam.gserviceaccount.com \
+     --role=roles/billing.projectManager
+   ```
+   Or, via UI: GCP Console → IAM & Admin → IAM (with the project
+   `turkey-footfall` selected) → Grant Access:
    - Principal: `billing-killswitch@turkey-footfall.iam.gserviceaccount.com`
-   - Role: **Project Billing Manager**  (`roles/billing.projectManager`)
+   - Role: **Project Billing Manager**
 
 ## Deploy the function
 
