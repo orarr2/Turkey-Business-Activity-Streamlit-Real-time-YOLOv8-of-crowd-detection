@@ -1,10 +1,18 @@
 # Run locally - Turkey footfall (Firebase)
 
-Everything you need to run the collector + live dashboard on your own machine.
+There are two roles here, and they need different amounts of setup:
+
+- **Viewer** (anyone who clones the repo): open the notebook, Run All, done.
+  Live counts stream in from the admin's collector via the shared Firestore
+  project. Zero configuration - the Firebase Web SDK config ships in the repo,
+  Firestore Rules make it read-only for the public.
+- **Admin** (the one machine that also *writes* new samples to Firestore):
+  additionally holds the Firebase service-account JSON and runs the collector.
+
+## Viewer path (default)
 
 ## Prerequisites
 - Python 3.10+ and `pip`
-- Your Firebase **service-account JSON** (downloaded from Firebase console → Settings → Service accounts)
 - Open internet (so the IBB / YouTube streams resolve)
 
 ## 1. Get the code
@@ -21,25 +29,30 @@ source .venv/bin/activate            # Windows PowerShell: .venv\Scripts\Activat
 pip install -r requirements.txt
 ```
 
-## 3. Provide your own Firebase config
-
-The repo ships two placeholder templates - fill in **your** project values from
-**Firebase Console → Project settings → Your apps → Web app → SDK setup**.
-
+## 3. Run the notebook
 ```bash
-cp .env.example .env                                    # server-side env vars
-cp web/firebase-config.example.js web/firebase-config.js   # client-side web SDK
+jupyter lab turkey_business_activity.ipynb
 ```
+Run All. Cells 0-23 do the local YOLO analysis (offline). The last live cell
+opens the dashboard at http://localhost:8000 with real-time counts pushed by
+the admin's collector. Nothing else to configure.
 
-Edit each file and paste the values Firebase gave you. Both `.env` and
-`web/firebase-config.js` are gitignored, so your keys never reach the repo.
+---
 
-## 4. Point at your service-account key
-Put the JSON somewhere (e.g. project root as `serviceAccount.json`), then:
+## Admin path (only for the person who runs the collector)
+
+Everything in the viewer path, plus:
+
+## 4. Drop in the service-account key
+Put your Firebase service-account JSON at the repo root (any of these names is
+auto-detected by the notebook: `serviceAccount.json`,
+`*firebase-adminsdk*.json`). Or set the env var yourself:
 ```bash
 export FIREBASE_CREDENTIALS="$PWD/serviceAccount.json"          # Mac/Linux
 # Windows PowerShell:  $env:FIREBASE_CREDENTIALS = "$PWD\serviceAccount.json"
 ```
+The JSON is gitignored - it never enters the repo. This is the only real
+secret in the project.
 
 ## 5. Smoke test (one camera)
 ```bash
@@ -91,14 +104,16 @@ Drop `--only` to run all of them.
 - **`MISS (empty frame)`** on every round → that stream is down or your network blocks it. Try another
   camera id; confirm you are on an open network (not a corporate/VPN filter).
 - **`FileNotFoundError ... service-account`** → `FIREBASE_CREDENTIALS` is unset or the path is wrong.
-- **Dashboard shows "no data"** → the collector isn't writing yet, or `web/firebase-config.js` is missing.
+- **Dashboard shows "no data"** → the admin's collector isn't running right now, or someone deleted `web/firebase-config.js` from the repo (it should be committed).
 - **`firebase write failed ... PERMISSION_DENIED`** → you are not using the service-account key (the
   Admin SDK bypasses the read-only rules; the web apiKey does not).
 - **Notebook instead of app** → `jupyter lab turkey_business_activity.ipynb` for the analysis
   (footfall, peak hours, anomalies, dwell-time, site score).
 
-## Local files NOT in git (you provide them)
+## Local files NOT in git (admin only)
 | File | Source |
 |------|--------|
-| `web/firebase-config.js` | paste from step 3 |
-| `serviceAccount.json` | Firebase console → Service accounts → Generate new private key |
+| `serviceAccount.json` (or `*firebase-adminsdk*.json`) | Firebase console → Service accounts → Generate new private key |
+
+(`web/firebase-config.js` **is** in the repo - it's the public Web SDK
+identifier, not a secret. Firestore Rules are what actually protect the DB.)

@@ -45,27 +45,32 @@ Firestore, every visitor sees the full accumulated history, not a fresh local fi
 
 ---
 
-## Quick start (one collector terminal, one dashboard terminal)
+## Quick start
+
+The project ships zero-config for **viewers** - the Firebase Web SDK identifier is
+committed, Firestore Rules make the three dashboard collections public read-only,
+and every visitor sees the live counts pushed by the admin's collector.
 
 ```bash
-# 0. setup
+# Viewer (anyone who clones the repo)
 cd src/
 pip install -r requirements.txt
-cp .env.example .env                                          # fill in Firebase values
-cp web/firebase-config.example.js web/firebase-config.js      # same web-SDK values
-export FIREBASE_CREDENTIALS=/abs/path/to/serviceAccount.json  # Admin-SDK key (gitignored)
+python serve.py                     # opens http://localhost:8000 with live counts
+# or: jupyter lab turkey_business_activity.ipynb   # analysis + embedded dashboard
+```
 
-# 1. Terminal A - collector pushing the 4 dashboard cameras into Firestore
+Only the **admin** who runs the collector needs a service-account key:
+
+```bash
+# Admin - the one machine that WRITES to Firestore
+export FIREBASE_CREDENTIALS=/abs/path/to/serviceAccount.json   # Admin-SDK key (gitignored)
 python -m app.collector --interval 20 \
     --only konya_hukumet,otogar_kavsagi,konya_kulturpark,konya_millet_caddesi
-
-# 2. Terminal B - one-shot dashboard launcher (opens http://localhost:8000)
-python serve.py
 ```
 
 `serve.py` is a small no-cache static server that binds `web/` on port 8000 (override
 with `--port`, suppress the browser pop with `--no-browser`, auto-falls-back to the
-next free port if 8000 is busy). It also warns if `web/firebase-config.js` is missing.
+next free port if 8000 is busy).
 
 Full step-by-step (Python venv, Windows PowerShell variants, troubleshooting): see
 [`LOCAL_RUN.md`](src/LOCAL_RUN.md). Firebase project/service-account setup and security
