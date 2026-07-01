@@ -170,17 +170,53 @@ CAMERAS = {
     },
 }
 
-# Cameras the live dashboard shows side by side (2x2 grid), in display order.
-# All four are tvkur-backed: the collector reaches the HLS master playlist from
-# any network, and the browser embeds the live player iframe directly (no proxy).
+# Live dashboard grid, in display order. Each slot has a primary camera and an
+# ordered fallback chain: if the collector can't grab a frame from the current
+# cam N times in a row (see SlotStreamPicker in collector.py), it advances to
+# the next entry. Every FALLBACK_RETRY_MINUTES the primary is retried; if it
+# recovers, the picker snaps back.
 #
-# Previous grid used giresun_gazi (skylinewebcams) and kadikoy (IBB), but both
-# are geo-restricted to Turkey IPs *and* set frame-ancestors CSP that blocks
-# localhost iframing - they could neither display nor receive counts from this
-# network. They remain in CAMERAS above for runs from a Turkey-routed IP and
-# can be put back in this list if/when you deploy from that geography.
-GRID_CAMERAS = ["konya_hukumet", "otogar_kavsagi",
-                "sultanahmet_1_yeni", "taksim_yeni"]
+# Rules for the fallback chains (deliberate):
+#   * The two Konya slots stay within webcamera24 / tvkur cameras only.
+#   * The two Istanbul slots stay within istanbuluseyret.ibb.gov.tr cameras only.
+#   * Same-area cameras come before other-area ones (Sultanahmet peninsula
+#     before crossing the Golden Horn, etc.).
+# When a slot's active cam changes, the collector writes it to config/grid in
+# Firestore, and the dashboard picks up the new cam metadata via onSnapshot.
+GRID_SLOTS = [
+    {
+        "slot_id":      "slot_konya_hukumet",
+        "display_area": "Konya - Hukumet",
+        "primary":      "konya_hukumet",
+        "fallbacks":    ["konya_kulturpark", "konya_millet_caddesi", "otogar_kavsagi"],
+    },
+    {
+        "slot_id":      "slot_otogar",
+        "display_area": "Konya - Otogar",
+        "primary":      "otogar_kavsagi",
+        "fallbacks":    ["konya_millet_caddesi", "konya_kulturpark", "konya_hukumet"],
+    },
+    {
+        "slot_id":      "slot_sultanahmet",
+        "display_area": "Istanbul - Sultanahmet",
+        "primary":      "sultanahmet_1_yeni",
+        # istanbuluseyret only; same-area (peninsula) first.
+        "fallbacks":    ["sultanahmet_1", "beyazit_meydan", "kapali_carsi",
+                         "misir_carsisi", "eyup_sultan", "uskudar", "kadikoy",
+                         "taksim_yeni", "taksim"],
+    },
+    {
+        "slot_id":      "slot_taksim",
+        "display_area": "Istanbul - Taksim",
+        "primary":      "taksim_yeni",
+        "fallbacks":    ["taksim", "beyazit_meydan", "eyup_sultan",
+                         "sultanahmet_1_yeni", "sultanahmet_1", "kapali_carsi",
+                         "misir_carsisi", "kadikoy", "uskudar"],
+    },
+]
+
+# Backward compat for the viewer notebook / smoke tests: the four primary cams.
+GRID_CAMERAS = [s["primary"] for s in GRID_SLOTS]
 
 
 def active_cameras():

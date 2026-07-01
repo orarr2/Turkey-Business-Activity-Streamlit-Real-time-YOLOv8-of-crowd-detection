@@ -78,6 +78,12 @@
     .activity-badge.act-crowded  { background: rgba(239, 68, 68,0.15); color: #ef4444; }
     .activity-badge.act-unknown  { background: rgba(139,144,154,0.10); color: #6f7480; }
 
+    /* Fallback badge — appears next to a tile whose primary cam has failed
+       and the collector has switched to a backup cam in the slot's chain. */
+    .fallback-badge { display: inline-block; margin-left: 8px; padding: 3px 8px;
+                      border-radius: 999px; font-size: 11px;
+                      background: rgba(240,163,94,0.15); color: #f0a35e; }
+
     .chart-mini { position: relative; height: 160px; width: 100%; }
     .chart-mini canvas { position: absolute; top: 0; left: 0; width: 100% !important; height: 100% !important; }
     .big-chart-wrap canvas { width: 100% !important; height: 280px !important; }
