@@ -17,6 +17,10 @@ const tvkurHls = (id) => `/tvkur/${id}/master.m3u8`;
 // The four slots the dashboard renders. Order = display order (2x2 grid).
 // `placeholder_*` fields are what the tile shows before Firestore's
 // config/grid doc arrives; they get replaced on the first snapshot.
+//
+// 2026-07: the Istanbul slots (Sultanahmet + Taksim) were swapped for two
+// more Konya webcamera24/tvkur cams because IBB tightened its geo-block to
+// Turkey-only. Keep in sync with GRID_SLOTS in src/app/cameras.py.
 export const GRID_SLOTS = [
   {
     slot_id:          "slot_konya_hukumet",
@@ -33,18 +37,18 @@ export const GRID_SLOTS = [
     placeholder_page: "https://webcamera24.com/camera/turkey/8044-otogar-kavsagi/",
   },
   {
-    slot_id:          "slot_sultanahmet",
-    display_area:     "Istanbul - Sultanahmet",
-    placeholder_name: "Sultanahmet",
-    placeholder_hls:  "https://kamerayayin.ibb.istanbul/turistikcam/sultanahmet1.stream/playlist.m3u8",
-    placeholder_page: "https://istanbuluseyret.ibb.gov.tr/sultanahmet-1-yeni/",
+    slot_id:          "slot_kulturpark",
+    display_area:     "Konya - Kültürpark",
+    placeholder_name: "Konya - Kültürpark",
+    placeholder_hls:  tvkurHls("c77i6hb84cnrb6mlji3g"),
+    placeholder_page: "https://webcamera24.com/camera/turkey/8058-kulturpark/",
   },
   {
-    slot_id:          "slot_taksim",
-    display_area:     "Istanbul - Taksim",
-    placeholder_name: "Taksim Meydanı",
-    placeholder_hls:  "https://kamerayayin.ibb.istanbul/turistikcam/taksim.stream/playlist.m3u8",
-    placeholder_page: "https://istanbuluseyret.ibb.gov.tr/taksim-yeni/",
+    slot_id:          "slot_millet_caddesi",
+    display_area:     "Konya - Millet Caddesi",
+    placeholder_name: "Konya - Millet Caddesi / Hastane Kavşağı",
+    placeholder_hls:  tvkurHls("c77i9cfbb2nj4i0fr82g"),
+    placeholder_page: "https://webcamera24.com/camera/turkey/8046-millet-caddesi/",
   },
 ];
 

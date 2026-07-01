@@ -176,19 +176,24 @@ CAMERAS = {
 # the next entry. Every FALLBACK_RETRY_MINUTES the primary is retried; if it
 # recovers, the picker snaps back.
 #
-# Rules for the fallback chains (deliberate):
-#   * The two Konya slots stay within webcamera24 / tvkur cameras only.
-#   * The two Istanbul slots stay within istanbuluseyret.ibb.gov.tr cameras only.
-#   * Same-area cameras come before other-area ones (Sultanahmet peninsula
-#     before crossing the Golden Horn, etc.).
-# When a slot's active cam changes, the collector writes it to config/grid in
-# Firestore, and the dashboard picks up the new cam metadata via onSnapshot.
+# 2026-07 update: IBB (both livestream.ibb.gov.tr and kamerayayin.ibb.istanbul)
+# tightened its geo-block to Turkey-only in early July 2026. Every IBB HLS now
+# returns 403/502 from GCP us-east1 AND from any non-Turkey network - not just
+# an outbound-IP issue with the VM. The two "Istanbul" grid slots have therefore
+# been swapped for two more webcamera24/tvkur Konya cams that this project
+# already had in the catalog and that work from any country. The IBB entries
+# stay in CAMERAS above for anyone running from a Turkey-routed IP; if they
+# unblock again they can be put back in this list.
+#
+# Rule for the fallback chains: every slot stays within webcamera24 / tvkur,
+# and each chain lists the other three Konya cams so a token rotation on the
+# primary doesn't leave the tile empty.
 GRID_SLOTS = [
     {
         "slot_id":      "slot_konya_hukumet",
         "display_area": "Konya - Hukumet",
         "primary":      "konya_hukumet",
-        "fallbacks":    ["konya_kulturpark", "konya_millet_caddesi", "otogar_kavsagi"],
+        "fallbacks":    ["otogar_kavsagi", "konya_kulturpark", "konya_millet_caddesi"],
     },
     {
         "slot_id":      "slot_otogar",
@@ -197,21 +202,16 @@ GRID_SLOTS = [
         "fallbacks":    ["konya_millet_caddesi", "konya_kulturpark", "konya_hukumet"],
     },
     {
-        "slot_id":      "slot_sultanahmet",
-        "display_area": "Istanbul - Sultanahmet",
-        "primary":      "sultanahmet_1_yeni",
-        # istanbuluseyret only; same-area (peninsula) first.
-        "fallbacks":    ["sultanahmet_1", "beyazit_meydan", "kapali_carsi",
-                         "misir_carsisi", "eyup_sultan", "uskudar", "kadikoy",
-                         "taksim_yeni", "taksim"],
+        "slot_id":      "slot_kulturpark",
+        "display_area": "Konya - Kulturpark",
+        "primary":      "konya_kulturpark",
+        "fallbacks":    ["konya_millet_caddesi", "konya_hukumet", "otogar_kavsagi"],
     },
     {
-        "slot_id":      "slot_taksim",
-        "display_area": "Istanbul - Taksim",
-        "primary":      "taksim_yeni",
-        "fallbacks":    ["taksim", "beyazit_meydan", "eyup_sultan",
-                         "sultanahmet_1_yeni", "sultanahmet_1", "kapali_carsi",
-                         "misir_carsisi", "kadikoy", "uskudar"],
+        "slot_id":      "slot_millet_caddesi",
+        "display_area": "Konya - Millet Caddesi",
+        "primary":      "konya_millet_caddesi",
+        "fallbacks":    ["konya_kulturpark", "otogar_kavsagi", "konya_hukumet"],
     },
 ]
 
