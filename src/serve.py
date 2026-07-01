@@ -38,10 +38,9 @@ def main() -> None:
 
     cfg = WEB_DIR / "firebase-config.js"
     if not cfg.is_file():
-        print("WARNING: web/firebase-config.js is missing. The page will load but show a")
-        print("         red config-warning banner instead of live data. Copy the template:")
-        print("           cp web/firebase-config.example.js web/firebase-config.js")
-        print("         and paste your project's web SDK values into it.\n")
+        print("WARNING: web/firebase-config.js is missing (should be tracked in git).")
+        print("         The page will render but show a red config-warning banner.")
+        print("         Restore it from origin (`git checkout web/firebase-config.js`).\n")
 
     port = args.port
     if not port_is_free(port):
@@ -59,7 +58,8 @@ def main() -> None:
     print("Routes: /          -> web/index.html (live dashboard)")
     print("        /tvkur/... -> proxy to content.tvkur.com (autoplay for Konya tiles)")
     print("        /snapshots -> web/snapshots/ (anomalies + returning visitors)\n")
-    print("Reminder: in another terminal run the collector so Firestore gets fresh data:")
+    print("The dashboard reads live counts from the shared Firestore. If you're the")
+    print("admin, in another terminal run the collector to keep the data fresh:")
     print("   python -m app.collector --interval 20 \\")
     print("       --only konya_hukumet,otogar_kavsagi,sultanahmet_1_yeni,taksim_yeni")
     print("Press Ctrl+C to stop.\n")

@@ -21,12 +21,15 @@ data/
 **/web/snapshots/**/*.json
 !**/web/snapshots/**/.gitkeep
 
-# Firebase secrets / local env - never commit
+# Firebase secrets / local env - never commit.
+# NOTE: web/firebase-config.js is NOT listed here — the Firebase Web SDK config
+# (apiKey/projectId/etc.) is a public project identifier by design and is safe
+# to commit. Firestore Rules + the Admin SDK service-account key below are what
+# actually protect the database. See docs/firebase_setup.md.
 firebase-service-account.json
 *serviceAccount*.json
 *firebase-adminsdk*.json
 *-firebase-*.json
-**/web/firebase-config.js
 # Firebase CLI project binding — copy .firebaserc.example to .firebaserc
 .firebaserc
 .env
