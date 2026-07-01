@@ -34,21 +34,32 @@ services stopped billing you three minutes after crossing $5" (this).
      --display-name "Billing kill-switch runtime" \
      --project=turkey-footfall
    ```
-5. **Grant it Project Billing Manager on the target project**. This is
-   what lets it detach `turkey-footfall` from any billing account.
+5. **Grant it two project-level roles**:
+   - `roles/billing.projectManager` - has `deleteBillingAssignment`, which is
+     what actually unlinks the project from a billing account.
+   - `roles/browser` - has `resourcemanager.projects.get`, which the function
+     needs to call `projects.getBillingInfo` (the idempotency check that runs
+     before the unlink). Without it the function fails with a 403 on that
+     read step and never reaches the unlink.
+
    Note: `roles/billing.projectManager` is a *project-level* role - GCP
    rejects it if you try to attach it to the billing account directly
    (`Role roles/billing.projectManager is not supported for this resource.`).
+
    Easiest way, from Cloud Shell:
    ```
    gcloud projects add-iam-policy-binding turkey-footfall \
      --member=serviceAccount:billing-killswitch@turkey-footfall.iam.gserviceaccount.com \
      --role=roles/billing.projectManager
+
+   gcloud projects add-iam-policy-binding turkey-footfall \
+     --member=serviceAccount:billing-killswitch@turkey-footfall.iam.gserviceaccount.com \
+     --role=roles/browser
    ```
    Or, via UI: GCP Console → IAM & Admin → IAM (with the project
    `turkey-footfall` selected) → Grant Access:
    - Principal: `billing-killswitch@turkey-footfall.iam.gserviceaccount.com`
-   - Role: **Project Billing Manager**
+   - Roles: **Project Billing Manager** and **Browser**
 
 6. **Force-create the Pub/Sub service agent** (skip only if you've been
    using Pub/Sub push-subscriptions in this project before). GCP creates
