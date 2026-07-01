@@ -63,10 +63,23 @@ gcloud secrets versions access latest --secret="${SECRET_NAME}" > "${SA_PATH}"
 chown root:root "${SA_PATH}"
 chmod 0400 "${SA_PATH}"
 
-# Derive the Firebase Storage bucket name from the project_id in the JSON.
-# Convention: <project_id>.appspot.com (Firebase's default bucket).
+# Derive the Firebase Storage bucket. Firebase used to provision buckets as
+# <project_id>.appspot.com; projects created after ~Oct 2024 get
+# <project_id>.firebasestorage.app instead. Probe both, pick whichever exists.
 PROJECT_ID=$(python3 -c "import json; print(json.load(open('${SA_PATH}'))['project_id'])")
-STORAGE_BUCKET="${PROJECT_ID}.appspot.com"
+STORAGE_BUCKET=""
+for candidate in "${PROJECT_ID}.firebasestorage.app" "${PROJECT_ID}.appspot.com"; do
+  if gcloud storage buckets describe "gs://${candidate}" >/dev/null 2>&1; then
+    STORAGE_BUCKET="${candidate}"
+    break
+  fi
+done
+if [[ -z "${STORAGE_BUCKET}" ]]; then
+  echo "ERROR: could not find a Firebase Storage bucket for project ${PROJECT_ID}." >&2
+  echo "       Enable Firebase Storage first (Firebase Console -> Storage -> Get started)," >&2
+  echo "       then re-run this installer." >&2
+  exit 1
+fi
 echo "Storage bucket: ${STORAGE_BUCKET}"
 
 log "5/6 installing systemd unit"
