@@ -9,7 +9,12 @@ WorkingDirectory=__INSTALL_DIR__/src
 Environment=PYTHONUNBUFFERED=1
 Environment=FIREBASE_CREDENTIALS=__SA_PATH__
 Environment=FIREBASE_STORAGE_BUCKET=__STORAGE_BUCKET__
-ExecStart=__INSTALL_DIR__/src/.venv/bin/python -m app.collector --interval 20
+ExecStart=__INSTALL_DIR__/src/.venv/bin/python -m app.collector --interval 40
+# --interval 40s means 4 slots x 3 writes/round x 2160 rounds/day = ~25,920
+# Firestore writes/day - just above the 20K/day free tier, ~$0.85/month on Blaze.
+# At interval=20 it would be ~52K/day (~$1.70/month). Trade-off: half the writes,
+# half the temporal resolution. The dashboard's per-tile mini chart still fills
+# up cleanly and the anomaly z-score window (30 samples) covers ~20 min now.
 Restart=always
 RestartSec=15
 # Cap memory so a YOLO leak can't OOM the tiny VM's host.
