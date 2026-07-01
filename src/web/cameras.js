@@ -1,59 +1,62 @@
-// Camera metadata for the HTML dashboard grid.
-// Kept in sync with app/cameras.py GRID_CAMERAS by hand - when you add/rename a
-// grid camera in the Python catalog, mirror the change here.
+// Slot config for the HTML dashboard.
 //
-// Per camera (one of two shapes):
-//   id    : the cam_id used in Firestore (doc id under `latest/` and the
-//           cam_id field on `footfall/` docs).
-//   name  : display name in the tile header.
-//   city  : small grey subtitle.
-//   page  : the public webcam page (clickable fallback / source link).
-//   embed : iframe URL for the live player (use when the host is iframe-friendly,
-//           e.g. tvkur). Mutually exclusive with `hls`.
-//   hls   : direct HLS .m3u8 URL the dashboard plays in a <video> via hls.js
-//           (use when the host blocks iframes but exposes CORS-open HLS).
+// Since the fallback refactor, the SOURCE OF TRUTH for which camera is
+// currently backing each grid slot is Firestore `config/grid`. The cloud
+// collector updates it whenever a slot switches to a fallback cam (or
+// back to its primary).
 //
-// History (2026-06-27): replaced konya_kulturpark + konya_millet_caddesi with
-// sultanahmet_1_yeni + taksim_yeni. The new IBB pages (istanbuluseyret.ibb.gov.tr/
-// *-yeni/) set X-Frame-Options: SAMEORIGIN so we can't iframe them, but their
-// HLS at kamerayayin.ibb.istanbul returns Access-Control-Allow-Origin: * and is
-// reachable from any country - so the dashboard plays the m3u8 directly with
-// hls.js, and the Python collector reads it via _grab_via_segment.
+// This file only carries the initial layout used until the first onSnapshot
+// callback lands - the four slot ids + fallback URLs for local HLS playback,
+// mirrored from app/cameras.py GRID_SLOTS. Everything else (active_cam_name,
+// active_embed, active_hls) comes from the Firestore doc live.
 
-// Helper: tvkur HLS via our local proxy (/tvkur/<id>/master.m3u8 -> content.tvkur.com).
-// We can't <video src=tvkur> directly: the CDN refuses requests without a
-// Referer it trusts AND sends no CORS headers, so hls.js's fetch is blocked.
-// serve.py / the notebook server relay the request with the right Referer
-// and add Access-Control-Allow-Origin:* so hls.js plays the stream natively.
+// Helper: tvkur HLS via the local /tvkur/ proxy (dashboard_server.py rewrites
+// the Referer + adds Access-Control-Allow-Origin so hls.js can play it).
 const tvkurHls = (id) => `/tvkur/${id}/master.m3u8`;
 
-export const GRID_CAMERAS = [
+// The four slots the dashboard renders. Order = display order (2x2 grid).
+// `placeholder_*` fields are what the tile shows before Firestore's
+// config/grid doc arrives; they get replaced on the first snapshot.
+export const GRID_SLOTS = [
   {
-    id:    "konya_hukumet",
-    name:  "Konya - Hükümet Meydanı / Sarraflar Yeraltı Çarşısı",
-    city:  "Konya",
-    hls:   tvkurHls("c77i84vbb2nj4i0fr80g"),
-    page:  "https://webcamera24.com/camera/turkey/8043-sarraflar-yeralti-carsisi/",
+    slot_id:          "slot_konya_hukumet",
+    display_area:     "Konya - Hükümet",
+    placeholder_name: "Konya - Hükümet Meydanı",
+    placeholder_hls:  tvkurHls("c77i84vbb2nj4i0fr80g"),
+    placeholder_page: "https://webcamera24.com/camera/turkey/8043-sarraflar-yeralti-carsisi/",
   },
   {
-    id:    "otogar_kavsagi",
-    name:  "Konya - Otogar Kavşağı",
-    city:  "Konya",
-    hls:   tvkurHls("c77i91vbb2nj4i0fr81g"),
-    page:  "https://webcamera24.com/camera/turkey/8044-otogar-kavsagi/",
+    slot_id:          "slot_otogar",
+    display_area:     "Konya - Otogar",
+    placeholder_name: "Konya - Otogar Kavşağı",
+    placeholder_hls:  tvkurHls("c77i91vbb2nj4i0fr81g"),
+    placeholder_page: "https://webcamera24.com/camera/turkey/8044-otogar-kavsagi/",
   },
   {
-    id:    "sultanahmet_1_yeni",
-    name:  "Sultanahmet",
-    city:  "Istanbul",
-    hls:   "https://kamerayayin.ibb.istanbul/turistikcam/sultanahmet1.stream/playlist.m3u8",
-    page:  "https://istanbuluseyret.ibb.gov.tr/sultanahmet-1-yeni/",
+    slot_id:          "slot_sultanahmet",
+    display_area:     "Istanbul - Sultanahmet",
+    placeholder_name: "Sultanahmet",
+    placeholder_hls:  "https://kamerayayin.ibb.istanbul/turistikcam/sultanahmet1.stream/playlist.m3u8",
+    placeholder_page: "https://istanbuluseyret.ibb.gov.tr/sultanahmet-1-yeni/",
   },
   {
-    id:    "taksim_yeni",
-    name:  "Taksim Meydanı",
-    city:  "Istanbul",
-    hls:   "https://kamerayayin.ibb.istanbul/turistikcam/taksim.stream/playlist.m3u8",
-    page:  "https://istanbuluseyret.ibb.gov.tr/taksim-yeni/",
+    slot_id:          "slot_taksim",
+    display_area:     "Istanbul - Taksim",
+    placeholder_name: "Taksim Meydanı",
+    placeholder_hls:  "https://kamerayayin.ibb.istanbul/turistikcam/taksim.stream/playlist.m3u8",
+    placeholder_page: "https://istanbuluseyret.ibb.gov.tr/taksim-yeni/",
   },
 ];
+
+// Given an active_cam field from Firestore, return the correct HLS/embed URL.
+// For tvkur-backed cams we always route through the local /tvkur/ proxy so
+// hls.js can play them (content.tvkur.com refuses direct requests).
+export function hlsUrlForActiveCam(cfg) {
+  if (!cfg) return null;
+  if (cfg.active_embed && cfg.active_embed.includes("player.tvkur.com/l/")) {
+    // player.tvkur.com/l/<id> -> /tvkur/<id>/master.m3u8
+    const id = cfg.active_embed.split("/l/")[1].split("/")[0];
+    return tvkurHls(id);
+  }
+  return cfg.active_hls || null;
+}

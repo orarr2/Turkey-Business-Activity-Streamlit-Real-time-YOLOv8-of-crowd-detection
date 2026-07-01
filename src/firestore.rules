@@ -29,6 +29,12 @@ service cloud.firestore {
       allow read: if true;
       allow write: if false;
     }
+    // config/grid publishes which cam is currently active in each dashboard
+    // slot. Written only by the cloud collector via the Admin SDK.
+    match /config/{doc} {
+      allow read: if true;
+      allow write: if false;
+    }
 
     // --- Everything else: locked. No reads, no writes. ---
     // Prevents anyone from reading collections you didn't intend to expose or

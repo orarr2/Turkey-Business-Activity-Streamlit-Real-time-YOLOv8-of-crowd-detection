@@ -18,54 +18,66 @@ no refresh, everything updates the moment the collector posts a new sample.
 ## What the program does, end to end
 
 ```
- ┌──────────────────────┐    ┌──────────────────────┐    ┌──────────────────────┐
- │  Live cameras         │    │  Collector daemon    │    │  Cloud Firestore     │
- │  (IBB / webcamera24 / │ ─► │  app.collector        │ ─► │  3 collections:      │
- │   tvkur / skyline)    │    │  • resolves HLS      │    │   footfall (history)│
- │                       │    │  • grabs 1 frame /   │    │   latest   (now KPI)│
- │                       │    │    interval           │    │   reid_stats (uniq) │
- │                       │    │  • YOLOv8n predict   │    │                      │
- │                       │    │  • appearance re-ID  │    │                      │
- └──────────────────────┘    └──────────────────────┘    └──────────┬──────────┘
-                                                                    │ onSnapshot
-                                                                    ▼
+ ┌───────────────────────┐    ┌────────────────────────┐    ┌────────────────────┐
+ │  Live cameras         │    │  Cloud collector       │    │  Firebase          │
+ │  (IBB istanbuluseyret,│ ─► │  GCP e2-micro VM       │ ─► │  Firestore (24h TTL)│
+ │   webcamera24 tvkur)  │    │  • fallback per slot   │    │   footfall/{auto}   │
+ │                       │    │  • YOLOv8n predict     │    │   latest/{slot_id}  │
+ │                       │    │  • appearance re-ID    │    │   reid_stats/{slot} │
+ │                       │    │  • anomaly gates       │    │   config/grid       │
+ │                       │    │  • Storage snapshots   │    │  Storage (24h)      │
+ └───────────────────────┘    └────────────────────────┘    └──────────┬─────────┘
+                                                                       │ onSnapshot
+                                                                       ▼
                                            ┌────────────────────────────────────────┐
                                            │  web/  static HTML dashboard            │
-                                           │  • 4-camera grid + live iframes        │
-                                           │  • per-tile mini chart + anomaly badge │
+                                           │  • 4-slot grid with active-cam badge   │
+                                           │  • per-tile mini chart + anomaly       │
                                            │  • combined 24 h chart                  │
                                            │  • re-ID summary table                  │
                                            └────────────────────────────────────────┘
 ```
 
-The two halves are intentionally decoupled. The collector is one Python process you
-leave running (laptop, VM, Cloud Run, `systemd`). The dashboard is plain HTML/JS -
-serve `web/` from any static server and it lights up. Because the state lives in
-Firestore, every visitor sees the full accumulated history, not a fresh local file.
+The two halves are decoupled. The collector runs 24/7 on a GCP e2-micro
+(Always Free). The dashboard is plain HTML/JS — anyone can serve `web/` and
+subscribe to the live data. Because the state lives in Firestore, every visitor
+sees the accumulated history, and Firestore's TTL policy prunes the last 24h to
+keep the DB small. Anomaly / returning-visitor snapshots go to Firebase Storage
+(also 24h lifecycle).
+
+Cameras are grouped into **4 grid slots** (2 Konya, 2 Istanbul). Each slot has a
+primary cam and a fallback chain within the same source site
+(webcamera24/tvkur for Konya; istanbuluseyret.ibb.gov.tr for Istanbul). If the
+primary fails 3 samples in a row the collector switches to the next cam in the
+chain and updates `config/grid` — the dashboard re-renders that tile with the
+new active cam. Every 15 min it retries the primary.
 
 ---
 
 ## Quick start
 
-The project ships zero-config for **viewers** - the Firebase Web SDK identifier is
-committed, Firestore Rules make the three dashboard collections public read-only,
-and every visitor sees the live counts pushed by the admin's collector.
+The project ships zero-config for **viewers** — the Firebase Web SDK identifier
+is committed, Firestore Rules make the four public collections read-only, the
+cloud collector is running, and the dashboard just lights up.
 
 ```bash
 # Viewer (anyone who clones the repo)
 cd src/
 pip install -r requirements.txt
+jupyter lab viewer.ipynb            # local YOLO analysis + embedded dashboard
+# or just the dashboard:
 python serve.py                     # opens http://localhost:8000 with live counts
-# or: jupyter lab turkey_business_activity.ipynb   # analysis + embedded dashboard
 ```
 
-Only the **admin** who runs the collector needs a service-account key:
+Only the **admin** who runs (or diagnoses) the cloud collector needs the
+service-account key. Cloud deployment lives in [`src/deploy/gcp-vm/`](src/deploy/gcp-vm/README.md).
 
 ```bash
-# Admin - the one machine that WRITES to Firestore
-export FIREBASE_CREDENTIALS=/abs/path/to/serviceAccount.json   # Admin-SDK key (gitignored)
-python -m app.collector --interval 20 \
-    --only konya_hukumet,otogar_kavsagi,konya_kulturpark,konya_millet_caddesi
+# Admin — diagnostics + backup collector
+jupyter lab admin.ipynb             # VM health check, camera testing, fallback sim
+# or the local collector (only when the VM is down):
+export FIREBASE_CREDENTIALS=/abs/path/to/serviceAccount.json
+python -m app.collector --interval 20
 ```
 
 `serve.py` is a small no-cache static server that binds `web/` on port 8000 (override
@@ -109,12 +121,17 @@ boxes = [{"x1":…, "y1":…, "x2":…, "y2":…, "cls":"person", "conf":0.71}, 
 Per sampling round the collector writes:
 
 - **`footfall/{auto-id}`** - append-only history doc:
-  `{ts, cam_id, cam_name, person, vehicles, counts, ok, new_entities, seen_entities}`.
+  `{ts, slot, cam_id, cam_name, person, vehicles, counts, ok, new_entities, seen_entities, expire_at}`.
   Powers the 24 h charts and the rolling-z-score anomaly badge on each tile.
-- **`latest/{cam_id}`** - overwritten each sample. Powers the "now" KPI tiles cheaply
-  (one doc per camera, not a full history scan).
-- **`reid_stats/{cam_id}`** - overwritten each sample with the appearance-registry
-  rollup: `total_unique`, `total_sightings`, `regulars`, and a per-class breakdown.
+  `expire_at` is 24h ahead; Firestore's TTL policy auto-deletes expired docs.
+- **`latest/{slot_id}`** - overwritten each sample. Powers the "now" KPI tiles cheaply
+  (one doc per slot, not a full history scan). Contains the current `cam_id`
+  so the dashboard can label the tile with which cam is active right now.
+- **`reid_stats/{slot_id}`** - overwritten each sample with the appearance-registry
+  rollup for the currently-active camera in that slot.
+- **`config/grid`** - one document, updated whenever a slot switches cameras.
+  Lists the active_cam / embed URL / display area for each of the 4 slots.
+  The dashboard subscribes to this and re-renders when a fallback happens.
 
 ### Anomaly detection (per camera, last 24 h)
 
