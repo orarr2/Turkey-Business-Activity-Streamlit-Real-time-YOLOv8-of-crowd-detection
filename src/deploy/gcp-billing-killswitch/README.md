@@ -50,6 +50,17 @@ services stopped billing you three minutes after crossing $5" (this).
    - Principal: `billing-killswitch@turkey-footfall.iam.gserviceaccount.com`
    - Role: **Project Billing Manager**
 
+6. **Force-create the Pub/Sub service agent** (skip only if you've been
+   using Pub/Sub push-subscriptions in this project before). GCP creates
+   service agents lazily, and the first `gcloud functions deploy` will
+   ask to bind `roles/iam.serviceAccountTokenCreator` to the Pub/Sub
+   service agent - which fails with `Service account ... does not exist`
+   if the agent has not been provisioned yet. Force it now:
+   ```
+   gcloud beta services identity create --service=pubsub.googleapis.com \
+     --project=turkey-footfall
+   ```
+
 ## Deploy the function
 
 From this folder (`src/deploy/gcp-billing-killswitch/`) on a machine that has
