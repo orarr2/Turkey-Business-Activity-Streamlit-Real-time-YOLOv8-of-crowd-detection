@@ -61,7 +61,7 @@ def main() -> None:
     print("The dashboard reads live counts from the shared Firestore. If you're the")
     print("admin, in another terminal run the collector to keep the data fresh:")
     print("   python -m app.collector --interval 20 \\")
-    print("       --only konya_hukumet,otogar_kavsagi,sultanahmet_1_yeni,taksim_yeni")
+    print("       --only konya_hukumet,otogar_kavsagi,konya_kulturpark,konya_millet_caddesi")
     print("Press Ctrl+C to stop.\n")
 
     if not args.no_browser:
