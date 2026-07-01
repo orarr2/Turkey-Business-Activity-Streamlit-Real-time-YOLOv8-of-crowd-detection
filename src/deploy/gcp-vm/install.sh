@@ -54,8 +54,14 @@ cd "${INSTALL_DIR}/src"
 if [[ ! -d .venv ]]; then
   python3 -m venv .venv
 fi
-.venv/bin/pip install --quiet --upgrade pip
-.venv/bin/pip install --quiet -r requirements.txt
+# /tmp on e2-micro is tmpfs (RAM-backed, ~500MB on 1GB RAM). Pytorch/ultralytics
+# wheels (~800MB unpacked) blow it up mid-install with `OSError: [Errno 28]
+# No space left on device`. Point pip at /var/tmp which lives on the real
+# 30GB disk, and use --no-cache-dir to avoid keeping the downloads around too.
+export TMPDIR=/var/tmp
+mkdir -p "${TMPDIR}"
+.venv/bin/pip install --quiet --no-cache-dir --upgrade pip
+.venv/bin/pip install --quiet --no-cache-dir -r requirements.txt
 
 log "4/6 fetching Firebase service-account JSON from Secret Manager"
 mkdir -p "${CFG_DIR}"
