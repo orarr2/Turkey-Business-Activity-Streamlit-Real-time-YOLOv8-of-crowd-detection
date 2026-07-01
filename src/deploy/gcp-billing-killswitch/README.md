@@ -89,6 +89,27 @@ gcloud functions describe billing-killswitch --gen2 --region=us-east1
 ```
 should print `state: ACTIVE`.
 
+## Grant the trigger SA permission to invoke the function
+
+Cloud Functions gen2 runs on top of Cloud Run. The Eventarc/Pub/Sub trigger
+authenticates to the underlying Cloud Run service with an OIDC token whose
+subject is the trigger's service account (the one we passed to
+`--service-account` at deploy time). That SA needs `roles/run.invoker`
+on the Cloud Run service backing the function - otherwise every Pub/Sub
+delivery is rejected with:
+```
+The request was not authenticated. The IAM principal lacks {run.routes.invoke} permission.
+```
+and the function never runs.
+
+Grant it once, in Cloud Shell:
+```
+gcloud functions add-invoker-policy-binding billing-killswitch \
+  --gen2 \
+  --region=us-east1 \
+  --member=serviceAccount:billing-killswitch@turkey-footfall.iam.gserviceaccount.com
+```
+
 ## Prove it works (recommended)
 
 Temporarily lower the budget threshold below current spend, or publish a
