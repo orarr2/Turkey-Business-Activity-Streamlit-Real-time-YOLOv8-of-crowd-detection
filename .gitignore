@@ -5,6 +5,10 @@ __pycache__/
 venv/
 .ipynb_checkpoints/
 
+# Local IDE / agent config folders (safety net; not meant to be committed)
+.vscode/
+.idea/
+
 # YOLO weights (downloaded on demand)
 *.pt
 
