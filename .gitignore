@@ -39,3 +39,8 @@ firebase-service-account.json
 .env
 .env.local
 .env.*.local
+
+# Admin-only notebook - kept locally, not tracked (contains VM diagnostics
+# + backup-collector code that only the maintainer should run).
+admin.ipynb
+**/admin.ipynb

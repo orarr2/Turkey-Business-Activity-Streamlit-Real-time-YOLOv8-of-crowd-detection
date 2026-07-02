@@ -61,24 +61,16 @@ is committed, Firestore Rules make the four public collections read-only, the
 cloud collector is running, and the dashboard just lights up.
 
 ```bash
-# Viewer (anyone who clones the repo)
-cd src/
-pip install -r requirements.txt
-jupyter lab viewer.ipynb            # local YOLO analysis + embedded dashboard
-# or just the dashboard:
-python serve.py                     # opens http://localhost:8000 with live counts
+# Anyone who clones the repo
+pip install -r src/requirements.txt
+jupyter lab turkey_business_activity.ipynb   # notebook lives at the repo root;
+                                             # imports find app/ under src/ automatically
+# or just the dashboard (no notebook, no analysis):
+cd src && python serve.py                    # opens http://localhost:8000 with live counts
 ```
 
-Only the **admin** who runs (or diagnoses) the cloud collector needs the
-service-account key. Cloud deployment lives in [`src/deploy/gcp-vm/`](src/deploy/gcp-vm/README.md).
-
-```bash
-# Admin — diagnostics + backup collector
-jupyter lab admin.ipynb             # VM health check, camera testing, fallback sim
-# or the local collector (only when the VM is down):
-export FIREBASE_CREDENTIALS=/abs/path/to/serviceAccount.json
-python -m app.collector --interval 20
-```
+Cloud deployment (for the maintainer only, requires a Firebase Admin
+service-account key) lives in [`src/deploy/gcp-vm/`](src/deploy/gcp-vm/README.md).
 
 `serve.py` is a small no-cache static server that binds `web/` on port 8000 (override
 with `--port`, suppress the browser pop with `--no-browser`, auto-falls-back to the
