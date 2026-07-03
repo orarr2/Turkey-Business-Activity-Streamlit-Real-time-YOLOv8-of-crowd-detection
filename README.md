@@ -100,7 +100,7 @@ cares about** ([`CLASSES_OF_INTEREST`](src/app/detect_core.py:18)):
 | 5       | `bus`       | vehicle bucket                             |
 | 7       | `truck`     | vehicle bucket                             |
 
-`detect_with_boxes(frame, conf=0.35)` returns:
+`detect_with_boxes(frame, conf, imgsz)` returns:
 
 ```python
 counts = {
@@ -110,11 +110,28 @@ counts = {
 boxes = [{"x1":…, "y1":…, "x2":…, "y2":…, "cls":"person", "conf":0.71}, …]
 ```
 
+**Burst-median sampling.** A single frame is a noisy estimator - a pedestrian
+occluded for a moment, or a car at the edge of the confidence band, flips the
+count between consecutive frames. Each sampling round therefore grabs a short
+burst (default 3 frames ~1 s apart), detects on every frame, and keeps the
+**median** count per class ([`grab_burst` / `detect_burst`](src/app/detect_core.py)).
+Re-ID and snapshots use the frame whose count matches the median, so images and
+numbers stay consistent. The raw per-frame series is kept on each doc (`burst`)
+for transparency.
+
+**Input size + confidence.** The collector runs at `--imgsz 960` (vs YOLO's 640
+default): these wide street shots shrink a distant pedestrian or car to a few
+pixels, and at 640 the model undercounts badly. Default confidence is
+`--conf 0.30`, and any camera can carry its own calibrated `"conf"` override in
+[`cameras.py`](src/app/cameras.py) - notebook section 10 measures MAE/bias per
+camera and per input size against your own manual counts and tells you what to set.
+
 Per sampling round the collector writes:
 
 - **`footfall/{auto-id}`** - append-only history doc:
-  `{ts, slot, cam_id, cam_name, person, vehicles, counts, ok, new_entities, seen_entities, expire_at}`.
-  Powers the 24 h charts and the rolling-z-score anomaly badge on each tile.
+  `{ts, slot, cam_id, cam_name, person, vehicles, counts, burst, is_night, ok,
+  is_anomaly, anomaly?, new_entities, seen_entities, expire_at}`.
+  Powers the 24 h charts, the anomaly badges and the events table.
   `expire_at` is 24h ahead; Firestore's TTL policy auto-deletes expired docs.
 - **`latest/{slot_id}`** - overwritten each sample. Powers the "now" KPI tiles cheaply
   (one doc per slot, not a full history scan). Contains the current `cam_id`
@@ -124,14 +141,38 @@ Per sampling round the collector writes:
 - **`config/grid`** - one document, updated whenever a slot switches cameras.
   Lists the active_cam / embed URL / display area for each of the 4 slots.
   The dashboard subscribes to this and re-renders when a fallback happens.
+- **`config/profile_{slot_id}`** - the hour-of-week activity baseline (running
+  mean/std per `(day-of-week, hour)` bucket, per metric), persisted every
+  ~30 min and reloaded on startup.
 
-### Anomaly detection (per camera, last 24 h)
+### Anomaly detection - two layers × two metrics, decided server-side
 
-For each tile the dashboard maintains a rolling window of 12 samples and flags any
-sample whose people count has |z-score| > 2.5 against the window mean. Default
-behaviour: green badge ("no anomalies in the last 24h"), turns red the moment a
-spike (or unusual drop) clears the threshold, with the offending timestamp + count.
-See [`flagAnomalies`](src/web/app.js:337) and tweak `ANOMALY_WINDOW` / `ANOMALY_Z`.
+The collector - not the browser - decides what is anomalous; the dashboard
+renders its verdicts verbatim (`is_anomaly` + the `anomaly` map on each doc),
+so the badge, the events table and the snapshots always agree. Both **people
+and vehicles** are tracked per slot, because "business activity" on these
+streets is foot traffic *and* vehicle traffic:
+
+1. **Rolling window** (last 30 samples ≈ 20 min) - robust z-score built on
+   **median + MAD** instead of mean/std, so outliers already inside the window
+   can't inflate the spread and mask the next event.
+   - `spike` - z ≥ 3.5 with an absolute floor (≥ 5 people / ≥ 4 vehicles moved);
+   - `drop` - z ≤ -3 while the recent median is itself busy (≥ 8 people /
+     ≥ 6 vehicles): "the street just emptied" fires, a quiet street sitting
+     at 0 stays silent.
+2. **Hour-of-week profile** ([`HourlyProfile`](src/app/collector.py)) - a
+   Welford running mean/std per `(day-of-week, hour)` bucket in Turkey local
+   time. Once a bucket has ≥ 10 samples, values far outside it flag as
+   `contextual_spike` / `contextual_drop` - "this is not what a Wednesday
+   14:00 looks like here" - which catches slow build-ups and dead-at-rush-hour
+   cases the 20-minute window can't see.
+
+Every verdict carries `observed` vs `expected` (+ z and the hour bucket), each
+event saves a raw + annotated snapshot, per-slot cooldowns throttle repeats
+(5 min rolling / 30 min contextual), and flagged samples are excluded from the
+baselines so an ongoing event can't normalize itself. On startup the collector
+reseeds its rolling windows from the last hour of Firestore history and reloads
+the persisted profiles - a service restart doesn't re-warm from zero.
 
 ### Re-identification ("have I seen this person/car before?")
 
@@ -148,10 +189,14 @@ Implemented in [`app/reid.py`](src/app/reid.py) - deliberately dependency-free
    (default 0.92) bump `sightings`, otherwise insert a fresh entity.
 
 What the dashboard surfaces from this: per-camera **unique entities**, **total
-sightings**, and **regulars** (entities seen ≥ 3 times) in the bottom table.
-Demo-grade signature - accurate when each person has distinct clothing colour,
-weaker at night. Swap `embed_crop()` for an OSNet/torchreid forward pass when you
-need production accuracy; the SQLite registry stays the same.
+sightings**, and **regulars** (entities seen ≥ 3 times) in the bottom table -
+labeled as an **appearance-based estimate**, which is what it is: two people in
+similar clothing can merge, the same person can split after a lighting change.
+Accurate for trends in daylight, weaker at night. The registry is pruned of
+entities not seen for 48 h (on startup + every 6 h) so it stays small and the
+counts describe the recent crowd, not everything since the DB was created. Swap
+`embed_crop()` for an OSNet/torchreid forward pass when you need production
+accuracy; the SQLite registry stays the same.
 
 ### Stream resolution
 
@@ -179,10 +224,18 @@ Chart.js 4. Opens with [`python serve.py`](src/serve.py) and renders:
 
 - **2×2 camera grid** - each tile has a live iframe (tvkur player or a
   corsproxy.io-wrapped page for hosts with strict `X-Frame-Options`), four KPIs
-  (people now, vehicles now, 24 h average, 24 h peak), an anomaly badge, and a
-  per-tile mini line chart of the last 30 samples.
+  (people now, vehicles now, 24 h average, 24 h peak), an anomaly badge showing
+  the collector's latest verdict (▲ spike / ▼ drop, which metric, observed vs
+  expected), and a per-tile mini chart of the last 30 samples with anomalous
+  points enlarged in red on the series that fired.
 - **Combined 24 h chart** stacking all four cameras' people series.
-- **Re-ID summary table** - unique entities / total sightings / regulars per cam.
+- **Anomaly events table** - every flagged sample of the last 24 h across all
+  slots: when, where, spike or drop, people or vehicles, observed vs expected
+  (with the hour-of-week norm when the contextual layer fired), and a link to
+  the saved snapshot. This is the collector's own log - nothing is recomputed
+  client-side.
+- **Re-ID summary table** - unique entities / total sightings / regulars per
+  cam, tagged as an appearance-based estimate.
 - **Status pill** in the header - `live` when every camera reported within 120 s,
   `partial` if some are stale, `down` if Firestore has no recent writes (usually
   means the collector isn't running).
@@ -198,10 +251,14 @@ it just talks to Firestore from the browser tab.
 `jupyter lab turkey_business_activity.ipynb` opens the offline analysis side:
 
 - footfall time series + diurnal pattern + peak-hour bands per camera,
-- rolling z-score anomaly markers on the same series,
+- robust (median + MAD) rolling anomaly markers on the same series - the same
+  statistic the cloud collector uses,
 - dwell-time and prolonged-stops via ByteTrack on consecutive frames,
 - appearance-registry summary (regulars, unique counts) read from `data/reid.db`,
-- site-selection composite score combining footfall, dwell time, and consistency.
+- site-selection composite score combining footfall, dwell time, and consistency,
+- **section 10: accuracy calibration** - capture frames from the live grid
+  cameras, count people/vehicles yourself, and get MAE + bias per camera and
+  per input size (640 vs 960) plus a concrete `conf`/`imgsz` recommendation.
 
 Reuses the exact same `detect_core` + `reid` modules as the collector so the
 numbers reconcile.
