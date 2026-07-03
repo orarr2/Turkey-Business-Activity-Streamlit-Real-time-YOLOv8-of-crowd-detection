@@ -19,6 +19,17 @@ switch doesn't fragment the dashboard's history:
                              active_embed, active_hls, display_area}, ... ] }
                       The dashboard subscribes to this and re-renders when a
                       fallback happens.
+  config/profile_{slot_id}
+                      hour-of-week activity baseline per slot (Welford
+                      mean/std per (dow, hour) bucket, per metric). Written by
+                      the collector every ~30 min, loaded on startup so the
+                      contextual anomaly check survives restarts.
+
+Anomalous samples additionally carry an `anomaly` map:
+  { kind: spike|drop|contextual_spike|contextual_drop, metric: person|vehicles,
+    window: rolling|hourly, z, observed, expected, bucket? }
+The dashboard renders these fields verbatim - the collector is the single
+source of truth for what counts as an anomaly.
 
 Firebase Storage layout — public bucket, 24h lifecycle rule:
 
@@ -116,6 +127,31 @@ class FirebaseStore:
             "updated_at": dt.datetime.now(dt.timezone.utc),
             "slots":      slots_meta,
         })
+
+    # ---- read/persist paths used by the collector's analysis state ---------
+
+    def recent_history(self, since_iso: str, limit_docs: int = 2000) -> list[dict]:
+        """History docs with ts >= since_iso, ascending. Single range query on
+        `ts` - no composite index needed. Used on startup to reseed rolling
+        anomaly windows and (once) bootstrap the hour-of-week profiles."""
+        col = self.db.collection(self.history)
+        try:
+            from google.cloud.firestore_v1.base_query import FieldFilter
+            q = col.where(filter=FieldFilter("ts", ">=", since_iso))
+        except ImportError:   # older google-cloud-firestore
+            q = col.where("ts", ">=", since_iso)
+        q = q.order_by("ts").limit(limit_docs)
+        return [d.to_dict() for d in q.stream()]
+
+    def load_slot_profile(self, slot_id: str) -> dict | None:
+        """Read the persisted hour-of-week profile for a slot (None if absent)."""
+        snap = self.db.collection(self.config).document(f"profile_{slot_id}").get()
+        return snap.to_dict() if snap.exists else None
+
+    def save_slot_profile(self, slot_id: str, payload: dict) -> None:
+        """Overwrite the persisted hour-of-week profile for a slot."""
+        doc = {**payload, "updated_at": dt.datetime.now(dt.timezone.utc)}
+        self.db.collection(self.config).document(f"profile_{slot_id}").set(doc)
 
     def upload_snapshot(self, path: str, jpeg_bytes: bytes) -> str | None:
         """Upload JPEG bytes to Storage at `snapshots/{path}`. Return public URL.
