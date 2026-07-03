@@ -5,9 +5,13 @@
 // Collections this expects (cloud collector writes them):
 //   config/grid            one doc; publishes the current active cam per slot
 //   latest/{slot_id}       one doc per slot, overwritten each sample
-//   footfall/{auto}        append-only history; each doc has a `slot` field.
-//                          TTL policy on `expire_at` deletes docs after 24h.
-//   reid_stats/{slot_id}   per-slot unique/sightings/regulars
+//   footfall/{auto}        append-only history; each doc has a `slot` field,
+//                          `person`/`vehicles` burst-median counts, and — when
+//                          the collector flagged it — `is_anomaly` plus an
+//                          `anomaly` map (kind/metric/window/z/observed/
+//                          expected/bucket). TTL on `expire_at` deletes docs
+//                          after 24h.
+//   reid_stats/{slot_id}   per-slot unique/sightings/regulars (estimates)
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
 import {
@@ -35,14 +39,12 @@ const tilesEl  = document.getElementById("tiles");
 
 const HISTORY_LIMIT = 360;
 
-// Anomaly gates — mirror AnomalyTracker in app/collector.py.
-const ANOMALY_WINDOW    = 30;
-const ANOMALY_WARMUP    = 10;
-const ANOMALY_Z         = 3.5;
-const ANOMALY_MIN_PEOPLE = 5;
-const ANOMALY_MIN_DELTA  = 5;
-const ANOMALY_MIN_STD    = 0.0;
-const ANOMALY_COOLDOWN_S = 300;
+// Anomalies: the collector is the single source of truth. Every footfall doc
+// carries `is_anomaly` and (when flagged) an `anomaly` map with
+// kind/metric/window/z/observed/expected computed server-side from robust
+// statistics + the hour-of-week profile. The dashboard only RENDERS those
+// fields — it no longer recomputes z-scores client-side, so what you see is
+// exactly what the collector flagged (and snapshotted) at sample time.
 
 // tileState is keyed by slot_id (stable across fallback changes) — the video/
 // header re-renders when active_cam changes, but chart history is preserved.
@@ -243,6 +245,7 @@ function start(cfg) {
       renderTileChart(slot.slot_id, rows);
       updateAggregates(slot.slot_id, rows);
     }
+    renderAnomalyEvents();
   }, (err) => console.error("footfall history query failed:", err));
 
   setInterval(renderCombinedChart, 4000);
@@ -303,12 +306,14 @@ function updateAggregates(slotId, rows) {
   setAgg("avg",  avg.toFixed(1));
   setAgg("peak", peak);
 
-  const anomalies = flagAnomalies(rows);
+  const anomalies = rows.filter((r) => r.is_anomaly);
   if (anomalies.length) {
     const last = anomalies[anomalies.length - 1];
+    const d = describeAnomaly(last);
     st.anomalyBadge.className = "anomaly-badge warn";
     st.anomalyText.textContent =
-        `⚠ anomaly at ${fmtTime(last.ts)} - ${last.person} people (${anomalies.length} in 24h)`;
+        `⚠ ${d.arrow} ${d.metricLabel} ${d.kindLabel} at ${fmtTime(last.ts)} - ` +
+        `${d.observed ?? "?"} vs ~${d.expected ?? "?"} expected (${anomalies.length} in 24h)`;
     const snap = last.snapshot_annotated_url || last.snapshot_url;
     if (snap) {
       st.anomalyThumb.href = snap;
@@ -363,11 +368,22 @@ function renderTileChart(slotId, rows) {
   const labels   = view.map((r) => fmtTime(r.ts));
   const people   = view.map((r) => r.person);
   const vehicles = view.map((r) => r.vehicles);
+  // Anomalous samples render as enlarged red points on the metric that fired.
+  const anomOn = (metric) => (r) =>
+      r.is_anomaly && ((r.anomaly?.metric ?? "person") === metric);
+  const pplPointBg = view.map((r) => anomOn("person")(r)   ? "#ef4444" : "#4f8cff");
+  const vehPointBg = view.map((r) => anomOn("vehicles")(r) ? "#ef4444" : "#f0a35e");
+  const pplPointR  = view.map((r) => anomOn("person")(r)   ? 5 : 2);
+  const vehPointR  = view.map((r) => anomOn("vehicles")(r) ? 5 : 2);
 
   if (st.chart) {
     st.chart.data.labels = labels;
     st.chart.data.datasets[0].data = people;
+    st.chart.data.datasets[0].pointBackgroundColor = pplPointBg;
+    st.chart.data.datasets[0].pointRadius = pplPointR;
     st.chart.data.datasets[1].data = vehicles;
+    st.chart.data.datasets[1].pointBackgroundColor = vehPointBg;
+    st.chart.data.datasets[1].pointRadius = vehPointR;
     st.chart.update("none");
     return;
   }
@@ -377,9 +393,11 @@ function renderTileChart(slotId, rows) {
       labels,
       datasets: [
         { label: "people",   data: people,   borderColor: "#4f8cff",
-          tension: 0, pointRadius: 2, pointHoverRadius: 4, borderWidth: 2 },
+          pointBackgroundColor: pplPointBg,
+          tension: 0, pointRadius: pplPointR, pointHoverRadius: 6, borderWidth: 2 },
         { label: "vehicles", data: vehicles, borderColor: "#f0a35e",
-          tension: 0, pointRadius: 2, pointHoverRadius: 4, borderWidth: 2 },
+          pointBackgroundColor: vehPointBg,
+          tension: 0, pointRadius: vehPointR, pointHoverRadius: 6, borderWidth: 2 },
       ],
     },
     options: {
@@ -444,6 +462,49 @@ function renderCombinedChart() {
   }
 }
 
+// ---------- 6b. Anomaly events - where exactly, and when ---------------------
+// Flat 24h log across all slots, newest first: time, area, direction
+// (spike/drop), which metric moved, observed vs expected, snapshot proof.
+
+function renderAnomalyEvents() {
+  const wrap = document.getElementById("anomaly-table-wrap");
+  if (!wrap) return;
+  const events = [];
+  for (const slot of GRID_SLOTS) {
+    for (const r of tileState[slot.slot_id].history) {
+      if (r.is_anomaly) events.push({ area: slot.display_area, r });
+    }
+  }
+  if (!events.length) {
+    wrap.innerHTML = `<div class="empty">No anomalies in the last 24h -
+      activity is inside each location's normal range.</div>`;
+    return;
+  }
+  events.sort((a, b) => b.r.ts.localeCompare(a.r.ts));
+  const rows = events.slice(0, 60).map(({ area, r }) => {
+    const d = describeAnomaly(r);
+    const snap = r.snapshot_annotated_url || r.snapshot_url;
+    const expected = d.expected != null
+        ? `~${d.expected}${d.bucket ? ` <span class="footnote">(${escapeHtml(d.bucket)} norm)</span>` : ""}`
+        : "-";
+    return `<tr>
+      <td>${fmtTime(r.ts)}</td>
+      <td>${escapeHtml(area)}</td>
+      <td class="${d.dir}">${d.arrow} ${escapeHtml(d.kindLabel)}</td>
+      <td>${escapeHtml(d.metricLabel)}</td>
+      <td>${d.observed ?? "-"}</td>
+      <td>${expected}</td>
+      <td>${snap ? `<a href="${snap}" target="_blank" rel="noopener">view</a>` : "-"}</td>
+    </tr>`;
+  }).join("");
+  wrap.innerHTML = `<table class="reid">
+    <thead><tr>
+      <th>Time</th><th>Area</th><th>Type</th><th>Metric</th>
+      <th>Observed</th><th>Expected</th><th>Snapshot</th>
+    </tr></thead>
+    <tbody>${rows}</tbody></table>`;
+}
+
 // ---------- 7. Re-ID summary table ------------------------------------------
 
 function renderReidTable(docs) {
@@ -476,33 +537,34 @@ function renderReidTable(docs) {
           r.regulars ?? total(r, "regulars") ?? "-",
         ])).join("")}
       </tbody>
-    </table>`;
+    </table>
+    <div class="footnote" style="margin-top:8px">
+      Estimates from HSV color-histogram matching (rolling 48h registry) - good
+      for trends in daylight, not an identity system. Two people in similar
+      clothing can merge; the same person can split after a lighting change.
+    </div>`;
 }
 
 // ---------- helpers ---------------------------------------------------------
 
-function flagAnomalies(rows) {
-  const xs = rows.map((r) => r.person ?? 0);
-  const out = [];
-  let lastFlaggedTs = -Infinity;
-  for (let i = ANOMALY_WARMUP; i < xs.length; i++) {
-    const win = xs.slice(Math.max(0, i - ANOMALY_WINDOW), i);
-    if (win.length < ANOMALY_WARMUP) continue;
-    const mu  = win.reduce((a, b) => a + b, 0) / win.length;
-    const sd  = Math.sqrt(win.reduce((a, b) => a + (b - mu) ** 2, 0) / win.length);
-    const people = xs[i];
-    const delta  = people - mu;
-    if (delta <= 0) continue;
-    if (people < ANOMALY_MIN_PEOPLE) continue;
-    if (sd < ANOMALY_MIN_STD) continue;
-    if (delta < ANOMALY_MIN_DELTA) continue;
-    if (sd <= 0 || delta / sd < ANOMALY_Z) continue;
-    const ts = new Date(rows[i].ts).getTime() / 1000;
-    if (ts - lastFlaggedTs < ANOMALY_COOLDOWN_S) continue;
-    lastFlaggedTs = ts;
-    out.push(rows[i]);
-  }
-  return out;
+// Normalize a flagged doc's `anomaly` map into display strings. Docs written
+// before the anomaly map existed only have the boolean — treated as a people
+// spike with no expectation attached.
+function describeAnomaly(r) {
+  const a = r.anomaly || {};
+  const kind = a.kind || "spike";
+  const isDrop = kind.includes("drop");
+  const hourly = a.window === "hourly" || kind.startsWith("contextual");
+  const metric = a.metric === "vehicles" ? "vehicles" : "people";
+  return {
+    arrow:       isDrop ? "▼" : "▲",
+    dir:         isDrop ? "drop" : "spike",
+    kindLabel:   (hourly ? "hourly " : "") + (isDrop ? "drop" : "spike"),
+    metricLabel: metric,
+    observed:    a.observed ?? (metric === "vehicles" ? r.vehicles : r.person),
+    expected:    a.expected,
+    bucket:      a.bucket || "",
+  };
 }
 
 function fmtTime(iso) {

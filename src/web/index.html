@@ -89,11 +89,21 @@
     .big-chart-wrap canvas { width: 100% !important; height: 280px !important; }
     .footnote { color: #6f7480; font-size: 11px; }
 
-    .big-chart-wrap, .reid-wrap {
+    .big-chart-wrap, .reid-wrap, .anomaly-wrap {
         background: #171a21; border: 1px solid #232733; border-radius: 14px;
         padding: 16px; margin-top: 20px;
     }
-    .big-chart-wrap h2, .reid-wrap h2 { margin: 0 0 10px; font-size: 16px; }
+    .big-chart-wrap h2, .reid-wrap h2, .anomaly-wrap h2 { margin: 0 0 10px; font-size: 16px; }
+
+    /* Anomaly events table: color the direction cell. */
+    table.reid td.spike { color: #ef4444; font-weight: 600; }
+    table.reid td.drop  { color: #f0a35e; font-weight: 600; }
+
+    /* "estimate" tag on the re-ID section title. */
+    .est-tag { display: inline-block; margin-left: 8px; padding: 2px 8px;
+               border-radius: 999px; font-size: 11px; font-weight: 500;
+               background: rgba(139,144,154,0.15); color: #8b909a;
+               vertical-align: middle; }
 
     table.reid { width: 100%; border-collapse: collapse; font-size: 13px; }
     table.reid th, table.reid td { padding: 8px 10px; text-align: left;
@@ -112,7 +122,8 @@
   <header>
     <div>
       <h1>Turkey Business Activity - Live Footfall</h1>
-      <div class="sub">4 cameras · YOLO counts streamed from Firestore in real time</div>
+      <div class="sub">4 cameras · people + vehicle counts (burst-median YOLO) ·
+        anomalies vs each location's hour-of-week norm · streamed from Firestore</div>
     </div>
     <div id="status" class="sub">connecting…</div>
   </header>
@@ -135,9 +146,17 @@
       <canvas id="chart-all"></canvas>
     </div>
 
+    <!-- Anomaly events: the collector's verdicts, where + when + why -->
+    <div class="anomaly-wrap">
+      <h2>Anomaly events - last 24h (spikes ▲ and drops ▼ vs each location's norm)</h2>
+      <div id="anomaly-table-wrap">
+        <div class="empty">Waiting for footfall history…</div>
+      </div>
+    </div>
+
     <!-- Re-ID summary table -->
     <div class="reid-wrap">
-      <h2>Re-identification - unique vs returning entities per camera</h2>
+      <h2>Re-identification - returning entities per camera <span class="est-tag">appearance-based estimate</span></h2>
       <div id="reid-table-wrap">
         <div class="empty">Waiting for the collector to publish re-ID stats…</div>
       </div>
@@ -147,8 +166,8 @@
   <!-- firebase-config.js is gitignored - copy from firebase-config.example.js -->
   <!-- ?v=N is a cache-buster: bump it whenever any of the JS files changes,
        so the browser doesn't serve a stale ES-module from disk cache. -->
-  <script type="module" src="./firebase-config.js?v=15"></script>
-  <script type="module" src="./cameras.js?v=15"></script>
-  <script type="module" src="./app.js?v=15"></script>
+  <script type="module" src="./firebase-config.js?v=16"></script>
+  <script type="module" src="./cameras.js?v=16"></script>
+  <script type="module" src="./app.js?v=16"></script>
 </body>
 </html>
