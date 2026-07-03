@@ -34,6 +34,8 @@ import numpy as np
 DEFAULT_THRESHOLD = 0.92
 # Match against the K nearest stored entities of the same class (top-1 only kept).
 TOPK = 25
+# Upper bound on candidates scored per query (most-recently-seen first).
+MAX_SCAN = 400
 PERSON_CROP = (64, 128)   # w x h
 VEHICLE_CROP = (96, 96)
 
@@ -137,12 +139,16 @@ class ReidStore:
         update an existing entity or insert a new one. Always returns a result.
         """
         ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        # Fast path: pull all same-cam same-class entities and score them.
-        # We pull `last_seen` too so we can report the gap to the caller, which
-        # uses it to decide whether to save a "returning visitor" image.
+        # Pull the same-cam same-class candidates and score them. Bounded to
+        # the most recently seen MAX_SCAN entities so a busy day can't turn
+        # every query into a full-table scan (prune() keeps the table small,
+        # this is the backstop). We pull `last_seen` too so we can report the
+        # gap to the caller, which uses it to decide whether to save a
+        # "returning visitor" image.
         cur = self.conn.execute(
             "SELECT entity_id, sightings, last_seen, embedding FROM entities "
-            "WHERE cam_id=? AND cls=?", (cam_id, cls))
+            "WHERE cam_id=? AND cls=? ORDER BY last_seen DESC LIMIT ?",
+            (cam_id, cls, MAX_SCAN))
         best_id, best_sim, best_sight, best_last = None, -1.0, 0, None
         for eid, n_sight, last_seen, blob in cur.fetchall():
             vec = _blob_to_vec(blob)
@@ -197,6 +203,27 @@ class ReidStore:
                 continue
             results.append(self.query(cam_id, b["cls"], emb))
         return results
+
+    def prune(self, max_age_hours: float = 48.0) -> int:
+        """Delete entities (and their sightings) not seen for `max_age_hours`.
+
+        A public street cam sees thousands of one-off passers-by a day; without
+        pruning, the registry grows unbounded and every query() slows down while
+        the "unique entities" stat inflates forever. 48h keeps the
+        "came back the next day" case the dashboard reports, drops the rest.
+        `last_seen` is stored as a fixed-width UTC ISO string, so plain string
+        comparison against the cutoff is correct.
+        """
+        cutoff = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                               time.gmtime(time.time() - max_age_hours * 3600))
+        self.conn.execute(
+            "DELETE FROM sightings WHERE entity_id IN "
+            "(SELECT entity_id FROM entities WHERE last_seen < ?)", (cutoff,))
+        cur = self.conn.execute(
+            "DELETE FROM entities WHERE last_seen < ?", (cutoff,))
+        removed = cur.rowcount or 0
+        self.conn.commit()
+        return removed
 
     # ---- read path -------------------------------------------------------
 
