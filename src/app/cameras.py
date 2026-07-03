@@ -19,6 +19,11 @@ Optional per-entry keys:
   "page"   public webcam page (human-facing, also the resolver input for skyline/webcamera24)
   "embed"  iframe URL for the live player shown in the dashboard grid (None -> the grid
            falls back to the latest annotated YOLO frame as the "live" tile)
+  "conf"   per-camera YOLO confidence override. The collector's global default
+           (--conf) fits most scenes; set this on a camera whose calibration run
+           (notebook section 10) shows a systematic bias - lower it when the
+           camera undercounts (distant/small objects), raise it on false
+           positives. Example: "conf": 0.25.
 """
 
 # Header set IBB's nginx accepts. ffmpeg/OpenCV honor this via OPENCV_FFMPEG_CAPTURE_OPTIONS.

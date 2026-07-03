@@ -26,6 +26,14 @@ CLASSES_OF_INTEREST = {
 NAME_BY_ID = {v: k for k, v in CLASSES_OF_INTEREST.items()}
 VEHICLE_NAMES = ("bicycle", "car", "motorcycle", "bus", "truck")
 
+# Model input size the collector runs at. YOLO's 640 default shrinks a distant
+# pedestrian on these wide street shots to a handful of pixels and the model
+# undercounts badly (3 visible cars -> 1 detected). 960 costs ~2.3x the CPU
+# time per frame - still a fraction of the collector's sampling interval - and
+# recovers most of the small/far objects. Pass imgsz=None to use the model's
+# own default (the notebook's quick cells do that).
+DEFAULT_IMGSZ = 960
+
 
 def load_model(weights: str = "yolov8n.pt"):
     """Load a YOLO model once and reuse it. nano runs on CPU; bump to s/m for accuracy."""
@@ -262,13 +270,14 @@ def iter_frames(stream_url: str, max_frames: int):
         cap.release()
 
 
-def detect_and_count(model, frame, conf: float = 0.35) -> dict:
+def detect_and_count(model, frame, conf: float = 0.35, imgsz: int | None = None) -> dict:
     """Run YOLO on one frame -> {class_name: count} for the classes we track."""
-    counts, _ = detect_with_boxes(model, frame, conf=conf)
+    counts, _ = detect_with_boxes(model, frame, conf=conf, imgsz=imgsz)
     return counts
 
 
-def detect_with_boxes(model, frame, conf: float = 0.35) -> tuple[dict, list[dict]]:
+def detect_with_boxes(model, frame, conf: float = 0.35,
+                      imgsz: int | None = None) -> tuple[dict, list[dict]]:
     """Like detect_and_count but also returns per-detection boxes.
 
     Returns:
@@ -277,9 +286,10 @@ def detect_with_boxes(model, frame, conf: float = 0.35) -> tuple[dict, list[dict
     """
     counts = {name: 0 for name in CLASSES_OF_INTEREST}
     boxes: list[dict] = []
-    res = model.predict(
-        frame, conf=conf, classes=list(CLASSES_OF_INTEREST.values()), verbose=False
-    )[0]
+    kwargs = dict(conf=conf, classes=list(CLASSES_OF_INTEREST.values()), verbose=False)
+    if imgsz:
+        kwargs["imgsz"] = imgsz
+    res = model.predict(frame, **kwargs)[0]
     xyxy = res.boxes.xyxy.cpu().numpy()
     cls_ids = res.boxes.cls.cpu().numpy().astype(int)
     confs = res.boxes.conf.cpu().numpy()
@@ -295,12 +305,92 @@ def detect_with_boxes(model, frame, conf: float = 0.35) -> tuple[dict, list[dict
     return counts, boxes
 
 
-def annotate(model, frame, conf: float = 0.35):
+def annotate(model, frame, conf: float = 0.35, imgsz: int | None = None):
     """Return the YOLO-annotated frame (BGR ndarray) for visualization."""
-    res = model.predict(
-        frame, conf=conf, classes=list(CLASSES_OF_INTEREST.values()), verbose=False
-    )[0]
+    kwargs = dict(conf=conf, classes=list(CLASSES_OF_INTEREST.values()), verbose=False)
+    if imgsz:
+        kwargs["imgsz"] = imgsz
+    res = model.predict(frame, **kwargs)[0]
     return res.plot()
+
+
+# ---- Burst sampling: several frames per sample, median count -----------------
+# A single frame is a noisy estimator: a pedestrian occluded for one moment, or
+# a car sitting at the edge of the confidence band, flips the count between
+# consecutive frames. The collector therefore detects on a short burst and
+# keeps the MEDIAN count - per-frame flicker cancels out while "now" still
+# means "this handful of seconds".
+
+def grab_burst(stream_url: str, n: int = 3, stride: int = 25) -> list[np.ndarray]:
+    """Grab up to `n` frames spaced ~`stride` frames (~1 s at 25 fps) apart.
+
+    Rides on iter_frames(), which already handles the header-required HLS hosts
+    (tvkur / IBB / skyline) by decoding recent .ts segments locally. Falls back
+    to the single-frame grab if the iterator yields nothing. May return fewer
+    than `n` frames (short segments); callers should handle 1..n.
+    """
+    if n <= 1:
+        f = grab_frame(stream_url)
+        return [] if f is None else [f]
+    frames: list[np.ndarray] = []
+    try:
+        for i, fr in enumerate(iter_frames(stream_url, max_frames=n * stride)):
+            if i % stride == 0:
+                frames.append(fr)
+                if len(frames) >= n:
+                    break
+    except Exception:
+        pass
+    if not frames:
+        f = grab_frame(stream_url)
+        if f is not None:
+            frames = [f]
+    return frames
+
+
+def median_counts(counts_list: list[dict]) -> dict:
+    """Element-wise median over per-frame count dicts, rounded to int.
+
+    Median (not mean) so one bad frame in the burst - a decode glitch, a bus
+    covering the lens - cannot drag the reported count.
+    """
+    if not counts_list:
+        return {}
+    keys: set = set()
+    for c in counts_list:
+        keys.update(c.keys())
+    out: dict = {}
+    for k in keys:
+        vals = sorted((c.get(k) or 0) for c in counts_list)
+        m = len(vals)
+        mid = vals[m // 2] if m % 2 == 1 else (vals[m // 2 - 1] + vals[m // 2]) / 2
+        out[k] = int(round(mid))
+    return out
+
+
+def detect_burst(model, frames: list[np.ndarray], conf: float = 0.35,
+                 imgsz: int | None = None) -> tuple[dict, list[dict], np.ndarray, dict]:
+    """Run detection over a burst of frames and aggregate counts by median.
+
+    Returns (counts, boxes, frame, debug):
+      counts - per-class median across the burst (plus "vehicles");
+      boxes/frame - the representative frame (person count closest to the
+        median, latest wins ties) and its detections. Re-ID and snapshots use
+        that frame so they stay consistent with the reported counts;
+      debug - raw per-frame person/vehicle series for the Firestore record.
+    """
+    per: list[tuple[dict, list[dict], np.ndarray]] = []
+    for fr in frames:
+        c, b = detect_with_boxes(model, fr, conf=conf, imgsz=imgsz)
+        per.append((c, b, fr))
+    counts = median_counts([c for c, _, _ in per])
+    target = counts.get("person", 0)
+    best = min(reversed(per), key=lambda t: abs((t[0].get("person") or 0) - target))
+    debug = {
+        "burst_person":   [c.get("person") for c, _, _ in per],
+        "burst_vehicles": [c.get("vehicles") for c, _, _ in per],
+    }
+    return counts, best[1], best[2], debug
 
 
 if __name__ == "__main__":  # one-time stream-resolution check (run on an open network)
