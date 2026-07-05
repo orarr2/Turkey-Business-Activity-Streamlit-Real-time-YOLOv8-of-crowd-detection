@@ -141,14 +141,16 @@ function buildVideoInto(st, cfg, slot) {
   const page   = cfg.active_page || slot.placeholder_page;
 
   let markup;
-  if (embed && embed.includes("player.tvkur.com")) {
-    // tvkur player is iframe-friendly and self-authenticates via referer,
-    // so it's the preferred embed for konya/otogar-style cams.
-    markup = `<iframe src="${embed}" allow="autoplay; encrypted-media"
-                     allowfullscreen loading="lazy"></iframe>`;
-  } else if (hlsUrl) {
+  if (hlsUrl) {
+    // Direct HLS first: <video autoplay muted> starts on its own (tvkur cams
+    // route through the local /tvkur/ proxy). The tvkur iframe player shows a
+    // click-to-play splash, so it's only the FALLBACK when HLS can't play
+    // (e.g. web/ hosted statically without the proxy) - see attachHls.
     markup = `<video data-hls="${hlsUrl}" autoplay muted playsinline
                      controls preload="metadata"></video>`;
+  } else if (embed && embed.includes("player.tvkur.com")) {
+    markup = `<iframe src="${embed}" allow="autoplay; encrypted-media"
+                     allowfullscreen loading="lazy"></iframe>`;
   } else if (page) {
     markup = `<div class="video-fallback">
                 Live stream not embeddable from this site -
@@ -159,23 +161,39 @@ function buildVideoInto(st, cfg, slot) {
   }
   st.videoWrap.innerHTML = markup;
   const video = st.videoWrap.querySelector("video[data-hls]");
-  if (video) attachHls(st, video);
+  if (video) attachHls(st, video, cfg);
 }
 
-function attachHls(st, video) {
+function attachHls(st, video, cfg) {
   const src = video.dataset.hls;
+  const fallbackToEmbed = () => {
+    // HLS is unplayable here (proxy missing / stream refused). If the slot
+    // has an iframe player, swap to it so the tile still shows live video.
+    const embed = cfg && cfg.active_embed;
+    if (!embed) return;
+    if (st.currentHlsInstance) {
+      try { st.currentHlsInstance.destroy(); } catch (_) {}
+      st.currentHlsInstance = null;
+    }
+    st.videoWrap.innerHTML = `<iframe src="${embed}" allow="autoplay; encrypted-media"
+                     allowfullscreen loading="lazy"></iframe>`;
+  };
   if (window.Hls && window.Hls.isSupported()) {
     const hls = new window.Hls({ lowLatencyMode: true, liveSyncDuration: 4 });
     hls.loadSource(src);
     hls.attachMedia(video);
     hls.on(window.Hls.Events.ERROR, (_, data) => {
-      if (data.fatal) console.warn("hls.js fatal error on", src, data);
+      if (!data.fatal) return;
+      console.warn("hls.js fatal error on", src, data);
+      fallbackToEmbed();
     });
     st.currentHlsInstance = hls;
   } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
     video.src = src;
+    video.addEventListener("error", fallbackToEmbed, { once: true });
   } else {
     console.warn("No HLS playback support in this browser for", src);
+    fallbackToEmbed();
   }
 }
 
@@ -474,26 +492,44 @@ function renderTileChart(slotId, rows) {
 }
 
 // ---------- 6. Combined chart of all four slots -----------------------------
+// ~1,000 raw samples per camera per day drawn as-is turn into unreadable
+// spaghetti, and per-sample labels distort the time axis (gaps compress).
+// So the combined view averages each camera into fixed 5-minute bins on a
+// true shared timeline; the per-tile mini charts keep the raw samples.
+
+const COMBINED_BIN_MIN = 5;
 
 function renderCombinedChart() {
-  const seriesBySlot = {};
-  let labels = [];
+  const binMs = COMBINED_BIN_MIN * 60 * 1000;
+  const binsBySlot = {};
+  const allBins = new Set();
   for (const slot of GRID_SLOTS) {
-    const rows = tileState[slot.slot_id].history;
-    seriesBySlot[slot.slot_id] = rows;
-    for (const r of rows) labels.push(r.ts);
+    const bins = new Map();   // bin start (ms) -> {sum, n}
+    for (const r of tileState[slot.slot_id].history) {
+      if (r.person == null) continue;
+      const t = new Date(r.ts).getTime();
+      if (!Number.isFinite(t)) continue;
+      const b = Math.floor(t / binMs) * binMs;
+      const cell = bins.get(b) || { sum: 0, n: 0 };
+      cell.sum += r.person; cell.n += 1;
+      bins.set(b, cell);
+      allBins.add(b);
+    }
+    binsBySlot[slot.slot_id] = bins;
   }
-  labels = [...new Set(labels)].sort();
-  const displayLabels = labels.map(fmtTime);
+  const binList = [...allBins].sort((a, b) => a - b);
+  const displayLabels = binList.map((b) => fmtTimeShort(b));
 
   const palette = ["#4f8cff", "#36d399", "#f0a35e", "#a78bfa"];
   const datasets = GRID_SLOTS.map((slot, i) => {
-    const byTs = new Map(seriesBySlot[slot.slot_id].map((r) => [r.ts, r.person]));
+    const bins = binsBySlot[slot.slot_id];
     return {
       label: slot.display_area,
-      data: labels.map((t) => byTs.has(t) ? byTs.get(t) : null),
+      data: binList.map((b) => bins.has(b)
+          ? +(bins.get(b).sum / bins.get(b).n).toFixed(1) : null),
       borderColor: palette[i % palette.length],
-      tension: 0, pointRadius: 2, pointHoverRadius: 4, borderWidth: 2, spanGaps: true,
+      tension: 0.25, pointRadius: 0, pointHoverRadius: 3,
+      borderWidth: 2, spanGaps: true,
     };
   });
 
@@ -671,6 +707,14 @@ function fmtTime(iso) {
       hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
     });
   } catch { return String(iso).slice(11, 19); }
+}
+
+function fmtTimeShort(ms) {
+  try {
+    return new Date(ms).toLocaleTimeString([], {
+      hour: "2-digit", minute: "2-digit", hour12: false,
+    });
+  } catch { return ""; }
 }
 
 function escapeHtml(s) {
