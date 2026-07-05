@@ -5,10 +5,15 @@ Turn public live-stream cameras in Turkey into quantitative time series:
 > **live HLS stream → YOLOv8 frame inference → counts + appearance re-ID → Firestore →
 > real-time web dashboard + Jupyter analytics.**
 
-The project samples a handful of street / market / square cameras every 20 s, runs
-YOLOv8 on each frame, writes the counts and a per-detection appearance signature to
+The project samples a handful of street / market / square cameras every sampling
+round (40 s in the shipped cloud deployment; `--interval` sets it), runs YOLOv8 on
+each frame, writes the counts and a per-detection appearance signature to
 Firestore, and pushes the result to a browser dashboard via `onSnapshot` - no polling,
-no refresh, everything updates the moment the collector posts a new sample.
+no refresh, everything updates the moment the collector posts a new sample. The
+video tiles are (near-)live streams while the numbers describe the most recent
+sample, so each tile also shows the age of its counts ("counts from 38s ago") -
+if that label goes red the collector is not keeping up and the numbers should
+not be trusted as "now".
 
 
 > All source, configs and the notebook live in [`src/`](src/). The repo root only carries this `README.md` and the gitignore so the GitHub landing page stays clean.
@@ -20,7 +25,7 @@ no refresh, everything updates the moment the collector posts a new sample.
 ```
  ┌───────────────────────┐    ┌────────────────────────┐    ┌────────────────────┐
  │  Live cameras         │    │  Cloud collector       │    │  Firebase          │
- │  (IBB istanbuluseyret,│ ─► │  GCP e2-micro VM       │ ─► │  Firestore (24h TTL)│
+ │  (IBB istanbuluseyret,│ ─► │  GCP e2-small VM       │ ─► │  Firestore (24h TTL)│
  │   webcamera24 tvkur)  │    │  • fallback per slot   │    │   footfall/{auto}   │
  │                       │    │  • YOLOv8n predict     │    │   latest/{slot_id}  │
  │                       │    │  • appearance re-ID    │    │   reid_stats/{slot} │
@@ -38,8 +43,9 @@ no refresh, everything updates the moment the collector posts a new sample.
                                            └────────────────────────────────────────┘
 ```
 
-The two halves are decoupled. The collector runs 24/7 on a GCP e2-micro
-(Always Free). The dashboard is plain HTML/JS — anyone can serve `web/` and
+The two halves are decoupled. The collector runs 24/7 on a small GCP VM
+(e2-small recommended; see the deploy README for measured sizing). The
+dashboard is plain HTML/JS — anyone can serve `web/` and
 subscribe to the live data. Because the state lives in Firestore, every visitor
 sees the accumulated history, and Firestore's TTL policy prunes the last 24h to
 keep the DB small. Anomaly / returning-visitor snapshots go to Firebase Storage
@@ -129,10 +135,15 @@ camera and per input size against your own manual counts and tells you what to s
 Per sampling round the collector writes:
 
 - **`footfall/{auto-id}`** - append-only history doc:
-  `{ts, slot, cam_id, cam_name, person, vehicles, counts, burst, is_night, ok,
-  is_anomaly, anomaly?, new_entities, seen_entities, expire_at}`.
-  Powers the 24 h charts, the anomaly badges and the events table.
-  `expire_at` is 24h ahead; Firestore's TTL policy auto-deletes expired docs.
+  `{ts, slot, cam_id, cam_name, person, vehicles, counts, burst, is_night,
+  crossings?, ok, is_anomaly, anomaly?, new_entities, seen_entities,
+  expire_at}`. Powers the 24 h charts, the anomaly badges and the events
+  table. `expire_at` is 24h ahead; Firestore's TTL policy auto-deletes
+  expired docs.
+- **`events/{auto-id}`** - operational events (`loiter`, `returning`) with
+  snapshot URLs; same 24h TTL model (set the TTL policy on
+  `events.expire_at`). Powers the dashboard's "Operational events" table and
+  the alert pushes.
 - **`latest/{slot_id}`** - overwritten each sample. Powers the "now" KPI tiles cheaply
   (one doc per slot, not a full history scan). Contains the current `cam_id`
   so the dashboard can label the tile with which cam is active right now.
@@ -141,9 +152,10 @@ Per sampling round the collector writes:
 - **`config/grid`** - one document, updated whenever a slot switches cameras.
   Lists the active_cam / embed URL / display area for each of the 4 slots.
   The dashboard subscribes to this and re-renders when a fallback happens.
-- **`config/profile_{slot_id}`** - the hour-of-week activity baseline (running
-  mean/std per `(day-of-week, hour)` bucket, per metric), persisted every
-  ~30 min and reloaded on startup.
+- **`config/profile_{cam_id}`** - the hour-of-week activity baseline (running
+  mean/std per `(day-of-week, hour)` bucket, per metric), keyed by PHYSICAL
+  camera so the learned week-shape belongs to the scene rather than the grid
+  tile, persisted every ~30 min and reloaded on startup.
 
 ### Anomaly detection - two layers × two metrics, decided server-side
 
@@ -156,47 +168,222 @@ streets is foot traffic *and* vehicle traffic:
 1. **Rolling window** (last 30 samples ≈ 20 min) - robust z-score built on
    **median + MAD** instead of mean/std, so outliers already inside the window
    can't inflate the spread and mask the next event.
-   - `spike` - z ≥ 3.5 with an absolute floor (≥ 5 people / ≥ 4 vehicles moved);
+   - `spike` - z ≥ 3.5 with an absolute floor (≥ 8 people / ≥ 6 vehicles) AND
+     a scene-relative floor (the move must also be ≥ 0.8× the window median,
+     so a normal group crossing a quiet street is not an "event");
    - `drop` - z ≤ -3 while the recent median is itself busy (≥ 8 people /
      ≥ 6 vehicles): "the street just emptied" fires, a quiet street sitting
      at 0 stays silent.
 2. **Hour-of-week profile** ([`HourlyProfile`](src/app/collector.py)) - a
    Welford running mean/std per `(day-of-week, hour)` bucket in Turkey local
-   time. Once a bucket has ≥ 10 samples, values far outside it flag as
+   time (hour buckets give day and night separate baselines by construction).
+   Once a bucket has ≥ 30 samples, values far outside it flag as
    `contextual_spike` / `contextual_drop` - "this is not what a Wednesday
    14:00 looks like here" - which catches slow build-ups and dead-at-rush-hour
    cases the 20-minute window can't see.
 
+Operational gating on top of the statistics:
+
+- **Persistence** - a verdict must repeat for 2 consecutive samples
+  (`--anomaly-confirm`) before it becomes an event. A one-sample blip (a bus
+  unloading, a decode glitch) is not an operational anomaly.
+- **Scene-keyed baselines** - rolling windows are keyed `slot|cam` and hourly
+  profiles by `cam_id`. A fallback swap starts a short warmup on the new
+  camera's own history instead of scoring a quiet park against a busy
+  market's baseline (previously every swap produced a storm of fake
+  spikes/drops in both directions), and a window left unfed for 10+ minutes
+  (long fallback episode, stream outage) is cleared and re-warms rather than
+  scoring the present against a different time-of-day's regime.
+- **Adaptive learning, clip-protected** - samples feed the hourly baseline
+  (except the rare sample on which the rolling layer just CONFIRMED an event,
+  which shields still-immature buckets), clipped to mean ± 3σ once a bucket
+  is mature, with an exponentially-weighted memory (~120 samples), deduped
+  when two slots fall back onto the same camera. A one-off spike barely moves
+  the baseline, but a street that genuinely became busier is absorbed within
+  about a week and stops alerting (the previous exclude-flagged policy never
+  adapted and re-flagged the same street forever).
+- **Alert budget** - the collector warns loudly in its log when a camera
+  exceeds 8 anomaly verdicts in a day: that means miscalibrated gates, not an
+  interesting street.
+
 Every verdict carries `observed` vs `expected` (+ z and the hour bucket), each
-event saves a raw + annotated snapshot, per-slot cooldowns throttle repeats
-(5 min rolling / 30 min contextual), and flagged samples are excluded from the
-baselines so an ongoing event can't normalize itself. On startup the collector
-reseeds its rolling windows from the last hour of Firestore history and reloads
-the persisted profiles - a service restart doesn't re-warm from zero.
+event saves a raw + annotated snapshot (drawn from the detections already
+computed - no second model pass), and per-scene cooldowns throttle repeats
+(5 min rolling / 30 min contextual). On startup the collector reseeds its
+rolling windows from the last hour of Firestore history and reloads the
+persisted profiles - a service restart doesn't re-warm from zero.
+
+### The full decision logic - every gate, every number
+
+Everything the collector decides about the video is listed here; there is no
+hidden logic beyond this section. Values are the shipped defaults - the CLI
+flags / `cameras.py` keys named in each table override them.
+
+**Stage 0 - what a "sample" is.** Every round (`--interval`, 40 s shipped) and
+per camera: resolve the stream → grab a burst of 3 frames ~1 s apart → YOLOv8
+at `imgsz 960`, confidence ≥ 0.30 (`conf` per camera), COCO classes
+person/bicycle/car/motorcycle/bus/truck → optional ROI filter (below) → the
+reported count per class is the **median across the burst** (one bad frame
+can't move the number) → `vehicles` = sum of the non-person classes. The
+representative frame (person count closest to the median) feeds re-ID and
+snapshots so images always match the numbers. Every sample also gets an
+`is_night` tag (mean gray < 60).
+
+**Stage 0.5 - ROI filter** (only when the camera defines `"roi"` /
+`"roi_exclude"` polygons): a detection exists only if its **foot point**
+(bottom-center of the box - where the object touches the ground) is inside
+the include-polygon and outside every exclude-polygon. Everything downstream
+(counts, anomalies, re-ID, loitering) sees only ROI-passing detections.
+
+**Layer 1 - rolling anomaly (sudden change vs the last ~20 min).** Keyed per
+`slot|camera`; a window unfed for > 10 min is cleared (stale regime). ALL of
+these must hold, in order, for a verdict:
+
+| # | condition (spike) | condition (drop) | default |
+|---|---|---|---|
+| 1 | window has ≥ 10 samples (warmup) | same | `warmup=10` of `window=30` |
+| 2 | count ≥ 8 people / 6 vehicles | window median ≥ 8 people / 6 vehicles | `min_value` / `drop_min_baseline` |
+| 3 | move ≥ max(5, **0.8 × window median**) | same, downward | `min_delta`, `rel_delta` |
+| 4 | robust z ≥ 3.5, where z = (count − median) / max(1.4826·MAD, **2.0**) | z ≤ −3.0 | `--anomaly-z`, `--anomaly-drop-z`, `mad_floor` |
+| 5 | the SAME verdict repeats on the **next consecutive sample** | same | `--anomaly-confirm 2` |
+| 6 | ≥ 5 min since this window's last verdict | same | `--anomaly-cooldown 300` |
+
+Median+MAD (not mean/std) means an outlier already inside the window can't
+inflate the spread and mask the next event. Passing all six ⇒ the sample is
+written with `is_anomaly: true`, an `anomaly` map (kind/metric/z/observed/
+expected), and a raw + annotated snapshot.
+
+**Layer 2 - hour-of-week contextual anomaly (wrong for THIS hour).** Keyed
+per camera; one Welford accumulator `[n, mean, m2]` per (day-of-week, hour)
+bucket in Turkey local time - 168 buckets per camera per metric, persisted to
+Firestore every ~30 min. A sample flags `contextual_spike`/`contextual_drop`
+when: bucket has ≥ 30 samples; |count − bucket mean| ≥ metric `min_delta`;
+z vs spread = max(bucket std, 1.0, **0.15 × mean**) crosses ±3.5/−3.0; drop
+additionally needs bucket mean ≥ `drop_min_baseline`; 30-min cooldown per
+(camera, metric). **How the baseline learns:** every sample is fed back into
+its bucket, EXCEPT the one sample on which Layer 1 just confirmed an event
+(shields young buckets); mature buckets clip the incoming value to
+mean ± 3·spread (a wild sample moves the mean ≤ ~2%); the accumulator's n is
+capped at 120 (exponential forgetting, ~1.3 weekly occurrences of that hour),
+so a street that genuinely changed its regime is absorbed within ~a week -
+measured: 1 alert/day during that week, then silence; and two grid slots
+sitting on the same physical camera feed the bucket once, not twice (15 s
+dedup). Rolling verdicts outrank hourly ones on the record; extra verdicts
+land under `anomaly.also`.
+
+**Layer 3 - returning visitor (came back to the scene).** For every re-ID
+match, a saved return event requires ALL of, in order: not a new entity → has
+a previous sighting → absence ≥ **5 min** (`--returning-gap-min`) → match
+similarity ≥ 0.96 → ≥ 2 prior sightings → the camera was actually SAMPLED
+during ≥ 50% of the absence (an outage/fallback blind spot is not a
+departure; observation log seeded from Firestore history on restart) → the
+entity re-appeared AWAY from its previous position (IoU < 0.5 - a parked car
+re-matching in place never "returned") → ≥ 30 min since this entity's last
+saved return. Passing all ⇒ crop + full-frame snapshot, an `events` doc, and
+an alert push.
+
+**Layer 4 - prolonged presence / loitering.** A stay = consecutive re-ID
+matches of the same entity whose boxes overlap (IoU ≥ 0.3) with no gap longer
+than 3 min. When a stay exceeds **5 min for a person / 15 min for a vehicle**
+(`--loiter-*-min`, per-camera `loiter_person_sec`/`loiter_vehicle_sec`), with
+the foot point inside `loiter_roi` when one is set ⇒ `loiter` event with crop
+snapshot + alert; the same entity re-alerts at most every 30 min. Stationary
+objects re-match reliably even with the histogram embedder (same spot, same
+lighting), so this layer works today and gets stronger with OSNet.
+
+**Layer 5 - line crossings (sampled flow).** Cameras with a `"line"`: within
+each burst, detections are linked across frames by nearest centroid (move
+budget 12% of the frame diagonal, class must match); a track whose foot point
+changes sides of the line counts as one crossing, split in/out (sign of the
+cross product vs the A→B direction) and person/vehicles. The burst observes
+~2-3 s out of every 40 s, so these are a **sampled rate** - trend-comparable
+on the same camera over time, not a turnstile total.
+
+**Re-ID accumulators.** Per detection: crop → embedder → unit vector →
+cosine vs the ≤ 400 most-recently-seen same-camera same-class entities
+(SQLite) minus entities already matched in this frame → best ≥ threshold
+(0.92 histogram / 0.65 OSNet) = same entity: sightings += 1, `last_seen`
+updated, stored vector drifts toward the new look
+(`0.75·old + 0.25·new`, skipped when similarity ≥ 0.995); otherwise a new
+entity row. Entities idle 48 h are pruned. The registry stores which embedder
+produced its vectors and resets itself if the embedder changes.
+
+**Aggregates computed on top** - per-sample record fields: `person`,
+`vehicles`, `counts` (per class), `burst` (raw per-frame series),
+`is_night`, `crossings`, `new_entities`/`seen_entities`, `is_anomaly` +
+`anomaly`, snapshot URLs. Dashboard-side (from the last 24 h of records): avg
+and peak people; **activity index 0-10** = now ÷ 90th-percentile of the 24 h
+series, ×8, clamped (Quiet ≤ 2 < Moderate ≤ 5 < Busy ≤ 7 < Crowded); anomaly
+count per tile. Collector-side: anomalies per camera per Turkey-local day -
+crossing **8/day** prints a miscalibration warning; alert pushes are capped
+at one per (kind, camera) per 10 min and 20/hour globally.
+
+### Operational events + alert push
+
+`loiter` and `returning` events land in the `events` Firestore collection
+(24 h TTL, rendered in the dashboard's "Operational events" table with
+snapshot links) and are pushed - with the image - via **Telegram**
+(`TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`) and/or a **generic webhook**
+(`ALERT_WEBHOOK_URL`, JSON with optional base64 image; feed it to
+Slack/Discord/n8n). Confirmed anomalies push too, with the annotated
+snapshot. Rate limits above; `--no-alerts` / `--no-loiter` switch the
+features off. Push failures never interrupt sampling.
+
+### Faster / more accurate models (ONNX & OpenVINO export)
+
+`python -m tools.export_model --weights yolov8s.pt --format openvino [--int8]`
+exports the detector; the collector loads exported artifacts transparently
+(`--weights yolov8s_openvino_model/`). On low-power x86 VMs (the e2 family)
+OpenVINO is typically much faster than eager PyTorch and INT8 adds more,
+which buys **yolov8s** - visibly better small/distant-object recall on these
+wide street scenes - in the same CPU budget. On modern desktop cores PyTorch
+may already match OpenVINO, so ALWAYS measure on the target machine:
+`python -m tools.export_model --bench <model> --imgsz 960`.
 
 ### Re-identification ("have I seen this person/car before?")
 
-Implemented in [`app/reid.py`](src/app/reid.py) - deliberately dependency-free
-(no torchreid / no OSNet, so the notebook + collector + dashboard all share it):
+Implemented in [`app/reid.py`](src/app/reid.py) with a **pluggable embedder**
+([`app/reid_embed.py`](src/app/reid_embed.py)):
 
-1. Crop each detection box and resize (`64×128` for persons, `96×96` for vehicles).
-2. Convert to HSV, mask out very dark pixels (V<30) so night-time sodium-light
-   background doesn't dominate the signature.
-3. Build a `8×8×8` HSV color histogram, append `[aspect_ratio, normalized_area]`,
-   L2-normalize → **514-dimensional unit vector**.
-4. Store in SQLite (`data/reid.db`). On every new detection, cosine-match against
-   the same camera × same class entities; if best similarity ≥ `--reid-threshold`
-   (default 0.92) bump `sightings`, otherwise insert a fresh entity.
+- **Default: HSV histogram** (dependency-free). Crop each detection
+  (`64×128` persons, `96×96` vehicles), HSV-convert, mask very dark pixels
+  (V<30), build an `8×8×8` color histogram + `[aspect_ratio, area]`,
+  L2-normalize → 514-d unit vector. Good for stationary objects and
+  same-lighting matches; **cannot** match the same object across a lighting
+  change.
+- **Upgrade: OSNet via ONNX** - a real re-ID CNN that survives lighting and
+  pose change. Export once on any machine with internet
+  (`pip install torchreid gdown && python -m tools.export_osnet`), copy the
+  `.onnx` to the VM, run with `--reid-model data/osnet_x0_25.onnx`
+  (~5-10 ms/crop on CPU via onnxruntime). Match threshold drops to the
+  embedder's own default (0.65) automatically; the registry detects the
+  embedder switch and resets itself (old vectors are not comparable).
+
+Matching (either embedder): cosine against the same camera × same class
+entities in SQLite (`data/reid.db`); best ≥ threshold bumps `sightings` and
+EMA-drifts the stored embedding toward the fresh look; otherwise a new entity
+is inserted. Two detections in one frame can never match the same entity.
+
+**Returning-visitor events** (the saved snapshot pairs under
+`snapshots/returning/`) require ALL of: absence ≥ 5 min (`--returning-gap-min`),
+similarity ≥ 0.96, ≥ 2 prior sightings, a 30-min per-entity cooldown, **and two
+authenticity guards**: the camera must have actually been sampled during most
+of the absence (an outage or fallback episode is a blind spot, not a
+departure), and the entity must re-appear away from its previous position (a
+parked car re-matching in the same box never "returned").
 
 What the dashboard surfaces from this: per-camera **unique entities**, **total
 sightings**, and **regulars** (entities seen ≥ 3 times) in the bottom table -
 labeled as an **appearance-based estimate**, which is what it is: two people in
-similar clothing can merge, the same person can split after a lighting change.
-Accurate for trends in daylight, weaker at night. The registry is pruned of
-entities not seen for 48 h (on startup + every 6 h) so it stays small and the
-counts describe the recent crowd, not everything since the DB was created. Swap
-`embed_crop()` for an OSNet/torchreid forward pass when you need production
-accuracy; the SQLite registry stays the same.
+similar clothing can merge, the same person can split after a hard lighting
+change (the EMA drift helps with gradual change only). Accurate for trends in
+daylight, weaker at night; note that "sightings" counts every sample an entity
+is matched in, so a person lingering in view accumulates sightings without
+"returning". The registry is pruned of entities not seen for 48 h (on startup +
+every 6 h) so it stays small and the counts describe the recent crowd, not
+everything since the DB was created. Swap `embed_crop()` for an OSNet/torchreid
+forward pass when you need production accuracy; the SQLite registry stays the
+same.
 
 ### Stream resolution
 
@@ -224,10 +411,12 @@ Chart.js 4. Opens with [`python serve.py`](src/serve.py) and renders:
 
 - **2×2 camera grid** - each tile has a live iframe (tvkur player or a
   corsproxy.io-wrapped page for hosts with strict `X-Frame-Options`), four KPIs
-  (people now, vehicles now, 24 h average, 24 h peak), an anomaly badge showing
-  the collector's latest verdict (▲ spike / ▼ drop, which metric, observed vs
-  expected), and a per-tile mini chart of the last 30 samples with anomalous
-  points enlarged in red on the series that fired.
+  (people now, vehicles now, 24 h average, 24 h peak), a ticking **"counts from
+  Ns ago"** age label (red when > 120 s - the video is live, the numbers are
+  the collector's most recent sample, and the label makes that gap explicit),
+  an anomaly badge showing the collector's latest verdict (▲ spike / ▼ drop,
+  which metric, observed vs expected), and a per-tile mini chart of the last
+  30 samples with anomalous points enlarged in red on the series that fired.
 - **Combined 24 h chart** stacking all four cameras' people series.
 - **Anomaly events table** - every flagged sample of the last 24 h across all
   slots: when, where, spike or drop, people or vehicles, observed vs expected
@@ -294,9 +483,21 @@ python -m app.detect_core --resolve konya_hukumet,otogar_kavsagi
 ## Operational notes
 
 - **Storage:** Firestore free tier ≈ 20 k writes/day. At one write per camera per
-  20 s that is ~4,300 writes/day/camera. Stay modest on free tier, raise
-  `--interval`, or batch. For many cameras at high frequency keep only `latest` in
-  Firestore and ship `footfall` to BigQuery instead.
+  20 s that is ~4,300 writes/day/camera (the shipped cloud service runs
+  `--interval 40` ≈ half that). Stay modest on free tier, raise `--interval`,
+  or batch. For many cameras at high frequency keep only `latest` in Firestore
+  and ship `footfall` to BigQuery instead.
+- **VM sizing (measured):** python + torch + YOLOv8n at `--imgsz 960` peaks at
+  ~820 MB RSS. An e2-micro (1 GB) cannot hold that - it thrashes/OOMs and the
+  dashboard numbers freeze; use an **e2-small (2 GB)** or drop to
+  `--imgsz 640`. If a round takes longer than `--interval` the collector now
+  says so in its log, and the effective tile refresh rate is the round time.
+- **Calibration is not pre-baked:** notebook section 10 measures MAE/bias per
+  camera against your own manual counts and recommends `conf`/`imgsz` - run it
+  before trusting absolute counts; out of the box the counts are consistent
+  (same model, same gates) but uncalibrated. YOLOv8n undercounts dense/distant
+  crowds; the anomaly layers compare the stream to itself, so relative verdicts
+  survive that bias, absolute counts don't.
 - **Privacy by design:** the collector stores **aggregate counts** (and an HSV
   histogram appearance hash for re-ID), never raw frames of people. Crops live in
   memory only and are dropped after embedding.
@@ -313,10 +514,16 @@ python -m app.detect_core --resolve konya_hukumet,otogar_kavsagi
 | [`serve.py`](src/serve.py) | One-shot launcher for the dashboard (no-cache static server). |
 | [`turkey_business_activity.ipynb`](src/turkey_business_activity.ipynb) | Offline analytics notebook. |
 | [`app/collector.py`](src/app/collector.py) | 24/7 sampler that writes to Firestore. |
-| [`app/detect_core.py`](src/app/detect_core.py) | YOLO loading, stream resolution, frame grabbing, detection. |
-| [`app/reid.py`](src/app/reid.py) | Appearance-based re-identification (SQLite + HSV histograms). |
-| [`app/cameras.py`](src/app/cameras.py) | Verified camera catalog. |
-| [`app/firebase_store.py`](src/app/firebase_store.py) | Firestore writer (`footfall` / `latest` / `reid_stats`). |
+| [`app/detect_core.py`](src/app/detect_core.py) | YOLO loading, stream resolution, detection, ROI filter, burst tracking + line crossings. |
+| [`app/reid.py`](src/app/reid.py) | Appearance-based re-identification registry (SQLite). |
+| [`app/reid_embed.py`](src/app/reid_embed.py) | Pluggable re-ID embedders: HSV histogram / OSNet ONNX. |
+| [`app/presence.py`](src/app/presence.py) | Prolonged-presence (loitering / parked) detection. |
+| [`app/alerts.py`](src/app/alerts.py) | Telegram / webhook alert push with rate limiting. |
+| [`app/cameras.py`](src/app/cameras.py) | Verified camera catalog + per-camera ROI/line/loiter config. |
+| [`app/firebase_store.py`](src/app/firebase_store.py) | Firestore writer (`footfall` / `latest` / `reid_stats` / `events`). |
+| [`tools/export_model.py`](src/tools/export_model.py) | YOLO → ONNX/OpenVINO export + on-target benchmark. |
+| [`tools/export_osnet.py`](src/tools/export_osnet.py) | OSNet → ONNX export for `--reid-model`. |
+| [`tools/roi_grid.py`](src/tools/roi_grid.py) | Capture a frame with a coordinate grid to configure ROI/line polygons. |
 | [`web/`](src/web/) | Static HTML/JS dashboard. |
 | [`docs/firebase_setup.md`](src/docs/firebase_setup.md) | Firebase project + security rules walkthrough. |
 | [`docs/turkey_cameras.md`](src/docs/turkey_cameras.md) | Camera sources and architecture notes. |

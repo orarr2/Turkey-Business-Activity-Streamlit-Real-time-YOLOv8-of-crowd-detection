@@ -29,6 +29,12 @@ service cloud.firestore {
       allow read: if true;
       allow write: if false;
     }
+    // Operational events (loiter / returning visitors) - the dashboard's
+    // events table. Written only by the collector via the Admin SDK.
+    match /events/{doc} {
+      allow read: if true;
+      allow write: if false;
+    }
     // config/grid publishes which cam is currently active in each dashboard
     // slot. Written only by the cloud collector via the Admin SDK.
     match /config/{doc} {

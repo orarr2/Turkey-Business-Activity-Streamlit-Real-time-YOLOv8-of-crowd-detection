@@ -27,7 +27,8 @@ def test_bucket_uses_turkey_local_time():
 
 
 def test_welford_matches_direct_mean_std():
-    p = HourlyProfile()
+    # min_samples above the sample count -> no clipping, pure Welford.
+    p = HourlyProfile(min_samples=1000)
     rng = random.Random(7)
     vals = [rng.uniform(0, 20) for _ in range(200)]
     for v in vals:
@@ -113,3 +114,41 @@ def test_load_payload_tolerates_junk():
         "2_14": None,
     }}})
     assert loaded == 1
+
+
+# ---- clipped learning: adapt to regime change, resist one-off spikes ---------
+
+def test_one_off_spike_barely_moves_mature_bucket():
+    p = HourlyProfile(min_samples=10, cooldown_sec=0)
+    for _ in range(50):
+        p.update("s", "person", WED, 3)
+    p.update("s", "person", WED, 60)          # one crazy sample
+    _, _, _, mean, _ = p.stats("s", "person", WED)
+    assert mean < 3.5                          # clipped, not dragged
+
+
+def test_regime_change_converges_instead_of_flagging_forever():
+    """The old exclude-flagged policy kept the bucket at the stale level
+    forever. With clipped updates a street that genuinely became busier is
+    absorbed into its own baseline and stops flagging."""
+    p = HourlyProfile(min_samples=10, cooldown_sec=0)
+    for _ in range(50):
+        p.update("s", "person", WED, 3)        # quiet history
+    flagged_early, _ = p.check("s", "person", WED, 12, **gates())
+    assert flagged_early                        # new busy level flags at first
+    still_flagging = None
+    for _ in range(400):                        # ~4.5h of samples at 40s
+        p.update("s", "person", WED, 12)
+        still_flagging, _ = p.check("s", "person", WED, 12, **gates())
+    assert not still_flagging                   # baseline absorbed the new normal
+    _, _, _, mean, _ = p.stats("s", "person", WED)
+    assert mean > 8                             # converged toward 12
+
+
+def test_immature_bucket_learns_unclipped():
+    p = HourlyProfile(min_samples=100)
+    for v in [1, 50, 1, 50]:
+        p.update("s", "person", WED, v)
+    _, _, n, mean, _ = p.stats("s", "person", WED)
+    assert n == 4
+    assert mean == pytest.approx(25.5)

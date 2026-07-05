@@ -19,11 +19,16 @@ switch doesn't fragment the dashboard's history:
                              active_embed, active_hls, display_area}, ... ] }
                       The dashboard subscribes to this and re-renders when a
                       fallback happens.
-  config/profile_{slot_id}
-                      hour-of-week activity baseline per slot (Welford
-                      mean/std per (dow, hour) bucket, per metric). Written by
-                      the collector every ~30 min, loaded on startup so the
-                      contextual anomaly check survives restarts.
+  config/profile_{cam_id}
+                      hour-of-week activity baseline per PHYSICAL CAMERA
+                      (Welford mean/std per (dow, hour) bucket, per metric).
+                      Keyed by cam - not slot - so the learned week-shape
+                      belongs to the scene and survives fallback swaps.
+                      Written by the collector every ~30 min, loaded on
+                      startup so the contextual anomaly check survives
+                      restarts. (Legacy profile_{slot_id} docs from before
+                      the scene-keyed refactor are ignored; cams re-bootstrap
+                      from history once and re-persist under their own key.)
 
 Anomalous samples additionally carry an `anomaly` map:
   { kind: spike|drop|contextual_spike|contextual_drop, metric: person|vehicles,
@@ -101,6 +106,14 @@ class FirebaseStore:
         self.db.collection(self.history).add(history_doc)
         self.db.collection(self.latest).document(slot_id).set({**record, "slot": slot_id})
 
+    def write_event(self, event: dict) -> None:
+        """Append an operational event (loiter / returning / anomaly_push)
+        to the `events` collection. Same 24h TTL model as footfall - set the
+        Firestore TTL policy on events.expire_at (see docs/firebase_setup.md).
+        """
+        expire_at = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=TTL_HOURS)
+        self.db.collection("events").add({**event, "expire_at": expire_at})
+
     def write_reid_stats(self, slot_id: str, cam_id: str, stats: dict) -> None:
         """Overwrite the per-slot re-ID summary doc. Includes cam_id so the UI
         can note whose stats it's showing when a fallback is active.
@@ -143,15 +156,19 @@ class FirebaseStore:
         q = q.order_by("ts").limit(limit_docs)
         return [d.to_dict() for d in q.stream()]
 
-    def load_slot_profile(self, slot_id: str) -> dict | None:
-        """Read the persisted hour-of-week profile for a slot (None if absent)."""
-        snap = self.db.collection(self.config).document(f"profile_{slot_id}").get()
+    def load_slot_profile(self, key: str) -> dict | None:
+        """Read the persisted hour-of-week profile for a key (None if absent).
+
+        The collector passes cam_ids since the scene-keyed refactor; the name
+        keeps the historical "slot" wording for API compatibility.
+        """
+        snap = self.db.collection(self.config).document(f"profile_{key}").get()
         return snap.to_dict() if snap.exists else None
 
-    def save_slot_profile(self, slot_id: str, payload: dict) -> None:
-        """Overwrite the persisted hour-of-week profile for a slot."""
+    def save_slot_profile(self, key: str, payload: dict) -> None:
+        """Overwrite the persisted hour-of-week profile for a key (cam_id)."""
         doc = {**payload, "updated_at": dt.datetime.now(dt.timezone.utc)}
-        self.db.collection(self.config).document(f"profile_{slot_id}").set(doc)
+        self.db.collection(self.config).document(f"profile_{key}").set(doc)
 
     def upload_snapshot(self, path: str, jpeg_bytes: bytes) -> str | None:
         """Upload JPEG bytes to Storage at `snapshots/{path}`. Return public URL.

@@ -12,7 +12,8 @@ never expire on their own (only `footfall/` has a TTL policy).
     python cleanup_old_slots.py --apply         # actually delete
 
 Safety:
-  * Only deletes docs whose id is NOT in GRID_SLOTS.
+  * Only deletes docs whose id is NOT in GRID_SLOTS (and config/profile_* docs
+    that match neither a current camera nor a current slot).
   * Never touches the `footfall/` history collection (Firestore TTL handles that).
   * Prints every id before deleting.
 """
@@ -27,6 +28,11 @@ from app.cameras import GRID_SLOTS
 # The collections that key by slot_id (one doc per slot, overwritten each round).
 SLOT_COLLECTIONS = ("latest", "reid_stats")
 CONFIG_GRID_PATH = ("config", "grid")
+# Hour-of-week baselines live under config/profile_{cam_id} since the
+# scene-keyed refactor (pre-refactor docs were profile_{slot_id}); any
+# profile_* doc whose suffix is neither a current cam nor a current slot is
+# orphaned (removed cams, renamed slots).
+PROFILE_PREFIX = "profile_"
 
 
 def main() -> int:
@@ -46,6 +52,7 @@ def main() -> int:
     db = firestore.client()
 
     current_slot_ids = {s["slot_id"] for s in GRID_SLOTS}
+    current_cam_ids = {c for s in GRID_SLOTS for c in [s["primary"], *s["fallbacks"]]}
     print(f"Current GRID_SLOTS: {sorted(current_slot_ids)}\n")
 
     to_delete: list[tuple[str, str]] = []
@@ -53,6 +60,13 @@ def main() -> int:
         for doc in db.collection(coll).stream():
             if doc.id not in current_slot_ids:
                 to_delete.append((coll, doc.id))
+
+    # Orphaned hour-of-week profile docs: keep profile_{cam} for current cams;
+    # everything else (legacy profile_{slot}, removed cams) goes.
+    keep_profiles = {f"{PROFILE_PREFIX}{cid}" for cid in current_cam_ids}
+    for doc in db.collection(CONFIG_GRID_PATH[0]).stream():
+        if doc.id.startswith(PROFILE_PREFIX) and doc.id not in keep_profiles:
+            to_delete.append((CONFIG_GRID_PATH[0], doc.id))
 
     # Also prune stale slots from config/grid.slots so the dashboard doesn't
     # briefly render an old tile before its latest/{id} doc arrives.

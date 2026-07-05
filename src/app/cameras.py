@@ -24,6 +24,32 @@ Optional per-entry keys:
            (notebook section 10) shows a systematic bias - lower it when the
            camera undercounts (distant/small objects), raise it on false
            positives. Example: "conf": 0.25.
+
+Operational-analysis keys (all coordinates NORMALIZED 0..1 relative to the
+frame; run `python -m tools.roi_grid <cam_id>` to capture a frame with a
+coordinate grid overlay and read the points off it):
+  "roi"          include-polygon [[x,y], ...]: detections whose FOOT POINT
+                 (bottom-center) falls outside are ignored entirely - use it
+                 to cut parking lots / sky / a neighboring street out of the
+                 business-activity counts.
+  "roi_exclude"  list of exclude-polygons carved out of the ROI.
+  "line"         virtual counting line [[x1,y1],[x2,y2]]: each sampling burst
+                 counts tracked objects crossing it, split into in/out
+                 (crossing from the right side of A->B is "in" - order the two
+                 points so "in" points into your area of interest). The
+                 dashboard shows the sampled flow; it is a rate indicator,
+                 not a turnstile.
+  "loiter_roi"   polygon for prolonged-presence alerts (defaults to the whole
+                 frame when omitted while loitering is enabled).
+  "loiter_person_sec" / "loiter_vehicle_sec"
+                 per-camera override of how long a person/vehicle must stay
+                 (matched in place across samples) before a loiter event
+                 fires. Defaults: 300s person / 900s vehicle.
+
+Example (uncomment and tune per scene):
+  # "roi":  [[0.05, 0.35], [0.95, 0.35], [0.95, 0.98], [0.05, 0.98]],
+  # "line": [[0.10, 0.60], [0.90, 0.55]],
+  # "loiter_person_sec": 240,
 """
 
 # Header set IBB's nginx accepts. ffmpeg/OpenCV honor this via OPENCV_FFMPEG_CAPTURE_OPTIONS.

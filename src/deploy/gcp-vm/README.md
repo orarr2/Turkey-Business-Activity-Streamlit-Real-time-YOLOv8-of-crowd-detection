@@ -1,8 +1,18 @@
-# Deploy the collector on GCP e2-micro (Always Free)
+# Deploy the collector on a small GCP VM
 
 The cloud collector runs the same `app/collector.py` you know locally, but as a
-systemd service on a tiny always-on VM. Total cost: **$0/month** on Google's
-Always Free tier for the `e2-micro` machine.
+systemd service on a small always-on VM.
+
+> **Machine sizing — measured, not theoretical:** python + torch + YOLOv8n at
+> the default `--imgsz 960` peaks at **~820 MB RSS**. On an `e2-micro` (1 GB,
+> Always Free) the process lives above the memory caps, gets permanently
+> reclaim-throttled, rounds stretch to minutes, and the dashboard numbers
+> freeze between updates — this is the #1 cause of "the counts don't match the
+> live video". Recommended: **`e2-small` (2 GB, ~$13/month)**, which
+> `collector.service`'s MemoryHigh/MemoryMax values assume. To stay on the free
+> `e2-micro`, edit `ExecStart` to add `--imgsz 640` and lower the caps back to
+> `MemoryHigh=700M` / `MemoryMax=850M` — you trade small/distant-object recall
+> for fitting the box.
 
 ## Prerequisites (do these once, from the GCP Console at console.cloud.google.com)
 
@@ -36,7 +46,9 @@ Console → Compute Engine → VM instances → CREATE INSTANCE:
 - **Name**: `turkey-collector`
 - **Region**: `us-central1` (required for Always Free — also `us-east1` or `us-west1`)
 - **Zone**: any `-a` zone in that region
-- **Machine configuration**: series `E2`, machine type **`e2-micro`** (exactly this — anything larger is billed)
+- **Machine configuration**: series `E2`, machine type **`e2-small`**
+  (recommended — see the sizing note above; `e2-micro` is Always Free but
+  requires `--imgsz 640` and lower memory caps)
 - **Boot disk**: Debian 12, **Standard persistent disk**, size **30 GB**
 - **Firewall**: leave both HTTP/HTTPS unchecked — the collector doesn't listen
 - **Identity and API access**: keep the default service account, "Allow default access"
@@ -70,7 +82,12 @@ sudo journalctl -u collector -f
 ```
 
 Look for `Firebase backend initialized. Storage: ON` followed by
-`[TS] slot_konya_hukumet (konya_hukumet): person=X vehicles=Y ...` every 20s.
+`[TS] slot_konya_hukumet (konya_hukumet): person=X vehicles=Y ...` every
+sampling round (40 s with the shipped service file). If you instead see
+`! round took Ns > interval` lines, the machine can't keep up with the
+configured `--interval`/`--imgsz` — the dashboard tiles refresh every N
+seconds in that state, and the per-tile "counts from Ns ago" label on the
+dashboard turns red.
 
 ## Managing the collector from your phone
 
@@ -92,12 +109,13 @@ cd /opt/turkey-footfall && sudo git pull && sudo systemctl restart collector   #
 
 ## Costs to watch
 
-- **e2-micro in us-central1**: $0 as long as you have only one and stay in the
-  free region. Set a **budget alert at $1/month** so you catch anything weird.
-- **Firestore writes**: `4 slots × 3 writes/sample × 4320 samples/day ≈ 52k writes/day`.
-  Blaze free tier allows 20k/day; the overflow costs ~$0.06/day = ~$1.8/month
-  in the worst case. If you want it strictly free, raise `--interval` to 60s
-  (edit the `ExecStart` in `collector.service` and `systemctl daemon-reload`).
+- **VM**: `e2-small` is ~$13/month; `e2-micro` in us-central1 is $0 (with the
+  `--imgsz 640` caveat above). Set a **budget alert** so you catch anything weird.
+- **Firestore writes**: at the shipped `--interval 40`:
+  `4 slots × 3 writes/sample × 2160 samples/day ≈ 26k writes/day`. Blaze free
+  tier allows 20k/day; the overflow costs pennies/month. If you want it
+  strictly free, raise `--interval` to 60s (edit the `ExecStart` in
+  `collector.service` and `systemctl daemon-reload`).
 - **Storage**: at ~50MB active with 24h TTL — well under the 5GB free tier.
 - **Egress from GCP**: the collector only *writes* to Firebase (same Google
   region if you kept the default) — no external egress.

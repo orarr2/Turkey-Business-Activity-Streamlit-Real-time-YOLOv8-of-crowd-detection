@@ -154,6 +154,14 @@
       </div>
     </div>
 
+    <!-- Operational events: loitering / parked-too-long / returning visitors -->
+    <div class="anomaly-wrap">
+      <h2>Operational events - last 24h (prolonged presence, returning visitors)</h2>
+      <div id="events-table-wrap">
+        <div class="empty">Waiting for operational events…</div>
+      </div>
+    </div>
+
     <!-- Re-ID summary table -->
     <div class="reid-wrap">
       <h2>Re-identification - returning entities per camera <span class="est-tag">appearance-based estimate</span></h2>
@@ -166,8 +174,8 @@
   <!-- firebase-config.js is gitignored - copy from firebase-config.example.js -->
   <!-- ?v=N is a cache-buster: bump it whenever any of the JS files changes,
        so the browser doesn't serve a stale ES-module from disk cache. -->
-  <script type="module" src="./firebase-config.js?v=16"></script>
-  <script type="module" src="./cameras.js?v=16"></script>
-  <script type="module" src="./app.js?v=16"></script>
+  <script type="module" src="./firebase-config.js?v=17"></script>
+  <script type="module" src="./cameras.js?v=17"></script>
+  <script type="module" src="./app.js?v=17"></script>
 </body>
 </html>

@@ -61,8 +61,13 @@ design** and ships in every visitor's browser; it is *not* a secret. The securit
 apiKey — are what actually protect your data.
 
 The locked-down rules live in [`firestore.rules`](../firestore.rules) at the repo root: **public
-read on the three dashboard collections, all client writes denied** (the collector uses the Admin
-SDK, which bypasses rules, so blocking client writes doesn't affect it), and everything else locked.
+read on the dashboard collections (`footfall`, `latest`, `reid_stats`, `events`, `config`), all
+client writes denied** (the collector uses the Admin SDK, which bypasses rules, so blocking client
+writes doesn't affect it), and everything else locked.
+
+> **TTL policies:** add a Firestore TTL policy on `footfall.expire_at` AND another on
+> `events.expire_at` (Firestore console → Time-to-live) so both history collections
+> self-prune after 24h.
 
 Deploy them with the Firebase CLI:
 

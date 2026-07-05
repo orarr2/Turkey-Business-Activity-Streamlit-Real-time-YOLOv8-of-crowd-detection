@@ -29,15 +29,22 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-# How aggressive about declaring a match. 0.92 is conservative (more new IDs);
-# drop to 0.85 if you'd rather merge more aggressively.
+# How aggressive about declaring a match with the DEFAULT histogram embedder.
+# 0.92 is conservative (more new IDs); drop to 0.85 to merge more aggressively.
+# An OsnetEmbedder brings its own default (see reid_embed.py) - pass
+# threshold=None to ReidStore to use the embedder's default.
 DEFAULT_THRESHOLD = 0.92
+# On every match the stored embedding drifts toward the fresh observation:
+# stored = normalize((1-EMA_ALPHA)*stored + EMA_ALPHA*fresh). Without this the
+# FIRST crop is the signature forever, and gradual lighting change (afternoon
+# -> dusk) splits the same entity into a chain of new IDs.
+EMA_ALPHA = 0.25
 # Match against the K nearest stored entities of the same class (top-1 only kept).
 TOPK = 25
 # Upper bound on candidates scored per query (most-recently-seen first).
 MAX_SCAN = 400
-PERSON_CROP = (64, 128)   # w x h
-VEHICLE_CROP = (96, 96)
+PERSON_CROP = (64, 128)   # w x h (kept for import compat; source of truth
+VEHICLE_CROP = (96, 96)   # lives in reid_embed.py)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS entities (
@@ -60,6 +67,11 @@ CREATE TABLE IF NOT EXISTS sightings (
 );
 CREATE INDEX IF NOT EXISTS idx_sightings_entity ON sightings(entity_id);
 CREATE INDEX IF NOT EXISTS idx_sightings_ts ON sightings(ts);
+
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,                  -- e.g. 'embedder_id'
+    value TEXT NOT NULL
+);
 """
 
 
@@ -72,32 +84,25 @@ class ReidResult:
     similarity: float            # 1.0 for brand-new entities (self-similarity)
     # Seconds since the *previous* sighting at this camera, or None for new
     # entities. Lets the collector save a "returning visitor" image only when
-    # the gap is meaningful (>= 5 min) instead of every consecutive sample.
+    # the gap clears its configured threshold (RETURNING_GAP_SEC, default
+    # 5 min) instead of every consecutive sample.
     gap_seconds: float | None = None
+    # Index into the `boxes` list passed to update_from_frame() that produced
+    # this result. update_from_frame SKIPS degenerate/tiny crops, so results
+    # are NOT positionally aligned with the input - always use this index to
+    # get back to the detection box.
+    box_index: int | None = None
+
+
+from app.reid_embed import HistogramEmbedder, _l2norm  # noqa: E402
+
+_DEFAULT_EMBEDDER = HistogramEmbedder()
 
 
 def embed_crop(crop_bgr: np.ndarray, cls: str) -> np.ndarray | None:
-    """Return a 514-d unit-norm appearance vector for the crop, or None if too small."""
-    if crop_bgr is None or crop_bgr.size == 0:
-        return None
-    h, w = crop_bgr.shape[:2]
-    if h < 8 or w < 8:
-        return None
-    target = PERSON_CROP if cls == "person" else VEHICLE_CROP
-    resized = cv2.resize(crop_bgr, target, interpolation=cv2.INTER_AREA)
-    hsv = cv2.cvtColor(resized, cv2.COLOR_BGR2HSV)
-    # mask out very dark pixels (night-light gutter) so the signature reflects the object
-    mask = cv2.inRange(hsv[..., 2], 30, 255)
-    if int(mask.sum()) == 0:
-        mask = None  # crop is entirely dark - use everything
-    hist = cv2.calcHist([hsv], [0, 1, 2], mask, [8, 8, 8],
-                        [0, 180, 0, 256, 0, 256]).flatten().astype(np.float32)
-    # geometric features make persons vs cars more discriminable
-    aspect = w / max(1, h)
-    area = (w * h) / (1920 * 1080)
-    vec = np.concatenate([hist, np.array([aspect, area], dtype=np.float32)])
-    n = np.linalg.norm(vec)
-    return vec / n if n > 0 else None
+    """Legacy helper: the default histogram embedding (see reid_embed.py for
+    the pluggable embedders, including the OSNet upgrade)."""
+    return _DEFAULT_EMBEDDER.embed(crop_bgr, cls)
 
 
 def _blob_to_vec(blob: bytes) -> np.ndarray:
@@ -121,22 +126,60 @@ def _gap_seconds(prev_iso: str | None, now_iso: str) -> float | None:
 
 
 class ReidStore:
-    """SQLite-backed appearance memory. Safe to share across processes via the file."""
+    """SQLite-backed appearance memory. Safe to share across processes via the file.
+
+    `embedder` produces the appearance vectors (default: HSV histogram;
+    pass an OsnetEmbedder for real cross-lighting re-ID). The registry
+    remembers which embedder produced its vectors and RESETS itself when the
+    embedder changes - vectors from different embedders have different
+    dimensions and metric scales and must never be compared.
+    `threshold=None` uses the embedder's own default.
+    """
 
     def __init__(self, db_path: str | Path = "data/reid.db",
-                 threshold: float = DEFAULT_THRESHOLD):
+                 threshold: float | None = DEFAULT_THRESHOLD,
+                 embedder=None):
         self.path = Path(db_path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.threshold = threshold
+        self.embedder = embedder if embedder is not None else _DEFAULT_EMBEDDER
+        self.threshold = (threshold if threshold is not None
+                          else self.embedder.default_threshold)
         self.conn = sqlite3.connect(str(self.path))
         self.conn.executescript(SCHEMA)
+        self.conn.commit()
+        self._check_embedder_version()
+
+    def _check_embedder_version(self) -> None:
+        eid = getattr(self.embedder, "embedder_id", "unknown")
+        row = self.conn.execute(
+            "SELECT value FROM meta WHERE key='embedder_id'").fetchone()
+        stored = row[0] if row else None
+        if stored is not None and stored != eid:
+            n = self.conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
+            print(f"reid: embedder changed ({stored} -> {eid}); resetting "
+                  f"registry ({n} entities dropped - old vectors are not "
+                  f"comparable to the new embedder's).")
+            self.conn.execute("DELETE FROM sightings")
+            self.conn.execute("DELETE FROM entities")
+        self.conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('embedder_id', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (eid,))
         self.conn.commit()
 
     # ---- write path ------------------------------------------------------
 
-    def query(self, cam_id: str, cls: str, embedding: np.ndarray) -> ReidResult:
+    def query(self, cam_id: str, cls: str, embedding: np.ndarray,
+              exclude: set[int] | None = None,
+              commit: bool = True) -> ReidResult:
         """Match `embedding` to the stored entities (same cam + class). Either
         update an existing entity or insert a new one. Always returns a result.
+
+        `exclude` skips entity ids already matched in the CURRENT frame -
+        without it, two similar objects visible at once (two white cars) both
+        match the same entity, double-counting sightings and dragging the EMA
+        embedding toward a blend of different physical objects.
+        `commit=False` lets update_from_frame batch one transaction per frame
+        instead of one fsync per detection box.
         """
         ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         # Pull the same-cam same-class candidates and score them. Bounded to
@@ -149,25 +192,41 @@ class ReidStore:
             "SELECT entity_id, sightings, last_seen, embedding FROM entities "
             "WHERE cam_id=? AND cls=? ORDER BY last_seen DESC LIMIT ?",
             (cam_id, cls, MAX_SCAN))
-        best_id, best_sim, best_sight, best_last = None, -1.0, 0, None
+        best_id, best_sim, best_sight, best_last, best_vec = None, -1.0, 0, None, None
         for eid, n_sight, last_seen, blob in cur.fetchall():
+            if exclude and eid in exclude:
+                continue
             vec = _blob_to_vec(blob)
             sim = float(np.dot(vec, embedding))  # both L2-normalized -> cosine
             if sim > best_sim:
                 best_sim, best_id, best_sight, best_last = sim, eid, n_sight, last_seen
+                best_vec = vec
 
         if best_id is not None and best_sim >= self.threshold:
             # match: compute the gap from the prior last_seen *before* we
-            # overwrite it, then bump sightings + last_seen.
+            # overwrite it, then bump sightings + last_seen and drift the
+            # stored embedding toward the fresh observation (EMA) so gradual
+            # lighting change doesn't split the entity. Near-identical
+            # observations (sim >= 0.995) skip the blob rewrite - the blend
+            # would be a no-op costing a full-page write per detection.
             gap = _gap_seconds(best_last, ts)
             new_sight = best_sight + 1
-            self.conn.execute(
-                "UPDATE entities SET last_seen=?, sightings=? WHERE entity_id=?",
-                (ts, new_sight, best_id))
+            blended = (_l2norm((1.0 - EMA_ALPHA) * best_vec + EMA_ALPHA * embedding)
+                       if best_sim < 0.995 else None)
+            if blended is not None:
+                self.conn.execute(
+                    "UPDATE entities SET last_seen=?, sightings=?, embedding=? "
+                    "WHERE entity_id=?",
+                    (ts, new_sight, blended.tobytes(), best_id))
+            else:
+                self.conn.execute(
+                    "UPDATE entities SET last_seen=?, sightings=? WHERE entity_id=?",
+                    (ts, new_sight, best_id))
             self.conn.execute(
                 "INSERT INTO sightings (entity_id, ts, similarity) VALUES (?, ?, ?)",
                 (best_id, ts, best_sim))
-            self.conn.commit()
+            if commit:
+                self.conn.commit()
             return ReidResult(best_id, cls, is_new=False, sightings=new_sight,
                               similarity=best_sim, gap_seconds=gap)
 
@@ -180,7 +239,8 @@ class ReidStore:
         self.conn.execute(
             "INSERT INTO sightings (entity_id, ts, similarity) VALUES (?, ?, NULL)",
             (eid, ts))
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
         return ReidResult(eid, cls, is_new=True, sightings=1, similarity=1.0,
                           gap_seconds=None)
 
@@ -191,17 +251,22 @@ class ReidStore:
         boxes is a list of {x1,y1,x2,y2,cls,conf} dicts.
         """
         results = []
+        matched: set[int] = set()   # entities already claimed by this frame
         H, W = frame_bgr.shape[:2]
-        for b in boxes:
+        for i, b in enumerate(boxes):
             x1 = max(0, int(b["x1"])); y1 = max(0, int(b["y1"]))
             x2 = min(W, int(b["x2"])); y2 = min(H, int(b["y2"]))
             if x2 <= x1 or y2 <= y1:
                 continue
             crop = frame_bgr[y1:y2, x1:x2]
-            emb = embed_crop(crop, b["cls"])
+            emb = self.embedder.embed(crop, b["cls"])
             if emb is None:
                 continue
-            results.append(self.query(cam_id, b["cls"], emb))
+            r = self.query(cam_id, b["cls"], emb, exclude=matched, commit=False)
+            matched.add(r.entity_id)
+            r.box_index = i
+            results.append(r)
+        self.conn.commit()   # one transaction per frame, not per box
         return results
 
     def prune(self, max_age_hours: float = 48.0) -> int:

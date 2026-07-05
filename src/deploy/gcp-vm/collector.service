@@ -17,9 +17,15 @@ ExecStart=__INSTALL_DIR__/src/.venv/bin/python -m app.collector --interval 40
 # up cleanly and the anomaly z-score window (30 samples) covers ~20 min now.
 Restart=always
 RestartSec=15
-# Cap memory so a YOLO leak can't OOM the tiny VM's host.
-MemoryHigh=700M
-MemoryMax=850M
+# Sizing (measured): python + torch + YOLOv8n peaks at ~820 MB RSS at
+# imgsz=960. The old MemoryHigh=700M sat BELOW that, so the kernel kept the
+# process in permanent reclaim-throttling (rounds of several minutes, "frozen"
+# dashboard numbers) and near MemoryMax it was OOM-killed into restart loops.
+# These caps need a machine with 2 GB RAM (e2-small) - an e2-micro (1 GB)
+# cannot hold this workload at imgsz 960; if you must stay on e2-micro, run
+# with --imgsz 640 and lower these caps back to ~700M/850M.
+MemoryHigh=1300M
+MemoryMax=1600M
 StandardOutput=journal
 StandardError=journal
 

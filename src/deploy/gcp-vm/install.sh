@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # One-shot installer for the Turkey Footfall collector on a fresh Debian 12
-# GCP e2-micro. Run once via:
+# GCP VM (e2-small recommended; e2-micro works with reduced imgsz - the
+# installer adapts the service file to the machine's RAM automatically).
+# Run once via:
 #
 #   curl -sSL https://raw.githubusercontent.com/orarr2/Turkey-Business-Activity-Streamlit-Real-time-YOLOv8-of-crowd-detection/main/src/deploy/gcp-vm/install.sh | sudo bash
 #
@@ -96,6 +98,19 @@ sed -e "s|__STORAGE_BUCKET__|${STORAGE_BUCKET}|g" \
     -e "s|__INSTALL_DIR__|${INSTALL_DIR}|g" \
     -e "s|__SA_PATH__|${SA_PATH}|g" \
     "${UNIT_SRC}" > "${UNIT_DEST}"
+# Fit the unit to the machine. torch+YOLOv8n at imgsz 960 peaks at ~820MB RSS;
+# the shipped MemoryHigh/MemoryMax (1300M/1600M) assume >= 2GB RAM (e2-small).
+# On a 1GB box (e2-micro) those caps exceed physical RAM and never engage, so
+# the kernel OOM killer would hit the HOST first - drop to imgsz 640 and caps
+# that actually fit instead.
+MEM_TOTAL_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+if (( MEM_TOTAL_KB < 1500000 )); then
+  echo "Detected ${MEM_TOTAL_KB}KB RAM (<1.5GB): configuring --imgsz 640 and tighter memory caps."
+  sed -i -e 's|--interval 40|--interval 40 --imgsz 640|' \
+         -e 's|MemoryHigh=1300M|MemoryHigh=700M|' \
+         -e 's|MemoryMax=1600M|MemoryMax=850M|' \
+      "${UNIT_DEST}"
+fi
 chmod 0644 "${UNIT_DEST}"
 systemctl daemon-reload
 

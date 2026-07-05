@@ -270,6 +270,160 @@ def iter_frames(stream_url: str, max_frames: int):
         cap.release()
 
 
+# ---- Region-of-interest (ROI) filtering --------------------------------------
+# A camera entry may carry a "roi" polygon (and/or "roi_exclude" polygons) in
+# NORMALIZED coordinates (0..1 relative to frame width/height), so one config
+# works across stream resolutions. A detection belongs to the ROI when its
+# FOOT POINT - bottom-center of the box, where the object touches the ground -
+# is inside the polygon. That excludes parked-car lots, sky, and neighboring
+# roofs without clipping pedestrians whose heads poke outside the zone.
+
+def point_in_polygon(x: float, y: float, poly: list) -> bool:
+    """Ray-casting test; poly is [[x1,y1], [x2,y2], ...] in any unit."""
+    inside = False
+    n = len(poly)
+    if n < 3:
+        return False
+    j = n - 1
+    for i in range(n):
+        xi, yi = poly[i]
+        xj, yj = poly[j]
+        if ((yi > y) != (yj > y)) and \
+                (x < (xj - xi) * (y - yi) / ((yj - yi) or 1e-12) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
+def _foot_point(b: dict) -> tuple[float, float]:
+    return (b["x1"] + b["x2"]) / 2.0, b["y2"]
+
+
+def filter_boxes_roi(boxes: list[dict], frame_shape,
+                     roi: list | None,
+                     roi_exclude: list | None = None) -> list[dict]:
+    """Keep boxes whose foot point is inside `roi` (if set) and outside every
+    polygon in `roi_exclude`. Polygons use normalized 0..1 coordinates."""
+    if not roi and not roi_exclude:
+        return boxes
+    H, W = frame_shape[:2]
+    kept = []
+    for b in boxes:
+        fx, fy = _foot_point(b)
+        nx, ny = fx / W, fy / H
+        if roi and not point_in_polygon(nx, ny, roi):
+            continue
+        if roi_exclude and any(point_in_polygon(nx, ny, p) for p in roi_exclude):
+            continue
+        kept.append(b)
+    return kept
+
+
+def counts_from_boxes(boxes: list[dict]) -> dict:
+    """Recompute the per-class count dict (incl. 'vehicles') from a box list."""
+    counts = {name: 0 for name in CLASSES_OF_INTEREST}
+    for b in boxes:
+        if b.get("cls") in counts:
+            counts[b["cls"]] += 1
+    counts["vehicles"] = sum(counts[v] for v in VEHICLE_NAMES)
+    return counts
+
+
+# ---- Burst tracking + virtual-line crossing -----------------------------------
+# The burst gives a short consecutive window (~n frames, ~1s apart). Matching
+# detections across those frames by nearest centroid yields short tracks; a
+# camera with a configured "line" ([[x1,y1],[x2,y2]] normalized) then counts
+# how many tracks CROSSED it, and in which direction. Because the collector
+# only observes ~2-3s out of every interval, the numbers are a SAMPLED flow
+# rate - comparable over time on the same camera, not an absolute turnstile.
+
+def _centroid(b: dict) -> tuple[float, float]:
+    return (b["x1"] + b["x2"]) / 2.0, (b["y1"] + b["y2"]) / 2.0
+
+
+def track_burst(frames_boxes: list[list[dict]], frame_shape,
+                max_move_frac: float = 0.12) -> list[list[dict]]:
+    """Greedy nearest-centroid matching of boxes across burst frames.
+
+    Returns tracks: each a list of same-class boxes, one per frame the object
+    was matched in (consecutive frames only - a miss ends the track).
+    `max_move_frac` caps the allowed centroid move between burst frames as a
+    fraction of the frame diagonal (objects teleporting further are different
+    objects).
+    """
+    if not frames_boxes:
+        return []
+    H, W = frame_shape[:2]
+    budget = max_move_frac * (H * H + W * W) ** 0.5
+    tracks: list[list[dict]] = [[b] for b in frames_boxes[0]]
+    open_tracks = list(tracks)
+    for boxes in frames_boxes[1:]:
+        candidates = []
+        for ti, t in enumerate(open_tracks):
+            tx, ty = _centroid(t[-1])
+            for bi, b in enumerate(boxes):
+                if b["cls"] != t[-1]["cls"]:
+                    continue
+                bx, by = _centroid(b)
+                d = ((bx - tx) ** 2 + (by - ty) ** 2) ** 0.5
+                if d <= budget:
+                    candidates.append((d, ti, bi))
+        candidates.sort()
+        used_t, used_b = set(), set()
+        next_open: list[list[dict]] = []
+        for d, ti, bi in candidates:
+            if ti in used_t or bi in used_b:
+                continue
+            used_t.add(ti); used_b.add(bi)
+            open_tracks[ti].append(boxes[bi])
+            next_open.append(open_tracks[ti])
+        for bi, b in enumerate(boxes):
+            if bi not in used_b:
+                t = [b]
+                tracks.append(t)
+                next_open.append(t)
+        open_tracks = next_open
+    return tracks
+
+
+def _line_side(px: float, py: float, line: list) -> float:
+    """Signed side of point vs the line A->B (cross product z)."""
+    (ax, ay), (bx, by) = line
+    return (bx - ax) * (py - ay) - (by - ay) * (px - ax)
+
+
+def count_line_crossings(tracks: list[list[dict]], frame_shape,
+                         line: list) -> dict:
+    """Count tracks whose FOOT POINT crossed the normalized line during the
+    burst. Returns {"in": n, "out": n, "person_in": ..., "vehicles_in": ...}.
+    "in" is a crossing from the negative to the positive side of A->B (pick
+    the line's point order so that "in" means into your area of interest).
+    """
+    H, W = frame_shape[:2]
+    res = {"in": 0, "out": 0,
+           "person_in": 0, "person_out": 0,
+           "vehicles_in": 0, "vehicles_out": 0}
+    for t in tracks:
+        if len(t) < 2:
+            continue
+        sides = []
+        for b in t:
+            fx, fy = _foot_point(b)
+            sides.append(_line_side(fx / W, fy / H, line))
+        crossed = None
+        for s0, s1 in zip(sides, sides[1:]):
+            if s0 < 0 <= s1:
+                crossed = "in"
+            elif s0 >= 0 > s1:
+                crossed = "out"
+        if crossed is None:
+            continue
+        res[crossed] += 1
+        metric = "person" if t[0].get("cls") == "person" else "vehicles"
+        res[f"{metric}_{crossed}"] += 1
+    return res
+
+
 def detect_and_count(model, frame, conf: float = 0.35, imgsz: int | None = None) -> dict:
     """Run YOLO on one frame -> {class_name: count} for the classes we track."""
     counts, _ = detect_with_boxes(model, frame, conf=conf, imgsz=imgsz)
@@ -306,12 +460,62 @@ def detect_with_boxes(model, frame, conf: float = 0.35,
 
 
 def annotate(model, frame, conf: float = 0.35, imgsz: int | None = None):
-    """Return the YOLO-annotated frame (BGR ndarray) for visualization."""
-    kwargs = dict(conf=conf, classes=list(CLASSES_OF_INTEREST.values()), verbose=False)
-    if imgsz:
-        kwargs["imgsz"] = imgsz
-    res = model.predict(frame, **kwargs)[0]
-    return res.plot()
+    """Run detection and return the annotated frame (BGR ndarray).
+
+    Runs a FRESH inference - fine for notebook one-offs. The collector calls
+    draw_boxes() with the detections it already has instead, so an anomalous
+    sample doesn't cost a second model pass on the VM. Both paths render via
+    draw_boxes so calibration images and dashboard snapshots look identical.
+    """
+    _, boxes = detect_with_boxes(model, frame, conf=conf, imgsz=imgsz)
+    return draw_boxes(frame, boxes)
+
+
+def box_iou(a: dict | None, b: dict | None) -> float:
+    """IoU of two {x1,y1,x2,y2} boxes; 0.0 if either is missing/degenerate."""
+    if not a or not b:
+        return 0.0
+    ix1, iy1 = max(a["x1"], b["x1"]), max(a["y1"], b["y1"])
+    ix2, iy2 = min(a["x2"], b["x2"]), min(a["y2"], b["y2"])
+    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    area_a = max(0.0, a["x2"] - a["x1"]) * max(0.0, a["y2"] - a["y1"])
+    area_b = max(0.0, b["x2"] - b["x1"]) * max(0.0, b["y2"] - b["y1"])
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+_BOX_COLORS = {
+    "person":     (80, 175, 76),    # green (BGR)
+    "bicycle":    (200, 130, 0),
+    "car":        (60, 130, 246),
+    "motorcycle": (200, 130, 0),
+    "bus":        (0, 90, 230),
+    "truck":      (0, 90, 230),
+}
+
+
+def draw_boxes(frame: np.ndarray, boxes: list[dict]) -> np.ndarray:
+    """Annotate a COPY of `frame` with already-computed detection boxes.
+
+    Same information as annotate() (class + confidence per box) without
+    re-running the model.
+    """
+    out = frame.copy()
+    for b in boxes:
+        x1, y1 = int(b["x1"]), int(b["y1"])
+        x2, y2 = int(b["x2"]), int(b["y2"])
+        color = _BOX_COLORS.get(b.get("cls", ""), (255, 255, 255))
+        cv2.rectangle(out, (x1, y1), (x2, y2), color, 2)
+        label = f'{b.get("cls", "?")} {b.get("conf", 0):.2f}'
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+        ty = y1 - 4 if y1 - th - 6 >= 0 else y2 + th + 4
+        cv2.rectangle(out, (x1, ty - th - 3), (x1 + tw + 4, ty + 3), color, -1)
+        cv2.putText(out, label, (x1 + 2, ty), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45, (255, 255, 255), 1, cv2.LINE_AA)
+    return out
 
 
 # ---- Burst sampling: several frames per sample, median count -----------------
@@ -369,7 +573,10 @@ def median_counts(counts_list: list[dict]) -> dict:
 
 
 def detect_burst(model, frames: list[np.ndarray], conf: float = 0.35,
-                 imgsz: int | None = None) -> tuple[dict, list[dict], np.ndarray, dict]:
+                 imgsz: int | None = None,
+                 roi: list | None = None,
+                 roi_exclude: list | None = None,
+                 line: list | None = None) -> tuple[dict, list[dict], np.ndarray, dict]:
     """Run detection over a burst of frames and aggregate counts by median.
 
     Returns (counts, boxes, frame, debug):
@@ -377,11 +584,21 @@ def detect_burst(model, frames: list[np.ndarray], conf: float = 0.35,
       boxes/frame - the representative frame (person count closest to the
         median, latest wins ties) and its detections. Re-ID and snapshots use
         that frame so they stay consistent with the reported counts;
-      debug - raw per-frame person/vehicle series for the Firestore record.
+      debug - raw per-frame person/vehicle series for the Firestore record,
+        plus "crossings" (in/out per metric) when a `line` is configured.
+
+    `roi`/`roi_exclude` (normalized polygons) drop detections whose foot point
+    is outside the camera's area of interest BEFORE counting, so a parking lot
+    or a neighboring roof can't inflate business-activity numbers. `line`
+    (normalized [[x1,y1],[x2,y2]]) counts burst-window crossings via short
+    centroid tracks - a sampled entry/exit flow rate.
     """
     per: list[tuple[dict, list[dict], np.ndarray]] = []
     for fr in frames:
         c, b = detect_with_boxes(model, fr, conf=conf, imgsz=imgsz)
+        if roi or roi_exclude:
+            b = filter_boxes_roi(b, fr.shape, roi, roi_exclude)
+            c = counts_from_boxes(b)
         per.append((c, b, fr))
     counts = median_counts([c for c, _, _ in per])
     target = counts.get("person", 0)
@@ -390,6 +607,9 @@ def detect_burst(model, frames: list[np.ndarray], conf: float = 0.35,
         "burst_person":   [c.get("person") for c, _, _ in per],
         "burst_vehicles": [c.get("vehicles") for c, _, _ in per],
     }
+    if line and len(per) >= 2:
+        tracks = track_burst([b for _, b, _ in per], per[0][2].shape)
+        debug["crossings"] = count_line_crossings(tracks, per[0][2].shape, line)
     return counts, best[1], best[2], debug
 
 

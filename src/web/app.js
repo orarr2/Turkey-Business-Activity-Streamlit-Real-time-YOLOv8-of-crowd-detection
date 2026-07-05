@@ -38,6 +38,9 @@ const statusEl = document.getElementById("status");
 const tilesEl  = document.getElementById("tiles");
 
 const HISTORY_LIMIT = 360;
+// Shared staleness threshold: the header status pill and the per-tile age
+// label must agree, or the same screen claims "live" and "stale" at once.
+const STALE_AGE_S = 120;
 
 // Anomalies: the collector is the single source of truth. Every footfall doc
 // carries `is_anomaly` and (when flagged) an `anomaly` map with
@@ -86,6 +89,8 @@ for (const slot of GRID_SLOTS) {
          style="display:none" title="open snapshot of latest anomaly">
         <img alt="" />
       </a>
+      <span class="footnote" data-age title="age of the counts shown - the video is live, the numbers are the collector's most recent sample"></span>
+      <span class="footnote" data-crossings title="sampled line crossings during the last burst (cameras with a configured counting line)"></span>
       <span class="footnote" data-samples></span>
     </div>
     <div class="chart-mini"><canvas></canvas></div>
@@ -105,10 +110,13 @@ for (const slot of GRID_SLOTS) {
     anomalyText:  tile.querySelector("[data-anomaly-text]"),
     fallbackBadge: tile.querySelector("[data-fallback]"),
     anomalyThumb: tile.querySelector("[data-anomaly-thumb]"),
+    ageEl:        tile.querySelector("[data-age]"),
+    crossEl:      tile.querySelector("[data-crossings]"),
     samplesEl:    tile.querySelector("[data-samples]"),
     chartCanvas:  tile.querySelector("canvas"),
     chart: null,
     history: [],
+    lastSampleMs: null,   // epoch ms of the last OK sample; drives the age label
     currentActiveCam: null,   // updated by applyGridConfig
     currentHlsInstance: null, // hls.js instance we own; destroyed on rebuild
   };
@@ -213,7 +221,7 @@ function start(cfg) {
       if (!st) continue;
       const rec = d.data();
       const ageS = rec.ts ? Math.round((Date.now() - new Date(rec.ts).getTime()) / 1000) : null;
-      if (ageS != null && ageS < 120) alive++;
+      if (ageS != null && ageS < STALE_AGE_S) alive++;
       setLatest(st, rec);
     }
     statusEl.innerHTML = alive === GRID_SLOTS.length
@@ -255,6 +263,17 @@ function start(cfg) {
   onSnapshot(collection(db, "reid_stats"), (snap) => {
     renderReidTable(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
   }, () => {});
+
+  // 4e. Operational events (loiter / returning) - last 24h, newest first.
+  const evQ = query(
+    collection(db, "events"),
+    where("ts", ">=", since),
+    orderBy("ts", "desc"),
+    limit(120),
+  );
+  onSnapshot(evQ, (snap) => {
+    renderEventsTable(snap.docs.map((d) => d.data()));
+  }, (err) => console.warn("events subscription failed:", err));
 }
 
 function applyGridConfig(cfg) {
@@ -283,11 +302,49 @@ function applyGridConfig(cfg) {
 function setLatest(st, d) {
   const set = (k, v) => {
     const el = [...st.latestVals].find((x) => x.dataset.k === k);
-    if (el) el.textContent = (v ?? v === 0) ? v : "-";
+    // v != null keeps 0 - an empty street at night is a real count, not
+    // missing data.
+    if (el) el.textContent = v != null ? v : "-";
   };
   set("person",   d.person);
   set("vehicles", d.vehicles);
+  // Sampled line-crossing flow, shown only for cameras with a configured
+  // counting line (cameras.py "line"): in/out during this sample's burst.
+  if (st.crossEl) {
+    const c = d.crossings;
+    st.crossEl.textContent = c
+        ? ` · line: ${c.in ?? 0} in / ${c.out ?? 0} out`
+        : "";
+  }
+  // Only a SUCCESSFUL sample refreshes the age: MISS docs (ok=0) also carry a
+  // fresh ts, and using it would keep the label green while the camera has
+  // produced no real count for hours - the exact case the label must expose.
+  if (d.ok && d.ts) st.lastSampleMs = Date.parse(d.ts);
+  renderSampleAge(st);
 }
+
+// The video tile is (near-)live but the numbers describe the collector's most
+// recent sample - tens of seconds old by construction. Showing the age keeps
+// the "I count 9 cars, the tile says 4" confusion honest: it labels WHEN the
+// number was true, and turns red when the collector has stopped keeping up.
+function renderSampleAge(st) {
+  if (!st.ageEl) return;
+  if (!st.lastSampleMs) { st.ageEl.textContent = ""; return; }
+  const ageS = Math.max(0, Math.round((Date.now() - st.lastSampleMs) / 1000));
+  const stale = ageS > STALE_AGE_S;
+  const label = ageS < 90 ? ` · counts from ${ageS}s ago`
+              : ` · counts from ${Math.round(ageS / 60)}m ago`;
+  const memo = label + (stale ? "!" : "");
+  if (memo !== st._ageMemo) {            // skip no-op DOM writes
+    st._ageMemo = memo;
+    st.ageEl.textContent = label;
+    st.ageEl.style.color = stale ? "#ef4444" : "";
+  }
+}
+
+setInterval(() => {
+  for (const st of Object.values(tileState)) renderSampleAge(st);
+}, 1000);
 
 function updateAggregates(slotId, rows) {
   const st = tileState[slotId];
@@ -501,6 +558,47 @@ function renderAnomalyEvents() {
     <thead><tr>
       <th>Time</th><th>Area</th><th>Type</th><th>Metric</th>
       <th>Observed</th><th>Expected</th><th>Snapshot</th>
+    </tr></thead>
+    <tbody>${rows}</tbody></table>`;
+}
+
+// ---------- 6c. Operational events (loiter / returning) ----------------------
+
+const EVENT_LABELS = {
+  loiter:    { icon: "⏱", label: "prolonged presence" },
+  returning: { icon: "↩", label: "returning visitor" },
+};
+
+function renderEventsTable(events) {
+  const wrap = document.getElementById("events-table-wrap");
+  if (!wrap) return;
+  const slotLabel = (id) => {
+    const slot = GRID_SLOTS.find((s) => s.slot_id === id);
+    return slot ? slot.display_area : id;
+  };
+  if (!events.length) {
+    wrap.innerHTML = `<div class="empty">No operational events in the last 24h.</div>`;
+    return;
+  }
+  const rows = events.slice(0, 60).map((e) => {
+    const meta = EVENT_LABELS[e.kind] || { icon: "•", label: e.kind };
+    const detail = e.kind === "loiter"
+        ? `${e.cls ?? "?"} stationary ${Math.round((e.duration_sec ?? 0) / 60)} min`
+        : e.kind === "returning"
+        ? `${e.cls ?? "?"} #${e.entity_id ?? "?"} back after ${Math.round((e.gap_seconds ?? 0) / 60)} min`
+        : "";
+    const snap = e.snapshot_url || e.fullframe_url;
+    return `<tr>
+      <td>${fmtTime(e.ts)}</td>
+      <td>${escapeHtml(slotLabel(e.slot))}</td>
+      <td>${meta.icon} ${escapeHtml(meta.label)}</td>
+      <td>${escapeHtml(detail)}</td>
+      <td>${snap ? `<a href="${snap}" target="_blank" rel="noopener">view</a>` : "-"}</td>
+    </tr>`;
+  }).join("");
+  wrap.innerHTML = `<table class="reid">
+    <thead><tr>
+      <th>Time</th><th>Area</th><th>Event</th><th>Detail</th><th>Snapshot</th>
     </tr></thead>
     <tbody>${rows}</tbody></table>`;
 }
