@@ -20,6 +20,22 @@ not be trusted as "now".
 
 ---
 
+## What the model sees
+
+Live frames from the four grid cameras, annotated by the exact pipeline the
+collector runs (`yolov8n`, `imgsz 960`, `conf 0.30`): green boxes are people,
+orange are vehicles, each with its confidence. The dashboard shows this view
+live under every tile ("Model view"), refreshed with every sample — including
+night scenes like these, where detection is hardest.
+
+| Konya - Hükümet Meydanı | Konya - Otogar Kavşağı |
+|---|---|
+| ![Annotated live frame - people and vehicles boxed, Hukumet square](src/docs/images/model_view_konya_hukumet.jpg) | ![Annotated live frame - people and vehicles boxed, Otogar junction](src/docs/images/model_view_otogar_kavsagi.jpg) |
+| **Konya - Kültürpark** | **Konya - Millet Caddesi** |
+| ![Annotated live frame - people and vehicles boxed, Kulturpark](src/docs/images/model_view_konya_kulturpark.jpg) | ![Annotated live frame - people and vehicles boxed, Millet Caddesi junction](src/docs/images/model_view_konya_millet_caddesi.jpg) |
+
+---
+
 ## What the program does, end to end
 
 ```
@@ -411,8 +427,11 @@ Pure static page - no build step. Module ES imports, Firebase web SDK v10,
 Chart.js 4. Opens with [`python serve.py`](src/serve.py) and renders:
 
 - **2×2 camera grid** - each tile has a live iframe (tvkur player or a
-  corsproxy.io-wrapped page for hosts with strict `X-Frame-Options`), four KPIs
-  (people now, vehicles now, 24 h average, 24 h peak), a ticking **"counts from
+  corsproxy.io-wrapped page for hosts with strict `X-Frame-Options`), a
+  **Model view** - the collector's annotated frame (people green, vehicles
+  orange), refreshed every sample so you can compare the live video against
+  the exact boxes the counts came from - four KPIs (people now, vehicles now,
+  24 h average, 24 h peak), a ticking **"counts from
   Ns ago"** age label (red when > 120 s - the video is live, the numbers are
   the collector's most recent sample, and the label makes that gap explicit),
   an anomaly badge showing the collector's latest verdict (▲ spike / ▼ drop,

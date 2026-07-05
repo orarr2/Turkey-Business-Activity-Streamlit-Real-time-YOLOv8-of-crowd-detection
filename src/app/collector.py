@@ -629,6 +629,28 @@ def _save_anomaly_snapshot(slot_id: str, cam_id: str, ts_iso: str,
     return urls
 
 
+def _save_live_view(slot_id: str, frame, boxes: list[dict], firebase) -> str | None:
+    """Publish the annotated "what the model sees" frame for a slot.
+
+    ONE fixed object per slot (snapshots/live/{slot_id}.jpg), overwritten on
+    every sample - the dashboard shows it under the live video with a
+    cache-busting timestamp, so viewers can compare the video against the
+    exact boxes the counts came from. Storage's 24h lifecycle never removes
+    it because each overwrite resets the object's age. Cheap: draws the
+    already-computed boxes, no extra inference.
+    """
+    annotated = draw_boxes(frame, boxes)
+    okj, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    if not okj:
+        return None
+    if firebase.storage is not None:
+        return firebase.upload_snapshot(f"live/{slot_id}.jpg", buf.tobytes())
+    live_dir = SNAPSHOTS_ROOT / "live"
+    live_dir.mkdir(parents=True, exist_ok=True)
+    (live_dir / f"{slot_id}.jpg").write_bytes(buf.tobytes())
+    return f"/snapshots/live/{slot_id}.jpg"
+
+
 def _save_event_crop(kind: str, slot_id: str, base: str, frame, box: dict,
                      firebase) -> tuple[str | None, str | None, bytes | None]:
     """Save a bbox crop + full frame for an event under snapshots/{kind}/...
@@ -950,6 +972,15 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
         # Sampled line-crossing flow (only present when the cam has a "line").
         if "crossings" in burst_dbg:
             record["crossings"] = burst_dbg["crossings"]
+        # "Model view": the annotated frame these counts came from, shown by
+        # the dashboard under the live video and refreshed every sample.
+        if save_snapshots:
+            try:
+                url = _save_live_view(slot_id, frame, boxes, firebase)
+                if url:
+                    record["live_annotated_url"] = url
+            except Exception as e:
+                print(f"  ! live view save failed for {slot_id}: {e}")
 
     # Anomaly gating keyed by the PHYSICAL SCENE. Rolling windows use
     # "{slot_id}|{cam_id}" (fresh short warmup after a fallback swap instead of

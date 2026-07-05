@@ -17,6 +17,8 @@ data/
 *.csv
 *.mp4
 *.jpg
+# The README's annotated example frames are the one committed JPEG exception.
+!src/docs/images/*.jpg
 
 # Dashboard runtime snapshots (anomalies + returning visitors). Keep the
 # directory structure (via .gitkeep), drop the images and manifests.

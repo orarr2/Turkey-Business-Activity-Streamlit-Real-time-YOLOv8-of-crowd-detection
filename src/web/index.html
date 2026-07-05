@@ -105,6 +105,14 @@
                background: rgba(139,144,154,0.15); color: #8b909a;
                vertical-align: middle; }
 
+    /* "Model view": the collector's annotated frame (people green, vehicles
+       orange), refreshed every sample under the live video. */
+    .model-view summary { cursor: pointer; color: #8b909a; font-size: 12px;
+                          user-select: none; }
+    .model-view summary::marker { color: #4f8cff; }
+    .model-view img { width: 100%; border-radius: 8px; display: block;
+                      margin-top: 6px; border: 1px solid #232733; }
+
     table.reid { width: 100%; border-collapse: collapse; font-size: 13px; }
     table.reid th, table.reid td { padding: 8px 10px; text-align: left;
                                     border-bottom: 1px solid #232733; }
@@ -174,8 +182,8 @@
   <!-- firebase-config.js is gitignored - copy from firebase-config.example.js -->
   <!-- ?v=N is a cache-buster: bump it whenever any of the JS files changes,
        so the browser doesn't serve a stale ES-module from disk cache. -->
-  <script type="module" src="./firebase-config.js?v=18"></script>
-  <script type="module" src="./cameras.js?v=18"></script>
-  <script type="module" src="./app.js?v=18"></script>
+  <script type="module" src="./firebase-config.js?v=19"></script>
+  <script type="module" src="./cameras.js?v=19"></script>
+  <script type="module" src="./app.js?v=19"></script>
 </body>
 </html>

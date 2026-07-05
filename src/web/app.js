@@ -67,6 +67,14 @@ for (const slot of GRID_SLOTS) {
       <div class="city" data-cam-area>${escapeHtml(slot.display_area)}</div>
     </div>
     <div class="video-wrap" data-video-wrap></div>
+    <details class="model-view" data-model-view style="display:none" open>
+      <summary>Model view - the boxes these counts came from
+        <span class="footnote" data-model-view-ts></span></summary>
+      <a data-model-view-link target="_blank" rel="noopener"
+         title="open the annotated frame full size">
+        <img alt="annotated detections (people green, vehicles orange)" loading="lazy" />
+      </a>
+    </details>
     <div class="metrics">
       <div class="metric"><div class="lbl">People (now)</div>
         <div class="val" data-k="person">-</div></div>
@@ -110,6 +118,10 @@ for (const slot of GRID_SLOTS) {
     anomalyText:  tile.querySelector("[data-anomaly-text]"),
     fallbackBadge: tile.querySelector("[data-fallback]"),
     anomalyThumb: tile.querySelector("[data-anomaly-thumb]"),
+    modelView:     tile.querySelector("[data-model-view]"),
+    modelViewImg:  tile.querySelector("[data-model-view] img"),
+    modelViewLink: tile.querySelector("[data-model-view-link]"),
+    modelViewTs:   tile.querySelector("[data-model-view-ts]"),
     ageEl:        tile.querySelector("[data-age]"),
     crossEl:      tile.querySelector("[data-crossings]"),
     samplesEl:    tile.querySelector("[data-samples]"),
@@ -333,6 +345,18 @@ function setLatest(st, d) {
     st.crossEl.textContent = c
         ? ` · line: ${c.in ?? 0} in / ${c.out ?? 0} out`
         : "";
+  }
+  // "Model view": the collector's annotated frame these counts came from.
+  // Fixed URL per slot, overwritten server-side each sample - bust the
+  // browser cache with the sample ts so the image tracks the video.
+  if (st.modelView && d.ok && d.live_annotated_url) {
+    const url = d.live_annotated_url
+        + (d.live_annotated_url.includes("?") ? "&" : "?")
+        + "t=" + encodeURIComponent(d.ts || Date.now());
+    st.modelViewImg.src = url;
+    st.modelViewLink.href = url;
+    st.modelViewTs.textContent = d.ts ? `· updated ${fmtTime(d.ts)}` : "";
+    st.modelView.style.display = "";
   }
   // Only a SUCCESSFUL sample refreshes the age: MISS docs (ok=0) also carry a
   // fresh ts, and using it would keep the label green while the camera has
