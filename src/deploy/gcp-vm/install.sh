@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # One-shot installer for the Turkey Footfall collector on a fresh Debian 12
-# GCP VM (e2-small recommended; e2-micro works with reduced imgsz - the
-# installer adapts the service file to the machine's RAM automatically).
+# GCP VM. Default target: e2-micro (Always Free, $0/month) - the installer
+# detects the machine's RAM and fits the service file to it automatically
+# (<1.5 GB: --imgsz 640 + 700M/850M caps). An e2-small (~$13/month) is an
+# optional paid upgrade for guaranteed imgsz-960 headroom, never a requirement.
 # Run once via:
 #
 #   curl -sSL https://raw.githubusercontent.com/orarr2/Turkey-Business-Activity-Streamlit-Real-time-YOLOv8-of-crowd-detection/main/src/deploy/gcp-vm/install.sh | sudo bash

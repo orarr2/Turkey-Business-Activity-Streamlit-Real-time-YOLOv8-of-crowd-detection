@@ -25,7 +25,7 @@ not be trusted as "now".
 ```
  ┌───────────────────────┐    ┌────────────────────────┐    ┌────────────────────┐
  │  Live cameras         │    │  Cloud collector       │    │  Firebase          │
- │  (IBB istanbuluseyret,│ ─► │  GCP e2-small VM       │ ─► │  Firestore (24h TTL)│
+ │  (IBB istanbuluseyret,│ ─► │  GCP e2-micro VM       │ ─► │  Firestore (24h TTL)│
  │   webcamera24 tvkur)  │    │  • fallback per slot   │    │   footfall/{auto}   │
  │                       │    │  • YOLOv8n predict     │    │   latest/{slot_id}  │
  │                       │    │  • appearance re-ID    │    │   reid_stats/{slot} │
@@ -43,8 +43,10 @@ not be trusted as "now".
                                            └────────────────────────────────────────┘
 ```
 
-The two halves are decoupled. The collector runs 24/7 on a small GCP VM
-(e2-small recommended; see the deploy README for measured sizing). The
+The two halves are decoupled. The collector runs 24/7 on a small GCP VM —
+the shipped deployment is an `e2-micro` on the Always Free tier ($0/month);
+the deploy README documents measured memory sizing and an optional paid
+`e2-small` upgrade for extra headroom. The
 dashboard is plain HTML/JS — anyone can serve `web/` and
 subscribe to the live data. Because the state lives in Firestore, every visitor
 sees the accumulated history, and Firestore's TTL policy prunes the last 24h to
@@ -487,10 +489,14 @@ python -m app.detect_core --resolve konya_hukumet,otogar_kavsagi
   `--interval 40` ≈ half that). Stay modest on free tier, raise `--interval`,
   or batch. For many cameras at high frequency keep only `latest` in Firestore
   and ship `footfall` to BigQuery instead.
-- **VM sizing (measured):** python + torch + YOLOv8n at `--imgsz 960` peaks at
-  ~820 MB RSS. An e2-micro (1 GB) cannot hold that - it thrashes/OOMs and the
-  dashboard numbers freeze; use an **e2-small (2 GB)** or drop to
-  `--imgsz 640`. If a round takes longer than `--interval` the collector now
+- **VM sizing (measured):** memory peaks vary by environment - this project's
+  live `e2-micro` (1 GB, Always Free, $0) measured **~635 MB RSS** at
+  `--imgsz 960` under `MemoryHigh=700M`/`MemoryMax=850M` and runs fine; other
+  torch builds have measured ~820 MB, which a 1 GB box cannot hold. If YOUR
+  box shows reclaim-throttling (rounds of minutes, frozen dashboard numbers)
+  the free fix is `--imgsz 640` (the installer applies it automatically on
+  <1.5 GB machines); a paid `e2-small` (2 GB, ~$13/month) buys headroom for
+  960 everywhere. If a round takes longer than `--interval` the collector
   says so in its log, and the effective tile refresh rate is the round time.
 - **Calibration is not pre-baked:** notebook section 10 measures MAE/bias per
   camera against your own manual counts and recommends `conf`/`imgsz` - run it
