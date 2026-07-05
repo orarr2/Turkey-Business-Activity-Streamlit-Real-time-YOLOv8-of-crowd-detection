@@ -3,20 +3,17 @@
 The cloud collector runs the same `app/collector.py` you know locally, but as a
 systemd service on a small always-on VM.
 
-> **Machine sizing — measured, not theoretical:** the default is the
-> **`e2-micro` (1 GB, Always Free — $0/month)**. This project's live e2-micro
-> measured **~635 MB RSS** at `--imgsz 960` under the 700M/850M caps — it
-> fits. But peaks vary by torch build: some environments measure ~820 MB, and
-> a process living above `MemoryHigh` gets permanently reclaim-throttled —
-> rounds stretch to minutes and the dashboard numbers freeze between updates
-> (the #1 cause of "the counts don't match the live video"). The installer
-> therefore auto-fits any <1.5 GB box with `--imgsz 640` +
-> `MemoryHigh=700M`/`MemoryMax=850M`. If your own journal shows no
-> throttling, you can remove `--imgsz 640` from `ExecStart` to get 960's
-> small-object recall; if it does throttle, keep 640 — or pay for an
-> **`e2-small` (2 GB, ~$13/month)**, which the unit template's higher caps
-> (1300M/1600M) are sized for. Check
-> `systemctl status collector | grep -i memory` after a day of runtime.
+> **Machine sizing — measured on this deployment:** the VM is an `e2-micro`
+> (1 GB, Always Free — $0/month). Its measured peak is **~635 MB RSS** at the
+> default `--imgsz 960` (3-frame burst), inside the shipped
+> `MemoryHigh=700M`/`MemoryMax=850M` caps. Memory peaks can vary by torch
+> build; if `journalctl -u collector` ever shows reclaim throttling or
+> oom-kill restarts (rounds of minutes, dashboard numbers frozen between
+> updates), add `--imgsz 640` to `ExecStart` in
+> `/etc/systemd/system/collector.service`, then run
+> `sudo systemctl daemon-reload && sudo systemctl restart collector` —
+> roughly half the inference memory, at the cost of small/distant-object
+> recall. Check `systemctl status collector | grep -i memory` after a day.
 
 ## Prerequisites (do these once, from the GCP Console at console.cloud.google.com)
 
@@ -51,9 +48,8 @@ Console → Compute Engine → VM instances → CREATE INSTANCE:
 - **Region**: `us-central1` (required for Always Free — also `us-east1` or `us-west1`)
 - **Zone**: any `-a` zone in that region
 - **Machine configuration**: series `E2`, machine type **`e2-micro`**
-  (Always Free — $0/month; the installer auto-fits its memory caps, see the
-  sizing note above. Choose `e2-small` (~$13/month) only if you explicitly
-  want guaranteed 960-input headroom)
+  (Always Free — $0/month; the service file's memory caps are sized for it,
+  see the note above)
 - **Boot disk**: Debian 12, **Standard persistent disk**, size **30 GB**
 - **Firewall**: leave both HTTP/HTTPS unchecked — the collector doesn't listen
 - **Identity and API access**: keep the default service account, "Allow default access"
@@ -117,10 +113,8 @@ sudo git -C /opt/turkey-footfall fetch origin main && \
 
 ## Costs to watch
 
-- **VM**: `e2-micro` (the default) is **$0** on the Always Free tier
-  (us-central1 / us-east1 / us-west1). `e2-small` is an optional ~$13/month
-  upgrade — nothing in this repo requires it. Set a **budget alert** so you
-  catch anything weird.
+- **VM**: `e2-micro` is **$0** on the Always Free tier (us-central1 /
+  us-east1 / us-west1). Set a **budget alert** so you catch anything weird.
 - **Firestore writes**: at the shipped `--interval 40`:
   `4 slots × 3 writes/sample × 2160 samples/day ≈ 26k writes/day`. Blaze free
   tier allows 20k/day; the overflow costs pennies/month. If you want it

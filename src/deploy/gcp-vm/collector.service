@@ -17,17 +17,15 @@ ExecStart=__INSTALL_DIR__/src/.venv/bin/python -m app.collector --interval 40
 # up cleanly and the anomaly z-score window (30 samples) covers ~20 min now.
 Restart=always
 RestartSec=15
-# Memory sizing. Peaks vary by torch build: this project's live e2-micro
-# (1 GB, Always Free) measured ~635 MB RSS at imgsz 960 and runs fine under
-# 700M/850M caps, while other environments measure ~820 MB - which 700M caps
-# would keep in permanent reclaim-throttling (rounds of minutes, "frozen"
-# dashboard numbers). The caps BELOW are the 2 GB (paid e2-small) profile;
-# install.sh detects a <1.5 GB machine and rewrites them to 700M/850M plus
-# --imgsz 640 automatically, so the free e2-micro stays safe by default.
-# If your e2-micro journal shows no throttling you may remove --imgsz 640
-# from ExecStart to regain 960's small-object recall.
-MemoryHigh=1300M
-MemoryMax=1600M
+# Memory sizing for the e2-micro (1 GB, Always Free) this project runs on:
+# measured peak ~635 MB RSS at the default imgsz 960 with a 3-frame burst,
+# so these caps hold with headroom while still protecting the host. If the
+# journal ever shows reclaim throttling or oom-kill restarts (rounds taking
+# minutes, dashboard numbers frozen between updates), add --imgsz 640 to
+# ExecStart above - roughly half the inference memory, at the cost of
+# small/distant-object recall.
+MemoryHigh=700M
+MemoryMax=850M
 StandardOutput=journal
 StandardError=journal
 
