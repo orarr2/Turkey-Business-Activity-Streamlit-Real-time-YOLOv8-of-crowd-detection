@@ -105,13 +105,84 @@
                background: rgba(139,144,154,0.15); color: #8b909a;
                vertical-align: middle; }
 
-    /* "Model view": the collector's annotated frame (people green, vehicles
-       orange), refreshed every sample under the live video. */
-    .model-view summary { cursor: pointer; color: #8b909a; font-size: 12px;
-                          user-select: none; }
-    .model-view summary::marker { color: #4f8cff; }
-    .model-view img { width: 100%; border-radius: 8px; display: block;
-                      margin-top: 6px; border: 1px solid #232733; }
+    /* Compact "Model view" side strip next to the search panel: one mini
+       annotated frame per slot with the current person/vehicle counts.
+       Replaces the per-tile <details> block that was doubling the grid
+       into a visual 4x2 of images. */
+    .search-row { display: grid; gap: 18px; margin-top: 20px;
+                  grid-template-columns: minmax(0, 1fr) 280px; }
+    @media (max-width: 900px) { .search-row { grid-template-columns: 1fr; } }
+    .side-panel h2 { margin: 0 0 10px; font-size: 15px; font-weight: 600; }
+    .model-strip { display: flex; flex-direction: column; gap: 10px; }
+    .model-strip .mini { background: #171a21; border: 1px solid #232733;
+                         border-radius: 10px; padding: 8px; }
+    .model-strip .mini .lbl { font-size: 11px; color: #8b909a; margin-bottom: 4px;
+                              white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .model-strip .mini img { width: 100%; aspect-ratio: 16/9; object-fit: cover;
+                             background: #0c0e13; border-radius: 6px;
+                             border: 1px solid #232733; display: block; }
+    .model-strip .mini .mini-empty { width: 100%; aspect-ratio: 16/9;
+                             background: #0c0e13; border-radius: 6px;
+                             border: 1px dashed #232733;
+                             display: flex; align-items: center; justify-content: center;
+                             color: #6f7480; font-size: 11px; }
+    .model-strip .mini .nums { display: flex; gap: 12px; font-size: 12px;
+                               margin-top: 6px; color: #e7e9ee; }
+    .model-strip .mini .nums .v { color: #f0a35e; }
+    .model-strip .mini .age { font-size: 10px; color: #6f7480; margin-top: 2px; }
+
+    /* Search-by-image panel (drop area, results grid + registry table).
+       Reuses the /api/visual-search endpoint from dashboard_server.py. */
+    .search-wrap { background: #171a21; border: 1px solid #232733;
+                   border-radius: 14px; padding: 16px; }
+    .search-wrap h2 { margin: 0 0 10px; font-size: 15px; font-weight: 600; }
+    #drop { border: 2px dashed #2c3140; border-radius: 12px; padding: 22px;
+            text-align: center; color: #8b909a; cursor: pointer;
+            transition: border-color .15s, background .15s; }
+    #drop.hover { border-color: #4f8cff; background: rgba(79,140,255,0.06); }
+    #drop input { display: none; }
+    #drop .hint { font-size: 11px; margin-top: 4px; }
+    .search-controls { display: flex; gap: 12px; flex-wrap: wrap; align-items: center;
+                       margin-top: 10px; font-size: 12px; color: #8b909a; }
+    .search-controls label { display: flex; gap: 6px; align-items: center; }
+    .search-controls input[type="number"] { width: 60px; background: #0c0e13;
+        border: 1px solid #2c3140; color: #e7e9ee; border-radius: 6px;
+        padding: 3px 6px; font-size: 12px; }
+    .search-controls select { background: #0c0e13; border: 1px solid #2c3140;
+        color: #e7e9ee; border-radius: 6px; padding: 3px 6px; font-size: 12px; }
+    .search-controls button { background: #4f8cff; color: #fff; border: 0;
+        border-radius: 8px; padding: 6px 14px; font-size: 13px; font-weight: 600;
+        cursor: pointer; }
+    .search-controls button:disabled { opacity: 0.45; cursor: default; }
+    #search-status { font-size: 12px; color: #8b909a; }
+    #search-status.err { color: #ef4444; }
+    #search-preview { display: flex; gap: 12px; flex-wrap: wrap;
+                      margin-top: 12px; align-items: flex-start; }
+    #search-preview img { max-width: 320px; max-height: 220px; border-radius: 8px;
+                          border: 1px solid #232733; }
+    #search-preview .qobjs { font-size: 12px; color: #8b909a; line-height: 1.5; }
+    #search-preview .qobjs b { color: #e7e9ee; }
+    #search-results { display: grid; gap: 10px; margin-top: 12px;
+                      grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
+    #search-results .hit { background: #0c0e13; border: 1px solid #232733;
+        border-radius: 10px; padding: 6px; display: flex; flex-direction: column; gap: 4px; }
+    #search-results .hit img { width: 100%; height: 100px; object-fit: contain;
+        background: #05070a; border-radius: 6px; }
+    #search-results .hit .meta { font-size: 10px; color: #8b909a; line-height: 1.4; }
+    #search-results .simbar { height: 4px; border-radius: 3px;
+        background: #232733; overflow: hidden; }
+    #search-results .simbar i { display: block; height: 100%; background: #f0a35e; }
+    #search-results .hit.strong .simbar i { background: #36d399; }
+    #search-results .badge { display: inline-block; padding: 1px 6px;
+        border-radius: 999px; font-size: 10px; }
+    #search-results .badge.strong { background: rgba(54,211,153,0.12); color: #36d399; }
+    #search-results .badge.weak   { background: rgba(240,163,94,0.12); color: #f0a35e; }
+    #search-registry table { width: 100%; border-collapse: collapse; font-size: 12px;
+                             margin-top: 12px; }
+    #search-registry th, #search-registry td { text-align: left; padding: 5px 8px;
+                             border-bottom: 1px solid #232733; }
+    #search-registry th { color: #8b909a; font-weight: 500; font-size: 10px;
+                          text-transform: uppercase; letter-spacing: 0.04em; }
 
     table.reid { width: 100%; border-collapse: collapse; font-size: 13px; }
     table.reid th, table.reid td { padding: 8px 10px; text-align: left;
@@ -145,12 +216,52 @@
       Until then the dashboard layout renders but no live counts arrive.
     </div>
 
-    <!-- 2x2 grid of camera tiles. Cells filled by app.js. -->
+    <!-- 2x2 grid of camera tiles (LIVE VIDEO + counts only). Cells filled by app.js. -->
     <div class="grid" id="tiles"></div>
+
+    <!-- Search-by-image + compact model-view strip.
+         Left: user uploads a photo, the /api/visual-search endpoint returns
+               ranked snapshot crops + re-ID registry matches.
+         Right: 4 mini annotated frames (the collector's "what the model saw"
+               view), one per slot, refreshed each sample. Small on purpose -
+               this used to sit inside each tile as an equal-sized image and
+               made the page feel like a 4x2 grid. -->
+    <div class="search-row">
+      <div class="search-wrap">
+        <h2>Search by image - has anything like this been seen?</h2>
+        <label id="drop">
+          <input type="file" id="search-file" accept="image/*" />
+          <div>Drop an image here or click to choose</div>
+          <div class="hint">a cropped photo of one person/vehicle works best;
+            full scenes are auto-scanned for people &amp; vehicles</div>
+        </label>
+        <div class="search-controls">
+          <label>results <input type="number" id="search-top" value="12" min="1" max="50" /></label>
+          <label>min sim <input type="number" id="search-minsim" value="0.30"
+                                min="0" max="1" step="0.05" /></label>
+          <label>classes
+            <select id="search-classes">
+              <option value="">any</option>
+              <option value="person">person</option>
+              <option value="car,truck,bus,motorcycle,bicycle">vehicles</option>
+            </select>
+          </label>
+          <button id="search-go" disabled>Search</button>
+          <span id="search-status"></span>
+        </div>
+        <div id="search-preview" hidden></div>
+        <div id="search-results"></div>
+        <div id="search-registry"></div>
+      </div>
+      <aside class="side-panel">
+        <h2>Model view - live</h2>
+        <div class="model-strip" id="model-strip"></div>
+      </aside>
+    </div>
 
     <!-- Combined 24h chart of all four cameras -->
     <div class="big-chart-wrap">
-      <h2>Footfall - last 24h, all four cameras (5-minute averages)</h2>
+      <h2>Footfall - last 24h, all four cameras (5-minute averages, anomalies in red)</h2>
       <canvas id="chart-all"></canvas>
     </div>
 
@@ -182,8 +293,132 @@
   <!-- firebase-config.js is gitignored - copy from firebase-config.example.js -->
   <!-- ?v=N is a cache-buster: bump it whenever any of the JS files changes,
        so the browser doesn't serve a stale ES-module from disk cache. -->
-  <script type="module" src="./firebase-config.js?v=19"></script>
-  <script type="module" src="./cameras.js?v=19"></script>
-  <script type="module" src="./app.js?v=19"></script>
+  <script type="module" src="./firebase-config.js?v=20"></script>
+  <script type="module" src="./cameras.js?v=20"></script>
+  <script type="module" src="./app.js?v=20"></script>
+
+  <!-- Search-by-image UI. INLINE and NON-MODULE on purpose: it wires the
+       /api/visual-search endpoint on this same server, has no Firebase
+       dependency, and must keep working even if firebase-app.js can't load
+       (offline demo, blocked CDN, missing config). -->
+  <script>
+  (function initSearch() {
+    const $ = (id) => document.getElementById(id);
+    const drop = $("drop"), fileInput = $("search-file"), goBtn = $("search-go");
+    const statusEl = $("search-status"), previewEl = $("search-preview");
+    const resultsEl = $("search-results"), registryEl = $("search-registry");
+    if (!drop || !fileInput || !goBtn) return;
+
+    const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+    let queryFile = null;
+    const setFile = (f) => {
+      if (!f || !f.type || !f.type.startsWith("image/")) return;
+      queryFile = f;
+      goBtn.disabled = false;
+      statusEl.className = "";
+      statusEl.textContent = `${f.name} (${(f.size / 1024).toFixed(0)} KB) ready`;
+    };
+    fileInput.addEventListener("change", () => setFile(fileInput.files[0]));
+    ["dragover", "dragenter"].forEach((ev) => drop.addEventListener(ev, (e) => {
+      e.preventDefault(); drop.classList.add("hover");
+    }));
+    ["dragleave", "drop"].forEach((ev) => drop.addEventListener(ev, (e) => {
+      e.preventDefault(); drop.classList.remove("hover");
+    }));
+    drop.addEventListener("drop", (e) => setFile(e.dataTransfer.files[0]));
+
+    goBtn.addEventListener("click", async () => {
+      if (!queryFile) return;
+      goBtn.disabled = true;
+      statusEl.className = "";
+      statusEl.textContent = "searching… (first search loads the model, ~10 s)";
+      try {
+        const params = new URLSearchParams({
+          top: $("search-top").value, min_sim: $("search-minsim").value,
+        });
+        const cls = $("search-classes").value;
+        if (cls) params.set("classes", cls);
+        const r = await fetch(`/api/visual-search?${params}`, {
+          method: "POST", body: queryFile,
+          headers: { "Content-Type": queryFile.type || "application/octet-stream" },
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+        render(data);
+        statusEl.textContent =
+          `done · ${data.snapshot_matches.length} snapshot + ` +
+          `${data.registry_matches.length} registry matches ` +
+          `(index: ${data.index_size} crops, detector: ${data.detector})`;
+      } catch (err) {
+        statusEl.className = "err";
+        statusEl.textContent = `search failed: ${err.message}`;
+      } finally {
+        goBtn.disabled = false;
+      }
+    });
+
+    function render(data) {
+      previewEl.innerHTML = "";
+      previewEl.hidden = false;
+      if (data.query_preview_jpeg_b64) {
+        const img = new Image();
+        img.src = "data:image/jpeg;base64," + data.query_preview_jpeg_b64;
+        previewEl.appendChild(img);
+      }
+      const info = document.createElement("div");
+      info.className = "qobjs";
+      info.innerHTML = data.query_objects.length
+        ? "query objects:<br>" + data.query_objects.map((q) =>
+            q.cls === "image"
+              ? "<b>whole image</b> (nothing detected — treated as a ready-made crop)"
+              : `<b>${esc(q.cls)}</b> conf ${q.conf}`).join("<br>")
+        : "nothing usable found in the image";
+      previewEl.appendChild(info);
+
+      resultsEl.innerHTML = "";
+      for (const m of data.snapshot_matches) {
+        const d = document.createElement("div");
+        d.className = "hit" + (m.strong ? " strong" : "");
+        d.innerHTML = `
+          <a href="${m.url}" target="_blank" rel="noopener">
+            <img src="${m.url}" loading="lazy" alt="match"/></a>
+          <div class="simbar"><i style="width:${(m.similarity * 100).toFixed(0)}%"></i></div>
+          <div class="meta">
+            <span class="badge ${m.strong ? "strong" : "weak"}">
+              ${m.strong ? "match" : "similar"} ${(m.similarity * 100).toFixed(1)}%
+            </span><br>${esc(m.cls)}
+          </div>`;
+        resultsEl.appendChild(d);
+      }
+      if (!data.snapshot_matches.length)
+        resultsEl.innerHTML =
+          '<div class="empty" style="color:#8b909a;padding:12px;font-size:12px">' +
+          'no saved snapshot is similar enough</div>';
+
+      if (data.registry_matches.length) {
+        const rows = data.registry_matches.map((m) => `
+          <tr>
+            <td><span class="badge ${m.strong ? "strong" : "weak"}">
+                ${(m.similarity * 100).toFixed(1)}%</span></td>
+            <td>${esc(m.cls)}</td><td>#${m.entity_id}</td><td>${esc(m.cam_id)}</td>
+            <td>${m.sightings}</td>
+            <td>${esc(String(m.first_seen).slice(0, 16))}</td>
+            <td>${esc(String(m.last_seen).slice(0, 16))}</td>
+          </tr>`).join("");
+        registryEl.innerHTML = `
+          <table>
+            <thead><tr><th>similarity</th><th>class</th><th>entity</th>
+              <th>camera</th><th>sightings</th><th>first seen</th>
+              <th>last seen</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>`;
+      } else {
+        registryEl.innerHTML = "";
+      }
+    }
+  })();
+  </script>
 </body>
 </html>

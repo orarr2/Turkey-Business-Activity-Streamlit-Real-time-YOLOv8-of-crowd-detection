@@ -67,14 +67,6 @@ for (const slot of GRID_SLOTS) {
       <div class="city" data-cam-area>${escapeHtml(slot.display_area)}</div>
     </div>
     <div class="video-wrap" data-video-wrap></div>
-    <details class="model-view" data-model-view style="display:none" open>
-      <summary>Model view - the boxes these counts came from
-        <span class="footnote" data-model-view-ts></span></summary>
-      <a data-model-view-link target="_blank" rel="noopener"
-         title="open the annotated frame full size">
-        <img alt="annotated detections (people green, vehicles orange)" loading="lazy" />
-      </a>
-    </details>
     <div class="metrics">
       <div class="metric"><div class="lbl">People (now)</div>
         <div class="val" data-k="person">-</div></div>
@@ -118,10 +110,6 @@ for (const slot of GRID_SLOTS) {
     anomalyText:  tile.querySelector("[data-anomaly-text]"),
     fallbackBadge: tile.querySelector("[data-fallback]"),
     anomalyThumb: tile.querySelector("[data-anomaly-thumb]"),
-    modelView:     tile.querySelector("[data-model-view]"),
-    modelViewImg:  tile.querySelector("[data-model-view] img"),
-    modelViewLink: tile.querySelector("[data-model-view-link]"),
-    modelViewTs:   tile.querySelector("[data-model-view-ts]"),
     ageEl:        tile.querySelector("[data-age]"),
     crossEl:      tile.querySelector("[data-crossings]"),
     samplesEl:    tile.querySelector("[data-samples]"),
@@ -137,6 +125,83 @@ for (const slot of GRID_SLOTS) {
   buildVideoInto(tileState[slot.slot_id],
     { active_hls: slot.placeholder_hls, active_page: slot.placeholder_page },
     slot);
+}
+
+// ---------- 1b. Model-view strip skeleton -----------------------------------
+// One tiny annotated-frame card per slot, next to the search panel. The image
+// URL is the same `live_annotated_url` the collector publishes on each sample;
+// the strip stays put and only its <img>/counts refresh, so the grid keeps the
+// live videos and this strip carries the "what the model saw" view - without
+// doubling the grid the way the per-tile version did.
+const stripEl = document.getElementById("model-strip");
+const stripState = {};
+if (stripEl) {
+  for (const slot of GRID_SLOTS) {
+    const cell = document.createElement("div");
+    cell.className = "mini";
+    cell.innerHTML = `
+      <div class="lbl" data-lbl>${escapeHtml(slot.display_area)}</div>
+      <a data-link target="_blank" rel="noopener" title="open annotated frame full size">
+        <div class="mini-empty" data-empty>waiting for first sample…</div>
+        <img alt="annotated detections" loading="lazy" hidden />
+      </a>
+      <div class="nums">
+        <span>👤 <b data-p>-</b></span>
+        <span class="v">🚗 <b data-v>-</b></span>
+      </div>
+      <div class="age" data-age></div>`;
+    stripEl.appendChild(cell);
+    stripState[slot.slot_id] = {
+      cell,
+      lbl:   cell.querySelector("[data-lbl]"),
+      link:  cell.querySelector("[data-link]"),
+      empty: cell.querySelector("[data-empty]"),
+      img:   cell.querySelector("img"),
+      p:     cell.querySelector("[data-p]"),
+      v:     cell.querySelector("[data-v]"),
+      age:   cell.querySelector("[data-age]"),
+      lastSampleMs: null,
+    };
+  }
+}
+
+function updateStrip(slotId, d) {
+  const s = stripState[slotId];
+  if (!s) return;
+  if (d.person   != null) s.p.textContent = d.person;
+  if (d.vehicles != null) s.v.textContent = d.vehicles;
+  if (d.ok && d.live_annotated_url) {
+    const url = d.live_annotated_url
+        + (d.live_annotated_url.includes("?") ? "&" : "?")
+        + "t=" + encodeURIComponent(d.ts || Date.now());
+    s.img.src = url;
+    s.img.hidden = false;
+    s.link.href = url;
+    if (s.empty) s.empty.style.display = "none";
+  }
+  if (d.ok && d.ts) s.lastSampleMs = Date.parse(d.ts);
+  renderStripAge(slotId);
+}
+
+function renderStripAge(slotId) {
+  const s = stripState[slotId];
+  if (!s || !s.lastSampleMs) return;
+  const ageS = Math.max(0, Math.round((Date.now() - s.lastSampleMs) / 1000));
+  const stale = ageS > STALE_AGE_S;
+  s.age.textContent = ageS < 90 ? `${ageS}s ago` : `${Math.round(ageS / 60)}m ago`;
+  s.age.style.color = stale ? "#ef4444" : "";
+}
+
+setInterval(() => {
+  for (const id of Object.keys(stripState)) renderStripAge(id);
+}, 1000);
+
+// Reflect fallback/active-cam label into the strip too so the mini card matches
+// what's in the main tile.
+function updateStripLabel(slotId, activeCamName, displayArea) {
+  const s = stripState[slotId];
+  if (!s) return;
+  s.lbl.textContent = displayArea || activeCamName || slotId;
 }
 
 // ---------- 2. Video builder (re-runs when active_cam changes) --------------
@@ -315,6 +380,8 @@ function applyGridConfig(cfg) {
       st.currentActiveCam = slotCfg.active_cam;
       st.camNameEl.textContent = slotCfg.active_cam_name || slotCfg.slot_id;
       st.camAreaEl.textContent = slotCfg.display_area || "";
+      updateStripLabel(slotCfg.slot_id, slotCfg.active_cam_name,
+                       slotCfg.display_area);
       buildVideoInto(st, slotCfg, st.slot);
     }
     const usingFallback = slotCfg.active_cam !== slotCfg.primary;
@@ -346,18 +413,10 @@ function setLatest(st, d) {
         ? ` · line: ${c.in ?? 0} in / ${c.out ?? 0} out`
         : "";
   }
-  // "Model view": the collector's annotated frame these counts came from.
-  // Fixed URL per slot, overwritten server-side each sample - bust the
-  // browser cache with the sample ts so the image tracks the video.
-  if (st.modelView && d.ok && d.live_annotated_url) {
-    const url = d.live_annotated_url
-        + (d.live_annotated_url.includes("?") ? "&" : "?")
-        + "t=" + encodeURIComponent(d.ts || Date.now());
-    st.modelViewImg.src = url;
-    st.modelViewLink.href = url;
-    st.modelViewTs.textContent = d.ts ? `· updated ${fmtTime(d.ts)}` : "";
-    st.modelView.style.display = "";
-  }
+  // "Model view": annotated frame + counts moved to the compact side strip
+  // beside the search panel (see updateStrip). The tile itself now holds only
+  // the live video + KPIs, so the grid stays 2x2, not 4x2.
+  updateStrip(st.slot.slot_id, d);
   // Only a SUCCESSFUL sample refreshes the age: MISS docs (ok=0) also carry a
   // fresh ts, and using it would keep the label green while the camera has
   // produced no real count for hours - the exact case the label must expose.
@@ -544,15 +603,37 @@ function renderCombinedChart() {
   const binList = [...allBins].sort((a, b) => a - b);
   const displayLabels = binList.map((b) => fmtTimeShort(b));
 
+  // Anomaly bins per slot (people spike/drop confirmed by the collector).
+  // Each bin is anomalous if any raw sample in it carries is_anomaly on the
+  // people metric - the combined chart bins to 5 min, so we mark the bin, not
+  // the raw sample. Matches the per-tile chart's red-point convention.
+  const anomBinsBySlot = {};
+  for (const slot of GRID_SLOTS) {
+    const set = new Set();
+    for (const r of tileState[slot.slot_id].history) {
+      if (!r.is_anomaly) continue;
+      if ((r.anomaly?.metric || "person") !== "person") continue;
+      const t = new Date(r.ts).getTime();
+      if (!Number.isFinite(t)) continue;
+      set.add(Math.floor(t / binMs) * binMs);
+    }
+    anomBinsBySlot[slot.slot_id] = set;
+  }
+
   const palette = ["#4f8cff", "#36d399", "#f0a35e", "#a78bfa"];
   const datasets = GRID_SLOTS.map((slot, i) => {
     const bins = binsBySlot[slot.slot_id];
+    const anom = anomBinsBySlot[slot.slot_id];
+    const pointBg = binList.map((b) => anom.has(b) ? "#ef4444"
+                                                   : palette[i % palette.length]);
+    const pointR  = binList.map((b) => anom.has(b) ? 5 : 0);
     return {
       label: slot.display_area,
       data: binList.map((b) => bins.has(b)
           ? +(bins.get(b).sum / bins.get(b).n).toFixed(1) : null),
       borderColor: palette[i % palette.length],
-      tension: 0.25, pointRadius: 0, pointHoverRadius: 3,
+      pointBackgroundColor: pointBg,
+      tension: 0.25, pointRadius: pointR, pointHoverRadius: 5,
       borderWidth: 2, spanGaps: true,
     };
   });
