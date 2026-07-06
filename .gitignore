@@ -9,8 +9,9 @@ venv/
 .vscode/
 .idea/
 
-# YOLO weights (downloaded on demand)
+# Model weights (downloaded/exported on demand)
 *.pt
+*.onnx
 
 # Collected data / outputs
 data/

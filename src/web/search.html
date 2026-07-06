@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <title>Search by image - Turkey Business Activity</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0;
+           background: #0f1115; color: #e7e9ee; }
+    header { padding: 18px 24px; border-bottom: 1px solid #222;
+             display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+    header h1 { font-size: 20px; margin: 0; }
+    header a { color: #4f8cff; text-decoration: none; font-size: 13px; }
+    .sub { color: #8b909a; font-size: 13px; }
+    main { padding: 20px; max-width: 1100px; margin: 0 auto;
+           display: flex; flex-direction: column; gap: 18px; }
+
+    .card { background: #171a21; border: 1px solid #232733; border-radius: 14px;
+            padding: 16px; }
+    .card h2 { margin: 0 0 10px; font-size: 15px; font-weight: 600; }
+
+    #drop { border: 2px dashed #2c3140; border-radius: 12px; padding: 28px;
+            text-align: center; color: #8b909a; cursor: pointer;
+            transition: border-color .15s, background .15s; }
+    #drop.hover { border-color: #4f8cff; background: rgba(79,140,255,0.06); }
+    #drop input { display: none; }
+    #drop .hint { font-size: 12px; margin-top: 6px; }
+
+    .controls { display: flex; gap: 14px; flex-wrap: wrap; align-items: center;
+                margin-top: 12px; font-size: 13px; color: #8b909a; }
+    .controls label { display: flex; gap: 6px; align-items: center; }
+    .controls input[type="number"] { width: 70px; background: #0c0e13;
+        border: 1px solid #2c3140; color: #e7e9ee; border-radius: 6px; padding: 4px 6px; }
+    .controls select { background: #0c0e13; border: 1px solid #2c3140;
+        color: #e7e9ee; border-radius: 6px; padding: 4px 6px; }
+    button.go { background: #4f8cff; color: #fff; border: 0; border-radius: 8px;
+                padding: 8px 18px; font-size: 14px; font-weight: 600; cursor: pointer; }
+    button.go:disabled { opacity: 0.45; cursor: default; }
+
+    #query-preview { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+    #query-preview img { max-width: 420px; max-height: 300px; border-radius: 8px;
+                         border: 1px solid #232733; }
+    .qobjs { font-size: 13px; color: #8b909a; }
+    .qobjs b { color: #e7e9ee; }
+
+    .status { font-size: 13px; color: #8b909a; }
+    .status.err { color: #ef4444; }
+
+    .results { display: grid; gap: 12px;
+               grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+    .hit { background: #0c0e13; border: 1px solid #232733; border-radius: 10px;
+           padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+    .hit img { width: 100%; height: 130px; object-fit: contain;
+               background: #05070a; border-radius: 6px; }
+    .hit .meta { font-size: 11px; color: #8b909a; line-height: 1.5; }
+    .simbar { height: 5px; border-radius: 3px; background: #232733; overflow: hidden; }
+    .simbar i { display: block; height: 100%; background: #f0a35e; }
+    .hit.strong .simbar i { background: #36d399; }
+    .badge { display: inline-block; padding: 1px 7px; border-radius: 999px;
+             font-size: 10px; }
+    .badge.strong { background: rgba(54,211,153,0.12); color: #36d399; }
+    .badge.weak   { background: rgba(240,163,94,0.12); color: #f0a35e; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #232733; }
+    th { color: #8b909a; font-weight: 500; font-size: 11px; text-transform: uppercase;
+         letter-spacing: 0.04em; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Search by image</h1>
+    <span class="sub">upload a photo of what you are looking for - the system ranks
+      everything it has seen by visual similarity</span>
+    <a href="/">&larr; live dashboard</a>
+  </header>
+  <main>
+    <section class="card">
+      <h2>1 &middot; Query image</h2>
+      <label id="drop">
+        <input type="file" id="file" accept="image/*" />
+        <div>Drop an image here or click to choose</div>
+        <div class="hint">a cropped photo of one person/vehicle works best;
+          full scenes are auto-scanned for people &amp; vehicles</div>
+      </label>
+      <div class="controls">
+        <label>results <input type="number" id="top" value="12" min="1" max="50" /></label>
+        <label>min similarity <input type="number" id="minsim" value="0.30"
+               min="0" max="1" step="0.05" /></label>
+        <label>classes
+          <select id="classes">
+            <option value="">any</option>
+            <option value="person">person</option>
+            <option value="car,truck,bus,motorcycle,bicycle">vehicles</option>
+          </select>
+        </label>
+        <button class="go" id="go" disabled>Search</button>
+        <span class="status" id="status"></span>
+      </div>
+    </section>
+
+    <section class="card" id="query-card" hidden>
+      <h2>2 &middot; What the model saw in your image</h2>
+      <div id="query-preview"></div>
+    </section>
+
+    <section class="card" id="snap-card" hidden>
+      <h2>3 &middot; Similar saved snapshots</h2>
+      <div class="results" id="snap-results"></div>
+    </section>
+
+    <section class="card" id="reg-card" hidden>
+      <h2>4 &middot; Similar known entities (re-ID registry)</h2>
+      <table>
+        <thead><tr><th>similarity</th><th>class</th><th>entity</th><th>camera</th>
+                   <th>sightings</th><th>first seen</th><th>last seen</th></tr></thead>
+        <tbody id="reg-results"></tbody>
+      </table>
+    </section>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let queryFile = null;
+
+    const drop = $("drop"), fileInput = $("file"), goBtn = $("go"), status = $("status");
+
+    function setFile(f) {
+      if (!f || !f.type.startsWith("image/")) return;
+      queryFile = f;
+      goBtn.disabled = false;
+      status.className = "status";
+      status.textContent = `${f.name} (${(f.size / 1024).toFixed(0)} KB) ready`;
+    }
+    fileInput.addEventListener("change", () => setFile(fileInput.files[0]));
+    ["dragover", "dragenter"].forEach(ev => drop.addEventListener(ev, e => {
+      e.preventDefault(); drop.classList.add("hover");
+    }));
+    ["dragleave", "drop"].forEach(ev => drop.addEventListener(ev, e => {
+      e.preventDefault(); drop.classList.remove("hover");
+    }));
+    drop.addEventListener("drop", e => setFile(e.dataTransfer.files[0]));
+
+    goBtn.addEventListener("click", async () => {
+      if (!queryFile) return;
+      goBtn.disabled = true;
+      status.className = "status";
+      status.textContent = "searching... (first search loads the model, can take ~10 s)";
+      try {
+        const params = new URLSearchParams({
+          top: $("top").value, min_sim: $("minsim").value,
+        });
+        if ($("classes").value) params.set("classes", $("classes").value);
+        const r = await fetch(`/api/visual-search?${params}`, {
+          method: "POST", body: queryFile,
+          headers: { "Content-Type": queryFile.type || "application/octet-stream" },
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+        render(data);
+        status.textContent =
+          `done - ${data.snapshot_matches.length} snapshot + ` +
+          `${data.registry_matches.length} registry matches ` +
+          `(index: ${data.index_size} crops, detector: ${data.detector}, ` +
+          `embedder: ${data.embedder_id})`;
+      } catch (err) {
+        status.className = "status err";
+        status.textContent = `search failed: ${err.message}`;
+      } finally {
+        goBtn.disabled = false;
+      }
+    });
+
+    function render(data) {
+      // query preview + detected objects
+      const qp = $("query-preview");
+      qp.innerHTML = "";
+      if (data.query_preview_jpeg_b64) {
+        const img = new Image();
+        img.src = "data:image/jpeg;base64," + data.query_preview_jpeg_b64;
+        qp.appendChild(img);
+      }
+      const info = document.createElement("div");
+      info.className = "qobjs";
+      info.innerHTML = data.query_objects.length
+        ? "query objects:<br>" + data.query_objects.map(q =>
+            q.cls === "image"
+              ? "<b>whole image</b> (nothing detected - treated as a ready-made crop)"
+              : `<b>${q.cls}</b> conf ${q.conf}`).join("<br>")
+        : "nothing usable found in the image";
+      qp.appendChild(info);
+      $("query-card").hidden = false;
+
+      // snapshot hits
+      const sr = $("snap-results");
+      sr.innerHTML = "";
+      for (const m of data.snapshot_matches) {
+        const d = document.createElement("div");
+        d.className = "hit" + (m.strong ? " strong" : "");
+        d.innerHTML = `
+          <a href="${m.url}" target="_blank"><img src="${m.url}" loading="lazy" /></a>
+          <div class="simbar"><i style="width:${(m.similarity * 100).toFixed(0)}%"></i></div>
+          <div class="meta">
+            <span class="badge ${m.strong ? "strong" : "weak"}">
+              ${m.strong ? "match" : "similar"} ${(m.similarity * 100).toFixed(1)}%</span><br>
+            ${m.cls} &middot; ${m.path}
+          </div>`;
+        sr.appendChild(d);
+      }
+      $("snap-card").hidden = false;
+      if (!data.snapshot_matches.length)
+        sr.innerHTML = '<div class="status">no saved snapshot is similar enough</div>';
+
+      // registry hits
+      const rr = $("reg-results");
+      rr.innerHTML = "";
+      for (const m of data.registry_matches) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td><span class="badge ${m.strong ? "strong" : "weak"}">
+            ${(m.similarity * 100).toFixed(1)}%</span></td>
+          <td>${m.cls}</td><td>#${m.entity_id}</td><td>${m.cam_id}</td>
+          <td>${m.sightings}</td><td>${m.first_seen}</td><td>${m.last_seen}</td>`;
+        rr.appendChild(tr);
+      }
+      $("reg-card").hidden = false;
+      if (!data.registry_matches.length)
+        rr.innerHTML = '<tr><td colspan="7" class="status">no known entity is ' +
+                       'similar enough (or the registry was built by a different ' +
+                       'embedder)</td></tr>';
+    }
+  </script>
+</body>
+</html>

@@ -455,6 +455,50 @@ it just talks to Firestore from the browser tab.
 
 ---
 
+## Search by image (experimental, not wired into the pipeline yet)
+
+Upload a photo of WHAT you are looking for - a person, a car - and the system
+ranks everything it has seen by visual similarity to it. The pieces live next
+to (not inside) the collector pipeline, so nothing changes for the dashboard
+or the VM until you opt in:
+
+- **UI**: `http://localhost:8000/search.html` (served by the same `serve.py`).
+  Drop an image, get back (a) what YOLO detected in it, (b) the most similar
+  saved snapshot crops (returning visitors, loiter events), (c) the most
+  similar known entities in the re-ID registry with their sighting history.
+- **API**: `POST /api/visual-search` with the raw image bytes as the body
+  (`?top=12&min_sim=0.3&classes=person,car` optional). JSON out.
+- **CLI**: `python -m tools.search_by_image --query photo.jpg`. Before the
+  collector has accumulated real snapshots you can seed a demo index from
+  still images: `--seed-images "docs/images/*.jpg"`.
+
+How it works: the query image goes through the same YOLO detection the
+collector runs (each detected person/vehicle becomes a query object; an
+already-cropped photo falls back to whole-image), each crop is embedded with
+the same pluggable re-ID embedder (`app/reid_embed.py`), and the embedding is
+cosine-matched against the saved snapshot crops (embeddings cached in
+`web/snapshots/.search_cache.json`) and the `data/reid.db` entities. A hit
+above the embedder's own matching threshold is labeled a **match** ("same
+appearance" in re-ID terms); everything else is ranked "similar". The
+registry part refuses to compare across embedders - the same rule the
+registry applies to itself.
+
+Honest limitation: the default HSV-histogram embedder finds *the same-looking
+object* (color + build), especially under similar lighting - it does not do
+semantic "person with a red hat" search. Export OSNet
+(`tools/export_osnet.py`, then `REID_MODEL=osnet.onnx python serve.py`) for
+lighting/pose-robust matching. Env knobs: `REID_MODEL`, `REID_DB`,
+`SEARCH_YOLO` (YOLO weights for query parsing, `off` to disable).
+
+Trial on this repo's own media (the four `docs/images/model_view_*.jpg`
+frames, 13 objects seeded): 12/13 jittered re-crops (+12% padding, +18
+brightness, JPEG q70) retrieved their own object as top-1; uploading the full
+kulturpark frame matched 5/6 of its objects above the identity threshold
+(93.8-99.8%). `tests/test_visual_search.py` covers the index/cache/registry
+behaviors without needing YOLO.
+
+---
+
 ## Notebook - `turkey_business_activity.ipynb`
 
 `jupyter lab turkey_business_activity.ipynb` opens the offline analysis side:
@@ -540,6 +584,7 @@ python -m app.detect_core --resolve konya_hukumet,otogar_kavsagi
 | [`app/detect_core.py`](src/app/detect_core.py) | YOLO loading, stream resolution, detection, ROI filter, burst tracking + line crossings. |
 | [`app/reid.py`](src/app/reid.py) | Appearance-based re-identification registry (SQLite). |
 | [`app/reid_embed.py`](src/app/reid_embed.py) | Pluggable re-ID embedders: HSV histogram / OSNet ONNX. |
+| [`app/visual_search.py`](src/app/visual_search.py) | Search-by-example: match an uploaded image against saved snapshots + the re-ID registry. |
 | [`app/presence.py`](src/app/presence.py) | Prolonged-presence (loitering / parked) detection. |
 | [`app/alerts.py`](src/app/alerts.py) | Telegram / webhook alert push with rate limiting. |
 | [`app/cameras.py`](src/app/cameras.py) | Verified camera catalog + per-camera ROI/line/loiter config. |
@@ -547,6 +592,7 @@ python -m app.detect_core --resolve konya_hukumet,otogar_kavsagi
 | [`tools/export_model.py`](src/tools/export_model.py) | YOLO → ONNX/OpenVINO export + on-target benchmark. |
 | [`tools/export_osnet.py`](src/tools/export_osnet.py) | OSNet → ONNX export for `--reid-model`. |
 | [`tools/roi_grid.py`](src/tools/roi_grid.py) | Capture a frame with a coordinate grid to configure ROI/line polygons. |
+| [`tools/search_by_image.py`](src/tools/search_by_image.py) | CLI for search-by-example (+ demo index seeding from still images). |
 | [`web/`](src/web/) | Static HTML/JS dashboard. |
 | [`docs/firebase_setup.md`](src/docs/firebase_setup.md) | Firebase project + security rules walkthrough. |
 | [`docs/turkey_cameras.md`](src/docs/turkey_cameras.md) | Camera sources and architecture notes. |
