@@ -128,11 +128,16 @@ for (const slot of GRID_SLOTS) {
 }
 
 // ---------- 1b. Model-view strip skeleton -----------------------------------
-// One tiny annotated-frame card per slot, next to the search panel. The image
-// URL is the same `live_annotated_url` the collector publishes on each sample;
-// the strip stays put and only its <img>/counts refresh, so the grid keeps the
-// live videos and this strip carries the "what the model saw" view - without
-// doubling the grid the way the per-tile version did.
+// One annotated-frame card per slot, laid out as a 2x2 grid below the search
+// area. The image URL is the same `live_annotated_url` the collector publishes
+// on each sample; the strip stays put and only its <img>/counts refresh.
+//
+// Robustness: the four cells are built up-front from GRID_SLOTS so every slot
+// has a visible skeleton the moment the page loads. If a slot's Firestore doc
+// arrives late (or its collector isn't currently uploading annotated frames),
+// its cell shows a graceful "no live view yet" state instead of a broken img.
+// If the image URL 404s, onerror rolls back to the empty state so a stale
+// Storage URL doesn't leave a broken-image icon.
 const stripEl = document.getElementById("model-strip");
 const stripState = {};
 if (stripEl) {
@@ -143,7 +148,7 @@ if (stripEl) {
       <div class="lbl" data-lbl>${escapeHtml(slot.display_area)}</div>
       <a data-link target="_blank" rel="noopener" title="open annotated frame full size">
         <div class="mini-empty" data-empty>waiting for first sample…</div>
-        <img alt="annotated detections" loading="lazy" hidden />
+        <img alt="annotated detections" hidden />
       </a>
       <div class="nums">
         <span>👤 <b data-p>-</b></span>
@@ -151,7 +156,7 @@ if (stripEl) {
       </div>
       <div class="age" data-age></div>`;
     stripEl.appendChild(cell);
-    stripState[slot.slot_id] = {
+    const s = {
       cell,
       lbl:   cell.querySelector("[data-lbl]"),
       link:  cell.querySelector("[data-link]"),
@@ -162,6 +167,17 @@ if (stripEl) {
       age:   cell.querySelector("[data-age]"),
       lastSampleMs: null,
     };
+    s.img.addEventListener("error", () => {
+      // Storage URL rotted, or Storage never got this snapshot. Roll back to
+      // the empty state so the cell reads as "no live view" instead of a
+      // broken image icon.
+      s.img.hidden = true;
+      if (s.empty) {
+        s.empty.textContent = "no live view for this camera";
+        s.empty.style.display = "";
+      }
+    });
+    stripState[slot.slot_id] = s;
   }
 }
 
@@ -178,6 +194,13 @@ function updateStrip(slotId, d) {
     s.img.hidden = false;
     s.link.href = url;
     if (s.empty) s.empty.style.display = "none";
+  } else if (d.ok && !d.live_annotated_url && s.empty
+             && s.empty.textContent.startsWith("waiting")) {
+    // The slot IS producing samples, just not annotated snapshots (Storage
+    // not configured on the collector VM, or this particular sample failed
+    // to upload). Say so instead of implying we're still waiting for the
+    // very first sample.
+    s.empty.textContent = "counts only - no annotated snapshot";
   }
   if (d.ok && d.ts) s.lastSampleMs = Date.parse(d.ts);
   renderStripAge(slotId);
@@ -223,11 +246,19 @@ function buildVideoInto(st, cfg, slot) {
     // route through the local /tvkur/ proxy). The tvkur iframe player shows a
     // click-to-play splash, so it's only the FALLBACK when HLS can't play
     // (e.g. web/ hosted statically without the proxy) - see attachHls.
+    // preload="auto" tells the browser to start buffering IMMEDIATELY when
+    // the element mounts, so the tile shows video the moment the page opens
+    // instead of after the first user interaction. Combined with a hls.js
+    // load kick below (autoStartLoad + play()) this pins down the case
+    // where one tile stayed frozen until the user clicked into it.
     markup = `<video data-hls="${hlsUrl}" autoplay muted playsinline
-                     controls preload="metadata"></video>`;
+                     controls preload="auto"></video>`;
   } else if (embed && embed.includes("player.tvkur.com")) {
+    // loading="lazy" postponed the iframe request until scroll, which is
+    // exactly the wrong behavior for the top row of the dashboard - one of
+    // the four cams could stay dark on a short viewport. Load eagerly.
     markup = `<iframe src="${embed}" allow="autoplay; encrypted-media"
-                     allowfullscreen loading="lazy"></iframe>`;
+                     allowfullscreen></iframe>`;
   } else if (page) {
     markup = `<div class="video-fallback">
                 Live stream not embeddable from this site -
@@ -259,6 +290,16 @@ function attachHls(st, video, cfg) {
     const hls = new window.Hls({ lowLatencyMode: true, liveSyncDuration: 4 });
     hls.loadSource(src);
     hls.attachMedia(video);
+    // Kick play() the moment the manifest parses. Chrome allows
+    // muted-autoplay but sometimes never fires it if the element was
+    // rendered outside the viewport at attach time (which happens for the
+    // bottom row before scroll). Explicit .play() removes that dependency
+    // on scroll position; the promise-rejection swallow keeps the flow
+    // clean when browsers block autoplay in exotic contexts.
+    hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
+      const p = video.play();
+      if (p && p.catch) p.catch(() => { /* autoplay blocked; user clicks play */ });
+    });
     hls.on(window.Hls.Events.ERROR, (_, data) => {
       if (!data.fatal) return;
       console.warn("hls.js fatal error on", src, data);
@@ -267,6 +308,10 @@ function attachHls(st, video, cfg) {
     st.currentHlsInstance = hls;
   } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
     video.src = src;
+    video.addEventListener("loadedmetadata", () => {
+      const p = video.play();
+      if (p && p.catch) p.catch(() => {});
+    }, { once: true });
     video.addEventListener("error", fallbackToEmbed, { once: true });
   } else {
     console.warn("No HLS playback support in this browser for", src);

@@ -25,13 +25,24 @@
     #status .down { color: #ef4444; }
     main { padding: 20px; max-width: 1400px; margin: 0 auto; }
 
-    .grid { display: grid; gap: 18px;
+    .grid { display: grid; gap: 14px;
             grid-template-columns: repeat(2, minmax(0, 1fr)); }
     @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
 
+    /* Tiles size themselves by content. Two fixes for the fat black strip
+       the user was seeing:
+         1. no more `min-height: 380px` floor - tiles were stretching past
+            their content and the extra space rendered as a black bar;
+         2. no `margin-top: auto` on `.chart-mini` - the sparkline sat at
+            the bottom of whatever height CSS Grid picked for the row, and
+            the "extra" ended up as a dramatic empty band between the
+            badges and the chart. Now the chart sits DIRECTLY below the
+            badges, and any row-height mismatch shows as a small margin
+            below the shorter tile (rare, since all four tiles have the
+            same content structure). */
     .tile { background: #171a21; border: 1px solid #232733; border-radius: 14px;
-            padding: 14px; display: flex; flex-direction: column; gap: 10px;
-            min-height: 380px; }
+            padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+    .chart-mini { height: 120px; }
     .tile h2 { margin: 0; font-size: 15px; font-weight: 600; }
     .tile .city { color: #8b909a; font-size: 12px; }
     .video-wrap { position: relative; width: 100%; aspect-ratio: 16/9;
@@ -84,7 +95,7 @@
                       border-radius: 999px; font-size: 11px;
                       background: rgba(240,163,94,0.15); color: #f0a35e; }
 
-    .chart-mini { position: relative; height: 160px; width: 100%; }
+    .chart-mini { position: relative; width: 100%; }
     .chart-mini canvas { position: absolute; top: 0; left: 0; width: 100% !important; height: 100% !important; }
     .big-chart-wrap canvas { width: 100% !important; height: 280px !important; }
     .footnote { color: #6f7480; font-size: 11px; }
@@ -105,45 +116,28 @@
                background: rgba(139,144,154,0.15); color: #8b909a;
                vertical-align: middle; }
 
-    /* Compact "Model view" side strip next to the search panel: one mini
-       annotated frame per slot with the current person/vehicle counts.
-       Replaces the per-tile <details> block that was doubling the grid
-       into a visual 4x2 of images. */
-    .search-row { display: grid; gap: 18px; margin-top: 20px;
-                  grid-template-columns: minmax(0, 1fr) 280px; }
-    @media (max-width: 900px) { .search-row { grid-template-columns: 1fr; } }
-    .side-panel h2 { margin: 0 0 10px; font-size: 15px; font-weight: 600; }
-    .model-strip { display: flex; flex-direction: column; gap: 10px; }
-    .model-strip .mini { background: #171a21; border: 1px solid #232733;
-                         border-radius: 10px; padding: 8px; }
-    .model-strip .mini .lbl { font-size: 11px; color: #8b909a; margin-bottom: 4px;
-                              white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .model-strip .mini img { width: 100%; aspect-ratio: 16/9; object-fit: cover;
-                             background: #0c0e13; border-radius: 6px;
-                             border: 1px solid #232733; display: block; }
-    .model-strip .mini .mini-empty { width: 100%; aspect-ratio: 16/9;
-                             background: #0c0e13; border-radius: 6px;
-                             border: 1px dashed #232733;
-                             display: flex; align-items: center; justify-content: center;
-                             color: #6f7480; font-size: 11px; }
-    .model-strip .mini .nums { display: flex; gap: 12px; font-size: 12px;
-                               margin-top: 6px; color: #e7e9ee; }
-    .model-strip .mini .nums .v { color: #f0a35e; }
-    .model-strip .mini .age { font-size: 10px; color: #6f7480; margin-top: 2px; }
-
-    /* Search-by-image panel (drop area, results grid + registry table).
+    /* Search-by-image panel: FULL WIDTH, prominent framed drop zone.
        Reuses the /api/visual-search endpoint from dashboard_server.py. */
     .search-wrap { background: #171a21; border: 1px solid #232733;
-                   border-radius: 14px; padding: 16px; }
-    .search-wrap h2 { margin: 0 0 10px; font-size: 15px; font-weight: 600; }
-    #drop { border: 2px dashed #2c3140; border-radius: 12px; padding: 22px;
-            text-align: center; color: #8b909a; cursor: pointer;
-            transition: border-color .15s, background .15s; }
-    #drop.hover { border-color: #4f8cff; background: rgba(79,140,255,0.06); }
+                   border-radius: 14px; padding: 22px; margin-top: 20px; }
+    .search-wrap h2 { margin: 0 0 14px; font-size: 17px; font-weight: 600; }
+    /* The drop zone reads as its own object at a glance now: thicker dashed
+       border, roomier vertical rhythm, an upload glyph, and a clear
+       primary/secondary text pair. */
+    #drop { border: 2px dashed #3a4258; border-radius: 14px; padding: 40px 22px;
+            text-align: center; cursor: pointer;
+            background: linear-gradient(180deg, rgba(79,140,255,0.03), rgba(79,140,255,0));
+            transition: border-color .15s, background .15s, transform .05s; }
+    #drop:hover { border-color: #4f8cff;
+                  background: linear-gradient(180deg, rgba(79,140,255,0.09), rgba(79,140,255,0.02)); }
+    #drop.hover { border-color: #4f8cff; background: rgba(79,140,255,0.08); transform: scale(0.998); }
     #drop input { display: none; }
-    #drop .hint { font-size: 11px; margin-top: 4px; }
+    #drop .icon { font-size: 28px; line-height: 1; margin-bottom: 10px;
+                  color: #4f8cff; }
+    #drop .primary { font-size: 15px; color: #e7e9ee; font-weight: 500; }
+    #drop .hint { font-size: 12px; color: #8b909a; margin-top: 6px; }
     .search-controls { display: flex; gap: 12px; flex-wrap: wrap; align-items: center;
-                       margin-top: 10px; font-size: 12px; color: #8b909a; }
+                       margin-top: 14px; font-size: 12px; color: #8b909a; }
     .search-controls label { display: flex; gap: 6px; align-items: center; }
     .search-controls input[type="number"] { width: 60px; background: #0c0e13;
         border: 1px solid #2c3140; color: #e7e9ee; border-radius: 6px;
@@ -184,6 +178,34 @@
     #search-registry th { color: #8b909a; font-weight: 500; font-size: 10px;
                           text-transform: uppercase; letter-spacing: 0.04em; }
 
+    /* "Model view - live": one annotated frame per slot, laid out as a
+       proper 2x2 grid directly below the search area - same width and
+       column geometry as the live-video grid at the top of the page.
+       Each mini card mirrors a tile's structure (label + image + counts)
+       but skips the KPIs, so it stays visually clearly secondary. */
+    .model-section { margin-top: 20px; background: #171a21;
+                     border: 1px solid #232733; border-radius: 14px; padding: 16px; }
+    .model-section h2 { margin: 0 0 12px; font-size: 15px; font-weight: 600; }
+    .model-strip { display: grid; gap: 14px;
+                   grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    @media (max-width: 760px) { .model-strip { grid-template-columns: 1fr; } }
+    .mini { background: #0c0e13; border: 1px solid #232733; border-radius: 12px;
+            padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+    .mini .lbl { font-size: 12px; color: #8b909a;
+                 white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .mini a { display: block; text-decoration: none; }
+    .mini img { width: 100%; aspect-ratio: 16/9; object-fit: cover;
+                background: #05070a; border-radius: 8px;
+                border: 1px solid #232733; display: block; }
+    .mini .mini-empty { width: 100%; aspect-ratio: 16/9;
+                background: #05070a; border-radius: 8px;
+                border: 1px dashed #2c3140;
+                display: flex; align-items: center; justify-content: center;
+                color: #6f7480; font-size: 12px; text-align: center; padding: 8px; }
+    .mini .nums { display: flex; gap: 16px; font-size: 14px; color: #e7e9ee; }
+    .mini .nums .v { color: #f0a35e; }
+    .mini .age { font-size: 11px; color: #6f7480; }
+
     table.reid { width: 100%; border-collapse: collapse; font-size: 13px; }
     table.reid th, table.reid td { padding: 8px 10px; text-align: left;
                                     border-bottom: 1px solid #232733; }
@@ -219,44 +241,45 @@
     <!-- 2x2 grid of camera tiles (LIVE VIDEO + counts only). Cells filled by app.js. -->
     <div class="grid" id="tiles"></div>
 
-    <!-- Search-by-image + compact model-view strip.
-         Left: user uploads a photo, the /api/visual-search endpoint returns
-               ranked snapshot crops + re-ID registry matches.
-         Right: 4 mini annotated frames (the collector's "what the model saw"
-               view), one per slot, refreshed each sample. Small on purpose -
-               this used to sit inside each tile as an equal-sized image and
-               made the page feel like a 4x2 grid. -->
-    <div class="search-row">
-      <div class="search-wrap">
-        <h2>Search by image - has anything like this been seen?</h2>
-        <label id="drop">
-          <input type="file" id="search-file" accept="image/*" />
-          <div>Drop an image here or click to choose</div>
-          <div class="hint">a cropped photo of one person/vehicle works best;
-            full scenes are auto-scanned for people &amp; vehicles</div>
+    <!-- Search-by-image: full-width, framed drop zone.
+         POST /api/visual-search returns ranked snapshot crops + re-ID
+         registry matches (see app/visual_search.py). -->
+    <div class="search-wrap">
+      <h2>Search by image - has anything like this been seen?</h2>
+      <label id="drop">
+        <input type="file" id="search-file" accept="image/*" />
+        <div class="icon">⬆</div>
+        <div class="primary">Drop an image here or click to choose</div>
+        <div class="hint">a cropped photo of one person/vehicle works best;
+          full scenes are auto-scanned for people &amp; vehicles</div>
+      </label>
+      <div class="search-controls">
+        <label>results <input type="number" id="search-top" value="12" min="1" max="50" /></label>
+        <label>min sim <input type="number" id="search-minsim" value="0.30"
+                              min="0" max="1" step="0.05" /></label>
+        <label>classes
+          <select id="search-classes">
+            <option value="">any</option>
+            <option value="person">person</option>
+            <option value="car,truck,bus,motorcycle,bicycle">vehicles</option>
+          </select>
         </label>
-        <div class="search-controls">
-          <label>results <input type="number" id="search-top" value="12" min="1" max="50" /></label>
-          <label>min sim <input type="number" id="search-minsim" value="0.30"
-                                min="0" max="1" step="0.05" /></label>
-          <label>classes
-            <select id="search-classes">
-              <option value="">any</option>
-              <option value="person">person</option>
-              <option value="car,truck,bus,motorcycle,bicycle">vehicles</option>
-            </select>
-          </label>
-          <button id="search-go" disabled>Search</button>
-          <span id="search-status"></span>
-        </div>
-        <div id="search-preview" hidden></div>
-        <div id="search-results"></div>
-        <div id="search-registry"></div>
+        <button id="search-go" disabled>Search</button>
+        <span id="search-status"></span>
       </div>
-      <aside class="side-panel">
-        <h2>Model view - live</h2>
-        <div class="model-strip" id="model-strip"></div>
-      </aside>
+      <div id="search-preview" hidden></div>
+      <div id="search-results"></div>
+      <div id="search-registry"></div>
+    </div>
+
+    <!-- Model view - live: the collector's annotated frame per slot, updated
+         each sample. Same 2x2 geometry as the live-video grid at the top.
+         Skeletons built up-front so all four cells are visible immediately
+         (a slot whose Firestore doc arrives late used to leave its cell
+         "waiting" forever, reading as "the first camera doesn't work"). -->
+    <div class="model-section">
+      <h2>Model view - live (what the counts came from)</h2>
+      <div class="model-strip" id="model-strip"></div>
     </div>
 
     <!-- Combined 24h chart of all four cameras.
@@ -291,9 +314,9 @@
   <!-- firebase-config.js is gitignored - copy from firebase-config.example.js -->
   <!-- ?v=N is a cache-buster: bump it whenever any of the JS files changes,
        so the browser doesn't serve a stale ES-module from disk cache. -->
-  <script type="module" src="./firebase-config.js?v=21"></script>
-  <script type="module" src="./cameras.js?v=21"></script>
-  <script type="module" src="./app.js?v=21"></script>
+  <script type="module" src="./firebase-config.js?v=23"></script>
+  <script type="module" src="./cameras.js?v=23"></script>
+  <script type="module" src="./app.js?v=23"></script>
 
   <!-- Search-by-image UI. INLINE and NON-MODULE on purpose: it wires the
        /api/visual-search endpoint on this same server, has no Firebase
