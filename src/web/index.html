@@ -259,43 +259,41 @@
       </aside>
     </div>
 
-    <!-- Combined 24h chart of all four cameras -->
-    <div class="big-chart-wrap">
+    <!-- Combined 24h chart of all four cameras.
+         Every section below the tiles starts hidden (`hidden` attribute) and
+         is revealed by app.js the moment its data source produces content -
+         empty "waiting for X…" placeholders were taking up the whole viewport
+         while the collector was silent. -->
+    <div class="big-chart-wrap" id="chart-section" hidden>
       <h2>Footfall - last 24h, all four cameras (5-minute averages, anomalies in red)</h2>
       <canvas id="chart-all"></canvas>
     </div>
 
     <!-- Anomaly events: the collector's verdicts, where + when + why -->
-    <div class="anomaly-wrap">
+    <div class="anomaly-wrap" id="anomaly-section" hidden>
       <h2>Anomaly events - last 24h (spikes ▲ and drops ▼ vs each location's norm)</h2>
-      <div id="anomaly-table-wrap">
-        <div class="empty">Waiting for footfall history…</div>
-      </div>
+      <div id="anomaly-table-wrap"></div>
     </div>
 
     <!-- Operational events: loitering / parked-too-long / returning visitors -->
-    <div class="anomaly-wrap">
+    <div class="anomaly-wrap" id="events-section" hidden>
       <h2>Operational events - last 24h (prolonged presence, returning visitors)</h2>
-      <div id="events-table-wrap">
-        <div class="empty">Waiting for operational events…</div>
-      </div>
+      <div id="events-table-wrap"></div>
     </div>
 
     <!-- Re-ID summary table -->
-    <div class="reid-wrap">
+    <div class="reid-wrap" id="reid-section" hidden>
       <h2>Re-identification - returning entities per camera <span class="est-tag">appearance-based estimate</span></h2>
-      <div id="reid-table-wrap">
-        <div class="empty">Waiting for the collector to publish re-ID stats…</div>
-      </div>
+      <div id="reid-table-wrap"></div>
     </div>
   </main>
 
   <!-- firebase-config.js is gitignored - copy from firebase-config.example.js -->
   <!-- ?v=N is a cache-buster: bump it whenever any of the JS files changes,
        so the browser doesn't serve a stale ES-module from disk cache. -->
-  <script type="module" src="./firebase-config.js?v=20"></script>
-  <script type="module" src="./cameras.js?v=20"></script>
-  <script type="module" src="./app.js?v=20"></script>
+  <script type="module" src="./firebase-config.js?v=21"></script>
+  <script type="module" src="./cameras.js?v=21"></script>
+  <script type="module" src="./app.js?v=21"></script>
 
   <!-- Search-by-image UI. INLINE and NON-MODULE on purpose: it wires the
        /api/visual-search endpoint on this same server, has no Firebase

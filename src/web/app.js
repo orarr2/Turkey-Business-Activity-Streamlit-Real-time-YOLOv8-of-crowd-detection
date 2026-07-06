@@ -582,6 +582,15 @@ function renderTileChart(slotId, rows) {
 
 const COMBINED_BIN_MIN = 5;
 
+// Each section below the tiles reveals ITSELF the moment it has content, and
+// stays gone until then. `hidden` on the wrapper element is toggled here so an
+// idle collector doesn't leave four empty placeholder boxes eating half the
+// viewport.
+function toggleSection(id, hasContent) {
+  const el = document.getElementById(id);
+  if (el) el.hidden = !hasContent;
+}
+
 function renderCombinedChart() {
   const binMs = COMBINED_BIN_MIN * 60 * 1000;
   const binsBySlot = {};
@@ -601,6 +610,8 @@ function renderCombinedChart() {
     binsBySlot[slot.slot_id] = bins;
   }
   const binList = [...allBins].sort((a, b) => a - b);
+  toggleSection("chart-section", binList.length > 0);
+  if (!binList.length) return;
   const displayLabels = binList.map((b) => fmtTimeShort(b));
 
   // Anomaly bins per slot (people spike/drop confirmed by the collector).
@@ -673,11 +684,8 @@ function renderAnomalyEvents() {
       if (r.is_anomaly) events.push({ area: slot.display_area, r });
     }
   }
-  if (!events.length) {
-    wrap.innerHTML = `<div class="empty">No anomalies in the last 24h -
-      activity is inside each location's normal range.</div>`;
-    return;
-  }
+  toggleSection("anomaly-section", events.length > 0);
+  if (!events.length) return;
   events.sort((a, b) => b.r.ts.localeCompare(a.r.ts));
   const rows = events.slice(0, 60).map(({ area, r }) => {
     const d = describeAnomaly(r);
@@ -717,10 +725,8 @@ function renderEventsTable(events) {
     const slot = GRID_SLOTS.find((s) => s.slot_id === id);
     return slot ? slot.display_area : id;
   };
-  if (!events.length) {
-    wrap.innerHTML = `<div class="empty">No operational events in the last 24h.</div>`;
-    return;
-  }
+  toggleSection("events-section", events.length > 0);
+  if (!events.length) return;
   const rows = events.slice(0, 60).map((e) => {
     const meta = EVENT_LABELS[e.kind] || { icon: "•", label: e.kind };
     const detail = e.kind === "loiter"
@@ -750,11 +756,8 @@ function renderReidTable(docs) {
   const wrap = document.getElementById("reid-table-wrap");
   const slotIds = new Set(GRID_SLOTS.map((s) => s.slot_id));
   const rows = docs.filter((d) => slotIds.has(d.id));
-  if (!rows.length) {
-    wrap.innerHTML = `<div class="empty">No re-ID stats yet - the collector publishes
-      them as detections come in.</div>`;
-    return;
-  }
+  toggleSection("reid-section", rows.length > 0);
+  if (!rows.length) return;
   const tr = (cells) => `<tr>${cells.map((c) => `<td>${c}</td>`).join("")}</tr>`;
   const slotLabel = (id) => {
     const slot = GRID_SLOTS.find((s) => s.slot_id === id);
