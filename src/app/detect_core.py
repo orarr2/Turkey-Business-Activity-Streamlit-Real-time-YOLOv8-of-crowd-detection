@@ -424,6 +424,44 @@ def count_line_crossings(tracks: list[list[dict]], frame_shape,
     return res
 
 
+# Per-class confidence gate applied AFTER the model's own conf filter. YOLOv8n
+# on overhead street cams routinely reports a distant pedestrian or a rider's
+# bicycle with confidence in the 0.20-0.35 band; a single 0.35 gate for the
+# whole model drops them, and a single 0.15 gate for the whole model inflates
+# the car count with reflections and partial vehicles. Per-class gates lower
+# the bar only where the class needs it (small/thin objects: person, bicycle,
+# motorcycle) and keep the strict bar where the class is easy (car/bus/truck).
+# Callers may override via detect_with_boxes(..., per_class_conf={...}).
+DEFAULT_PER_CLASS_CONF = {
+    "person":     0.22,
+    "bicycle":    0.22,
+    "motorcycle": 0.22,
+    "car":        0.35,
+    "bus":        0.35,
+    "truck":      0.35,
+}
+
+# Person plausibility: an upright person's height >= its width. Strollers,
+# banners misread as "person", parked shopping carts, and low road furniture
+# ALL fail this check because a top-down view of them is wider-than-tall or
+# roughly square. Set below 1.0 to allow crouching/sitting; set to None to
+# disable the filter entirely (some CCTV pitches lay pedestrians close to
+# horizontal). 0.90 is a soft floor: real walking people are ~2.5:1.
+DEFAULT_PERSON_MIN_ASPECT = 0.90
+
+# "Rider co-detection": if a person box overlaps a two-wheeler that YOLO
+# reported ABOVE its own gate but BELOW the per-class gate, resurrect the
+# two-wheeler - a person on a motorcycle is a rider AND a vehicle, but the
+# nano model often reports the person confidently and the vehicle just below
+# threshold, so counting only the person under-reports vehicle traffic.
+DEFAULT_RIDER_IOU = 0.30
+_TWO_WHEELERS = ("bicycle", "motorcycle")
+
+
+def _box_wh(b: dict) -> tuple[float, float]:
+    return b["x2"] - b["x1"], b["y2"] - b["y1"]
+
+
 def detect_and_count(model, frame, conf: float = 0.35, imgsz: int | None = None) -> dict:
     """Run YOLO on one frame -> {class_name: count} for the classes we track."""
     counts, _ = detect_with_boxes(model, frame, conf=conf, imgsz=imgsz)
@@ -431,30 +469,97 @@ def detect_and_count(model, frame, conf: float = 0.35, imgsz: int | None = None)
 
 
 def detect_with_boxes(model, frame, conf: float = 0.35,
-                      imgsz: int | None = None) -> tuple[dict, list[dict]]:
+                      imgsz: int | None = None,
+                      per_class_conf: dict | None = None,
+                      person_min_aspect: float | None = DEFAULT_PERSON_MIN_ASPECT,
+                      rider_iou: float | None = DEFAULT_RIDER_IOU
+                      ) -> tuple[dict, list[dict]]:
     """Like detect_and_count but also returns per-detection boxes.
+
+    Detection is a two-stage filter: the model runs at the MOST PERMISSIVE
+    threshold in `per_class_conf` (so nothing that any class needs is dropped
+    before we can see it), then each raw detection is kept iff its confidence
+    clears that class's per-class threshold. `person_min_aspect` rejects
+    person boxes whose height/width is below the floor - the "stroller
+    detected as a person" case. `rider_iou` resurrects a two-wheeler box that
+    survived the model gate but not its per-class gate when it overlaps a
+    surviving person box - a rider is a person AND a vehicle.
+
+    Set `per_class_conf=None` to fall back to the single `conf` (legacy).
+    Set `person_min_aspect=None` or `rider_iou=None` to skip that filter.
 
     Returns:
         counts: {class_name: int, "vehicles": int}
         boxes:  [{x1,y1,x2,y2,cls,conf}, ...] in pixel coords (BGR frame).
     """
-    counts = {name: 0 for name in CLASSES_OF_INTEREST}
-    boxes: list[dict] = []
-    kwargs = dict(conf=conf, classes=list(CLASSES_OF_INTEREST.values()), verbose=False)
+    # Assemble the effective per-class gate. When the caller passes a single
+    # legacy `conf`, per_class_conf=None means "same threshold everywhere" -
+    # older callers keep their exact behavior. When per_class_conf is used,
+    # the incoming `conf` is a global floor (nothing below is asked for).
+    if per_class_conf is None:
+        per_cls_gate = {c: conf for c in CLASSES_OF_INTEREST}
+        model_gate = conf
+    else:
+        per_cls_gate = {c: float(per_class_conf.get(c, conf))
+                        for c in CLASSES_OF_INTEREST}
+        model_gate = max(0.001, min(min(per_cls_gate.values()), conf))
+
+    kwargs = dict(conf=model_gate,
+                  classes=list(CLASSES_OF_INTEREST.values()), verbose=False)
     if imgsz:
         kwargs["imgsz"] = imgsz
     res = model.predict(frame, **kwargs)[0]
     xyxy = res.boxes.xyxy.cpu().numpy()
     cls_ids = res.boxes.cls.cpu().numpy().astype(int)
     confs = res.boxes.conf.cpu().numpy()
+
+    # Stage 1: build the raw candidate list (everything the model returned).
+    raw: list[dict] = []
     for i, c in enumerate(cls_ids):
         name = NAME_BY_ID.get(int(c))
         if not name:
             continue
-        counts[name] += 1
         x1, y1, x2, y2 = xyxy[i].tolist()
-        boxes.append({"x1": x1, "y1": y1, "x2": x2, "y2": y2,
-                      "cls": name, "conf": float(confs[i])})
+        raw.append({"x1": x1, "y1": y1, "x2": x2, "y2": y2,
+                    "cls": name, "conf": float(confs[i])})
+
+    # Stage 2: apply the per-class gate + person shape filter.
+    kept: list[dict] = []
+    below_gate: list[dict] = []
+    for b in raw:
+        gate = per_cls_gate.get(b["cls"], conf)
+        if b["conf"] < gate:
+            below_gate.append(b)
+            continue
+        if b["cls"] == "person" and person_min_aspect is not None:
+            w, h = _box_wh(b)
+            if w > 0 and (h / w) < person_min_aspect:
+                # Stroller / banner / cart shaped like a person to the model.
+                # Note it in the box for downstream debugging but drop the count.
+                b["_dropped_reason"] = "person_aspect"
+                continue
+        kept.append(b)
+
+    # Stage 3: rider co-detection - resurrect below-gate two-wheelers that
+    # overlap a surviving person box. Person + motorcycle is a rider, and both
+    # should be counted; without this the rider inflates the person count but
+    # the vehicle disappears.
+    if rider_iou is not None:
+        persons = [b for b in kept if b["cls"] == "person"]
+        for b in below_gate:
+            if b["cls"] not in _TWO_WHEELERS:
+                continue
+            for p in persons:
+                if box_iou(p, b) >= rider_iou:
+                    b["_rescued_by_rider"] = True
+                    kept.append(b)
+                    break
+
+    counts = {name: 0 for name in CLASSES_OF_INTEREST}
+    boxes: list[dict] = []
+    for b in kept:
+        counts[b["cls"]] += 1
+        boxes.append({k: b[k] for k in ("x1", "y1", "x2", "y2", "cls", "conf")})
     counts["vehicles"] = sum(counts[v] for v in VEHICLE_NAMES)
     return counts, boxes
 
@@ -576,7 +681,8 @@ def detect_burst(model, frames: list[np.ndarray], conf: float = 0.35,
                  imgsz: int | None = None,
                  roi: list | None = None,
                  roi_exclude: list | None = None,
-                 line: list | None = None) -> tuple[dict, list[dict], np.ndarray, dict]:
+                 line: list | None = None,
+                 per_class_conf: dict | None = None) -> tuple[dict, list[dict], np.ndarray, dict]:
     """Run detection over a burst of frames and aggregate counts by median.
 
     Returns (counts, boxes, frame, debug):
@@ -593,9 +699,16 @@ def detect_burst(model, frames: list[np.ndarray], conf: float = 0.35,
     (normalized [[x1,y1],[x2,y2]]) counts burst-window crossings via short
     centroid tracks - a sampled entry/exit flow rate.
     """
+    # Opt the collector into class-aware confidence gating by default: the
+    # nano model on overhead cams loses two-wheelers and small pedestrians at a
+    # single 0.35 threshold. Callers who want the legacy single-conf behavior
+    # can pass per_class_conf={} explicitly.
+    if per_class_conf is None:
+        per_class_conf = DEFAULT_PER_CLASS_CONF
     per: list[tuple[dict, list[dict], np.ndarray]] = []
     for fr in frames:
-        c, b = detect_with_boxes(model, fr, conf=conf, imgsz=imgsz)
+        c, b = detect_with_boxes(model, fr, conf=conf, imgsz=imgsz,
+                                 per_class_conf=per_class_conf or None)
         if roi or roi_exclude:
             b = filter_boxes_roi(b, fr.shape, roi, roi_exclude)
             c = counts_from_boxes(b)

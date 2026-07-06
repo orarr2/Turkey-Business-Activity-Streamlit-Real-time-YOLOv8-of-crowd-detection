@@ -108,16 +108,24 @@ def _detect(model, image_bgr: np.ndarray, conf: float,
     """detect_with_boxes with a static-input fallback: an ONNX/OpenVINO export
     with a fixed input size rejects any other imgsz - retry at the size the
     runtime says it expects (ultralytics caches imgsz in its predictor, so the
-    retry must pass the native size EXPLICITLY, not just omit the kwarg)."""
-    from app.detect_core import detect_with_boxes
+    retry must pass the native size EXPLICITLY, not just omit the kwarg).
+
+    Runs with the collector's per-class confidence + person plausibility
+    filters (see DEFAULT_PER_CLASS_CONF) so a user uploading a photo of a
+    rider gets the same "person + motorcycle" pair the collector would
+    record, and a stroller in a query photo doesn't fan out into a bogus
+    'person' search."""
+    from app.detect_core import detect_with_boxes, DEFAULT_PER_CLASS_CONF
     try:
-        _, boxes = detect_with_boxes(model, image_bgr, conf=conf, imgsz=imgsz)
+        _, boxes = detect_with_boxes(model, image_bgr, conf=conf, imgsz=imgsz,
+                                     per_class_conf=DEFAULT_PER_CLASS_CONF)
     except Exception as e:
         m = _EXPECTED_DIM_RE.search(str(e))
         native = int(m.group(1)) if m else 640
         if imgsz == native:
             raise
-        _, boxes = detect_with_boxes(model, image_bgr, conf=conf, imgsz=native)
+        _, boxes = detect_with_boxes(model, image_bgr, conf=conf, imgsz=native,
+                                     per_class_conf=DEFAULT_PER_CLASS_CONF)
     return boxes
 
 
