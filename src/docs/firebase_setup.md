@@ -43,7 +43,8 @@ Each round writes one history doc per camera to `footfall` and overwrites `lates
 ## 4. Web frontend (live dashboard)
 
 1. Firebase console → Project settings → **Your apps → Web app** → copy the SDK config.
-2. `cp web/firebase-config.example.js web/firebase-config.js` and paste your values in.
+2. Create `web/firebase-config.js` with an `export const firebaseConfig = {…}`
+   holding your project's `apiKey`, `authDomain`, `projectId`, etc.
 3. Serve the folder (any static server):
 
 ```bash
@@ -74,7 +75,7 @@ Deploy them with the Firebase CLI:
 ```bash
 npm install -g firebase-tools          # one-time
 firebase login
-cp .firebaserc.example .firebaserc      # set "default" to your project id
+# Create .firebaserc alongside firebase.json:  {"projects":{"default":"<your-project-id>"}}
 firebase deploy --only firestore:rules
 ```
 
@@ -87,8 +88,8 @@ App Check stops that by requiring every request to carry a reCAPTCHA-v3 attestat
 came from *your* web app.
 
 1. Firebase console → **App Check → Apps** → register the web app with the **reCAPTCHA v3** provider.
-2. Copy the **site key** into `web/firebase-config.js` as `recaptchaSiteKey` (see
-   `web/firebase-config.example.js`). `web/app.js` initializes App Check automatically when it's set.
+2. Copy the **site key** into `web/firebase-config.js` as `recaptchaSiteKey`.
+   `web/app.js` initializes App Check automatically when it's set.
 3. When you're confident the dashboard works, console → **App Check → Firestore → Enforce**.
 
 > Enable enforcement only *after* the site key is live in the page — otherwise enforced reads are

@@ -1225,8 +1225,8 @@ def main() -> None:
                     help="local SQLite path for the appearance-based re-ID registry")
     ap.add_argument("--no-reid", action="store_true", help="disable re-identification")
     ap.add_argument("--reid-model", default=None,
-                    help="path to an OSNet .onnx (see tools/export_osnet.py) for "
-                         "real cross-lighting re-ID; default: HSV histogram")
+                    help="path to an OSNet .onnx for real cross-lighting "
+                         "re-ID; default: HSV histogram")
     ap.add_argument("--reid-threshold", type=float, default=None,
                     help="cosine similarity above which a detection is 'seen "
                          "before' (default: the embedder's own default - 0.92 "

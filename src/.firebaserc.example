@@ -1,7 +1,0 @@
-{
-  "//": "Copy this file to .firebaserc and replace YOUR_PROJECT_ID with your",
-  "//deploy": "Firebase project id. Then: firebase deploy --only firestore:rules",
-  "projects": {
-    "default": "YOUR_PROJECT_ID"
-  }
-}

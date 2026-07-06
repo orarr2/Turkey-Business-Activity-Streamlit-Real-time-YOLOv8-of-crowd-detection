@@ -31,7 +31,7 @@ NOTE the honest limitation inherited from the histogram embedder: it is a
 color/shape signature, not semantic similarity. It finds "the same-looking
 object again", especially under similar lighting; it does not understand
 "a man with a hat" in the abstract. Plug an OSNet ONNX model (see
-reid_embed.py / tools/export_osnet.py) for lighting/pose-robust matching.
+reid_embed.py) for lighting/pose-robust matching.
 """
 from __future__ import annotations
 

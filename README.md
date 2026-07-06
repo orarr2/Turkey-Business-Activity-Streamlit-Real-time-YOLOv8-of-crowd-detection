@@ -99,9 +99,8 @@ service-account key) lives in [`src/deploy/gcp-vm/`](src/deploy/gcp-vm/README.md
 with `--port`, suppress the browser pop with `--no-browser`, auto-falls-back to the
 next free port if 8000 is busy).
 
-Full step-by-step (Python venv, Windows PowerShell variants, troubleshooting): see
-[`LOCAL_RUN.md`](src/LOCAL_RUN.md). Firebase project/service-account setup and security
-rules: see [`docs/firebase_setup.md`](src/docs/firebase_setup.md).
+Firebase project/service-account setup and security rules:
+see [`docs/firebase_setup.md`](src/docs/firebase_setup.md).
 
 ---
 
@@ -346,17 +345,6 @@ Slack/Discord/n8n). Confirmed anomalies push too, with the annotated
 snapshot. Rate limits above; `--no-alerts` / `--no-loiter` switch the
 features off. Push failures never interrupt sampling.
 
-### Faster / more accurate models (ONNX & OpenVINO export)
-
-`python -m tools.export_model --weights yolov8s.pt --format openvino [--int8]`
-exports the detector; the collector loads exported artifacts transparently
-(`--weights yolov8s_openvino_model/`). On low-power x86 VMs (the e2 family)
-OpenVINO is typically much faster than eager PyTorch and INT8 adds more,
-which buys **yolov8s** - visibly better small/distant-object recall on these
-wide street scenes - in the same CPU budget. On modern desktop cores PyTorch
-may already match OpenVINO, so ALWAYS measure on the target machine:
-`python -m tools.export_model --bench <model> --imgsz 960`.
-
 ### Re-identification ("have I seen this person/car before?")
 
 Implemented in [`app/reid.py`](src/app/reid.py) with a **pluggable embedder**
@@ -369,12 +357,12 @@ Implemented in [`app/reid.py`](src/app/reid.py) with a **pluggable embedder**
   same-lighting matches; **cannot** match the same object across a lighting
   change.
 - **Upgrade: OSNet via ONNX** - a real re-ID CNN that survives lighting and
-  pose change. Export once on any machine with internet
-  (`pip install torchreid gdown && python -m tools.export_osnet`), copy the
-  `.onnx` to the VM, run with `--reid-model data/osnet_x0_25.onnx`
-  (~5-10 ms/crop on CPU via onnxruntime). Match threshold drops to the
-  embedder's own default (0.65) automatically; the registry detects the
-  embedder switch and resets itself (old vectors are not comparable).
+  pose change. Produce the `.onnx` once on any machine with internet (any
+  torchreid export path works), copy to the VM, run with
+  `--reid-model data/osnet_x0_25.onnx` (~5-10 ms/crop on CPU via
+  onnxruntime). Match threshold drops to the embedder's own default (0.65)
+  automatically; the registry detects the embedder switch and resets itself
+  (old vectors are not comparable).
 
 Matching (either embedder): cosine against the same camera × same class
 entities in SQLite (`data/reid.db`); best ≥ threshold bumps `sightings` and
@@ -485,10 +473,10 @@ registry applies to itself.
 
 Honest limitation: the default HSV-histogram embedder finds *the same-looking
 object* (color + build), especially under similar lighting - it does not do
-semantic "person with a red hat" search. Export OSNet
-(`tools/export_osnet.py`, then `REID_MODEL=osnet.onnx python serve.py`) for
-lighting/pose-robust matching. Env knobs: `REID_MODEL`, `REID_DB`,
-`SEARCH_YOLO` (YOLO weights for query parsing, `off` to disable).
+semantic "person with a red hat" search. Point `REID_MODEL` at an OSNet
+`.onnx` (produced separately with torchreid) for lighting/pose-robust
+matching. Env knobs: `REID_MODEL`, `REID_DB`, `SEARCH_YOLO` (YOLO weights
+for query parsing, `off` to disable).
 
 Trial on this repo's own media (the four `docs/images/model_view_*.jpg`
 frames, 13 objects seeded): 12/13 jittered re-crops (+12% padding, +18
@@ -589,11 +577,7 @@ python -m app.detect_core --resolve konya_hukumet,otogar_kavsagi
 | [`app/alerts.py`](src/app/alerts.py) | Telegram / webhook alert push with rate limiting. |
 | [`app/cameras.py`](src/app/cameras.py) | Verified camera catalog + per-camera ROI/line/loiter config. |
 | [`app/firebase_store.py`](src/app/firebase_store.py) | Firestore writer (`footfall` / `latest` / `reid_stats` / `events`). |
-| [`tools/export_model.py`](src/tools/export_model.py) | YOLO → ONNX/OpenVINO export + on-target benchmark. |
-| [`tools/export_osnet.py`](src/tools/export_osnet.py) | OSNet → ONNX export for `--reid-model`. |
 | [`tools/roi_grid.py`](src/tools/roi_grid.py) | Capture a frame with a coordinate grid to configure ROI/line polygons. |
 | [`tools/search_by_image.py`](src/tools/search_by_image.py) | CLI for search-by-example (+ demo index seeding from still images). |
 | [`web/`](src/web/) | Static HTML/JS dashboard. |
 | [`docs/firebase_setup.md`](src/docs/firebase_setup.md) | Firebase project + security rules walkthrough. |
-| [`docs/turkey_cameras.md`](src/docs/turkey_cameras.md) | Camera sources and architecture notes. |
-| [`LOCAL_RUN.md`](src/LOCAL_RUN.md) | Step-by-step local-machine quickstart. |

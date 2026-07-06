@@ -232,8 +232,8 @@
   <main>
     <div id="config-warning" class="config-warning" style="display:none">
       <strong>Firebase not configured.</strong>
-      Copy <code>web/firebase-config.example.js</code> to <code>web/firebase-config.js</code>
-      and paste your project's web SDK values from
+      Create <code>web/firebase-config.js</code> exporting a
+      <code>firebaseConfig</code> object with your project's web SDK values from
       Firebase&nbsp;Console&nbsp;→&nbsp;Project&nbsp;settings&nbsp;→&nbsp;Your&nbsp;apps&nbsp;→&nbsp;Web&nbsp;app.
       Until then the dashboard layout renders but no live counts arrive.
     </div>
@@ -311,7 +311,7 @@
     </div>
   </main>
 
-  <!-- firebase-config.js is gitignored - copy from firebase-config.example.js -->
+  <!-- firebase-config.js is gitignored per-clone; see docs/firebase_setup.md -->
   <!-- ?v=N is a cache-buster: bump it whenever any of the JS files changes,
        so the browser doesn't serve a stale ES-module from disk cache. -->
   <script type="module" src="./firebase-config.js?v=23"></script>

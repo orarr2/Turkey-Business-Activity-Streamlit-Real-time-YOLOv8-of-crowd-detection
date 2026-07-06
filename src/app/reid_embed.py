@@ -8,9 +8,8 @@ Two implementations behind one interface:
   * OsnetEmbedder - a real person/vehicle re-ID CNN (OSNet) exported to ONNX,
     run with onnxruntime on CPU (~5-10 ms per crop for osnet_x0_25). Survives
     lighting/pose change - the piece the histogram fundamentally cannot do.
-    Export the model once with tools/export_osnet.py (needs internet for the
-    pretrained weights), copy the .onnx to the VM, run the collector with
-    --reid-model /path/to/osnet.onnx.
+    Produce the .onnx once with torchreid on any machine with internet, copy
+    it to the VM, run the collector with --reid-model /path/to/osnet.onnx.
 
 Embedders carry an `embedder_id`; the registry stores it and RESETS itself
 when it changes (embeddings from different embedders are not comparable -

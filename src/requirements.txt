@@ -19,10 +19,6 @@ firebase-admin>=6.5
 # Optional: nicer time handling for the notebook
 python-dateutil>=2.9
 
-# --- Optional performance / accuracy upgrades (NOT installed by default) ---
-# onnxruntime>=1.17   # required only for --reid-model (OSNet re-ID via ONNX)
-# openvino>=2024.0    # required only to RUN openvino-exported YOLO models
-#                     # (tools/export_model.py; ultralytics pulls it in for
-#                     # export itself). See README "Faster / more accurate
-#                     # models" + tools/export_osnet.py.
-# torchreid           # only on the machine where you run tools/export_osnet.py
+# --- Optional at runtime (not installed by default) ---
+# onnxruntime>=1.17   # only if you point --reid-model at an OSNet .onnx you
+#                     # produced separately (histogram default needs nothing).

@@ -9,7 +9,7 @@ Search everything the system has saved for things that look like a query photo:
     python -m tools.search_by_image --seed-images "docs/images/*.jpg"
     python -m tools.search_by_image --query crop.jpg --no-registry
 
-    # OSNet signature instead of the HSV histogram (see tools/export_osnet.py)
+    # OSNet signature instead of the HSV histogram (provide the .onnx yourself)
     python -m tools.search_by_image --query crop.jpg --reid-model osnet.onnx
 
 Run from src/ (same convention as the other tools).
