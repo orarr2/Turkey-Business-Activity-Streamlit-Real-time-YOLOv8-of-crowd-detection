@@ -6,6 +6,13 @@ from ``data/reviews.json`` (the ReviewStore) - nothing here reads live
 inference, so a caller can trust it and cache it without invalidation
 tricks.
 
+Percent-metrics need a MINIMUM SAMPLE SIZE to be meaningful. 3/3 correct
+is technically 100% but says nothing about the model - it says the user
+happened to review three easy crops. Below ``MIN_REVIEWS_FOR_METRIC``
+``header_line()`` reports N/A + a progress hint instead of a fabricated
+percentage, so the dashboard never shows a trustworthy-looking 100%
+against a two-digit sample. Same rule applies to per-class precision.
+
 Definitions used here (crop-level, until the full-frame review UX ships
 its own recall data):
 
@@ -24,6 +31,17 @@ adds a ``missed`` verdict, at which point ``compute()`` grows an
 ``recall`` field per class.
 """
 from __future__ import annotations
+
+# Below this many verdicts the % metrics are treated as unavailable in the
+# UI (header_line reports N/A + progress). 20 balances "quick to reach"
+# against "not laughably small" - the standard error on a proportion at
+# n=20 is already ~10 pp, low enough that a 60% vs 90% distinction is
+# real signal rather than coin flips.
+MIN_REVIEWS_FOR_METRIC = 20
+# Per-class precision needs its own minimum. Kept lower than the global
+# threshold since a class-specific bar of 20 would keep every per-class
+# metric hidden until well past 60 total reviews.
+MIN_REVIEWS_FOR_PER_CLASS = 5
 
 
 def compute(review_store) -> dict:
@@ -125,6 +143,13 @@ def header_line(metrics: dict, boost_summary: dict | None = None) -> str:
     total = metrics.get("total_reviews") or 0
     if total == 0:
         return "Model: no reviews yet - use the panel below to teach the system"
+    if total < MIN_REVIEWS_FOR_METRIC:
+        # % on a handful of reviews is misleading (3/3 = 100% is not "the model
+        # is perfect", it's "the user hit three easy ones"). Show a plain
+        # progress meter until the sample is big enough to trust.
+        return (f"Model: accuracy N/A - {total}/{MIN_REVIEWS_FOR_METRIC} "
+                f"reviews so far (percentages appear once the sample is "
+                f"large enough to be meaningful)")
     acc = metrics.get("accuracy")
     fp = metrics.get("fp_rate")
     recall = metrics.get("recall")
@@ -133,7 +158,7 @@ def header_line(metrics: dict, boost_summary: dict | None = None) -> str:
     per_cls = sorted((metrics.get("per_class") or []),
                      key=lambda c: c.get("n", 0), reverse=True)[:2]
     for c in per_cls:
-        if c.get("precision") is not None and c.get("n", 0) >= 3:
+        if c.get("precision") is not None and c.get("n", 0) >= MIN_REVIEWS_FOR_PER_CLASS:
             parts.append(f"P({c['cls']}) {int(round(c['precision'] * 100))}%")
     if recall is not None:
         parts.append(f"R {int(round(recall * 100))}%")

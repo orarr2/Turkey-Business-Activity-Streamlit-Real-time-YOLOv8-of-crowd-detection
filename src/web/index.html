@@ -309,15 +309,8 @@
        runtime), so this is where the system gets a signal for what it got
        wrong - stored in data/reviews.json, later usable to tune per-class
        thresholds and build per-camera static blacklists. */
-    /* The Review panel is sized like a single video tile - the whole point
-       is one frame + its verdict controls, not a widescreen editing bay.
-       max-width caps the canvas so it stops sprawling across the layout;
-       on narrow viewports it goes back to full width so the boxes stay
-       clickable. */
     .review-wrap { background: #171a21; border: 1px solid #232733;
-                   border-radius: 12px; padding: 16px; margin-top: 16px;
-                   max-width: 720px; }
-    @media (max-width: 900px) { .review-wrap { max-width: none; } }
+                   border-radius: 12px; padding: 16px; margin-top: 16px; }
     .review-wrap h2 { margin: 0 0 6px; font-size: 15px; font-weight: 600; }
     .review-wrap .sub { color: #8b909a; font-size: 12px; margin-bottom: 12px; }
     .review-body { display: grid; gap: 16px;
@@ -536,6 +529,15 @@
       <div id="anomaly-table-wrap"></div>
     </div>
 
+    <!-- Re-ID summary table: aggregated per-camera state (unique / total /
+         regulars). Sits between the count-driven sections (Footfall +
+         Anomaly events) and the entity-driven ones (Operational events +
+         Review). -->
+    <div class="reid-wrap" id="reid-section" hidden>
+      <h2>Re-identification - returning entities per camera <span class="est-tag">appearance-based estimate</span></h2>
+      <div id="reid-table-wrap"></div>
+    </div>
+
     <!-- Operational events: loitering / parked-too-long / returning visitors -->
     <div class="anomaly-wrap" id="events-section" hidden>
       <h2>Operational events - last 24h (prolonged presence, returning visitors)</h2>
@@ -624,20 +626,14 @@
         </div>
       </div>
     </div>
-
-    <!-- Re-ID summary table -->
-    <div class="reid-wrap" id="reid-section" hidden>
-      <h2>Re-identification - returning entities per camera <span class="est-tag">appearance-based estimate</span></h2>
-      <div id="reid-table-wrap"></div>
-    </div>
   </main>
 
   <!-- firebase-config.js is gitignored per-clone; see docs/firebase_setup.md -->
   <!-- ?v=N is a cache-buster: bump it whenever any of the JS files changes,
        so the browser doesn't serve a stale ES-module from disk cache. -->
-  <script type="module" src="./firebase-config.js?v=29"></script>
-  <script type="module" src="./cameras.js?v=29"></script>
-  <script type="module" src="./app.js?v=29"></script>
+  <script type="module" src="./firebase-config.js?v=30"></script>
+  <script type="module" src="./cameras.js?v=30"></script>
+  <script type="module" src="./app.js?v=30"></script>
 
   <!-- Search UI. INLINE and NON-MODULE on purpose: it wires POST /api/search
        on this same server, has no Firebase dependency, and must keep working
@@ -842,16 +838,30 @@
         resultsEl.appendChild(d);
       }
       if (!data.snapshot_matches.length) {
-        // Distinguish "no matches for your query" from "the index itself is
-        // empty" so the user knows whether to change filters or wait.
+        // Mode-aware empty message with a concrete next action - the old
+        // generic "widen the time range" line was misleading in image mode
+        // (there was no time filter that mattered) and useless in browse
+        // mode when the pool was simply small.
         const empty = data.index_size === 0;
-        const msg = empty
-            ? "the snapshot pool is empty right now - the collector fills it during operation. Come back in a few minutes."
-            : (mode === "image"
-                ? "no saved snapshot is similar enough - try Loose strictness or clear the class chips"
-                : "no crops match these filters - widen the time range, clear the class chips, or raise the count");
+        const noQueryObjects = mode === "image"
+            && (!data.query_objects || data.query_objects.length === 0);
+        const wholeImage = mode === "image"
+            && (data.query_objects || []).every((q) => q.cls === "image");
+        let msg;
+        if (empty) {
+          msg = "The pool is empty - the collector fills it as it samples. Try again in a few minutes.";
+        } else if (mode === "image" && noQueryObjects) {
+          msg = "No person/vehicle detected in the uploaded photo. Try a tighter crop of one object, or press <b>Loose</b> and search again.";
+        } else if (mode === "image" && wholeImage) {
+          msg = `No stored crop matches the uploaded photo above the current strictness. Try <b>Loose</b>, or crop the photo to just one person/vehicle. (${data.index_size} crops searched)`;
+        } else if (mode === "image") {
+          msg = `No stored crop is similar enough to the query above the current strictness. Try <b>Loose</b> or clear the class chips. (${data.index_size} crops searched)`;
+        } else {
+          // browse mode - the filters (class + time) are the only variables
+          msg = `No detections in this time window match those class chips. Try <b>last 24h</b> or <b>last 7d</b>, or clear the class chips. (pool: ${data.index_size} crops)`;
+        }
         resultsEl.innerHTML =
-          `<div class="empty" style="color:#8b909a;padding:12px;font-size:12px">${msg}</div>`;
+          `<div class="empty" style="color:#8b909a;padding:12px;font-size:12px;line-height:1.5">${msg}</div>`;
       }
 
       if (data.registry_matches && data.registry_matches.length) {

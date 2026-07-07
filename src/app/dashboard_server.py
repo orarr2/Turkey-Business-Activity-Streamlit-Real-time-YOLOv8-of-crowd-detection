@@ -445,9 +445,22 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
 
     def _anomaly_crops_clear(self) -> None:
+        # Clear the on-disk crops then rebuild whatever the live anomaly
+        # frames still cover, so the user isn't left with an empty pool. The
+        # rebuild happens IN-PROCESS on the visual-search state's already
+        # -loaded model - no second YOLO load, no cold start.
         try:
-            from app.anomaly_crops import clear_all
-            self._send_json(200, clear_all(SNAPSHOTS_DIR))
+            from app.anomaly_crops import clear_all, refresh
+            result = clear_all(SNAPSHOTS_DIR)
+            if _VISUAL_SEARCH._ready and _VISUAL_SEARCH.model is not None:
+                try:
+                    reseeded = refresh(_VISUAL_SEARCH.model,
+                                       _VISUAL_SEARCH.embedder,
+                                       SNAPSHOTS_DIR)
+                    result["reseeded"] = reseeded
+                except Exception as e:
+                    result["reseed_error"] = f"{type(e).__name__}: {e}"
+            self._send_json(200, result)
         except Exception as e:
             self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
 
@@ -459,9 +472,22 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
 
     def _live_samples_clear(self) -> None:
+        # "Clear" now means "clear + reseed", so the review UI doesn't die
+        # the moment the user clicks it locally. clear_all already drops the
+        # bootstrap marker; bootstrap_from_fixtures sees the missing marker
+        # and re-seeds fresh crops from the shipped model_view_*.jpg frames.
         try:
-            from app.live_samples import clear_all as ls_clear
-            self._send_json(200, ls_clear(SNAPSHOTS_DIR))
+            from app.live_samples import (clear_all as ls_clear,
+                                          bootstrap_from_fixtures)
+            result = ls_clear(SNAPSHOTS_DIR)
+            if _VISUAL_SEARCH._ready and _VISUAL_SEARCH.model is not None:
+                try:
+                    reseeded = bootstrap_from_fixtures(
+                        _VISUAL_SEARCH.model, DOCS_IMAGES_DIR, SNAPSHOTS_DIR)
+                    result["reseeded"] = reseeded
+                except Exception as e:
+                    result["reseed_error"] = f"{type(e).__name__}: {e}"
+            self._send_json(200, result)
         except Exception as e:
             self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
 
@@ -550,9 +576,21 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
 
     def _review_frames_clear(self) -> None:
+        # Same clear-then-reseed contract as the crop pool above: after wiping
+        # the review_frames tree, drop back a small set of fixture frames so
+        # the Review UI opens on real content on the next request.
         try:
-            from app.review_frames import clear_all
-            self._send_json(200, clear_all(SNAPSHOTS_DIR))
+            from app.review_frames import (clear_all,
+                                            bootstrap_from_fixtures as rf_boot)
+            result = clear_all(SNAPSHOTS_DIR)
+            if _VISUAL_SEARCH._ready and _VISUAL_SEARCH.model is not None:
+                try:
+                    reseeded = rf_boot(
+                        _VISUAL_SEARCH.model, DOCS_IMAGES_DIR, SNAPSHOTS_DIR)
+                    result["reseeded"] = reseeded
+                except Exception as e:
+                    result["reseed_error"] = f"{type(e).__name__}: {e}"
+            self._send_json(200, result)
         except Exception as e:
             self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
 
