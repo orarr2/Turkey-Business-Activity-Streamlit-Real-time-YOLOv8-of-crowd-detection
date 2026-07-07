@@ -43,6 +43,14 @@ LIVE_SAMPLE_MAX_FILES = int(os.environ.get("LIVE_SAMPLE_MAX_FILES") or 200)
 
 MIN_CROP_SIDE = 24     # matches anomaly_crops - anything smaller is noise
 
+# Bootstrap: seed the pool from shipped camera fixture frames the moment the
+# dashboard server starts, so the review UI never opens on an empty pool
+# even before the collector has produced its first sample. A marker file
+# in the tree prevents re-seeding on subsequent boots.
+BOOTSTRAP_MARKER = ".bootstrapped"
+BOOTSTRAP_CAM_ID = "_demo"
+BOOTSTRAP_TOP_K = 2   # crops per fixture (4 fixtures × 2 = ~8 total)
+
 
 def _dir(snapshots_root: str | Path = SNAPSHOTS_ROOT) -> Path:
     return Path(snapshots_root) / LIVE_SAMPLES_SUBDIR
@@ -121,7 +129,9 @@ def save_crop(cam_id: str, frame, boxes: list[dict],
     crop = frame[y1:y2, x1:x2]
     out_dir = _dir(snapshots_root) / cam_id
     out_dir.mkdir(parents=True, exist_ok=True)
-    ts = int(time.time() * 1000)
+    # Microsecond-precision timestamp keeps filenames unique even when
+    # bootstrap saves several crops in the same millisecond.
+    ts = int(time.time() * 1_000_000)
     conf_pct = int(round((b.get("conf") or 0) * 100))
     name = f"{ts}_{b.get('cls','?')}_{conf_pct:02d}.jpg"
     out_path = out_dir / name
@@ -174,6 +184,61 @@ def usage_stats(snapshots_root: str | Path = SNAPSHOTS_ROOT) -> dict:
     }
 
 
+def bootstrap_from_fixtures(model,
+                            fixtures_dir: str | Path,
+                            snapshots_root: str | Path = SNAPSHOTS_ROOT,
+                            top_k: int = BOOTSTRAP_TOP_K,
+                            imgsz: int | None = 640) -> int:
+    """Seed the live-samples pool from shipped fixture frames.
+
+    Runs once per install (guarded by a marker file inside the pool). The
+    fixture frames in ``src/docs/images/`` are real captures from the four
+    production cameras, so the crops the user reviews first look exactly
+    like the ones the collector will produce a few minutes later.
+
+    Returns the number of crops written (0 when nothing to do).
+    """
+    if model is None or not fixtures_dir:
+        return 0
+    fixtures = Path(fixtures_dir)
+    if not fixtures.is_dir():
+        return 0
+    root = _dir(snapshots_root)
+    marker = root / BOOTSTRAP_MARKER
+    if marker.exists():
+        return 0
+
+    import cv2
+    from app.detect_core import detect_with_boxes, DEFAULT_PER_CLASS_CONF
+
+    seeded = 0
+    for p in sorted(fixtures.glob("*.jpg")):
+        frame = cv2.imread(str(p))
+        if frame is None:
+            continue
+        try:
+            _, boxes = detect_with_boxes(model, frame, conf=0.30, imgsz=imgsz,
+                                         per_class_conf=DEFAULT_PER_CLASS_CONF)
+        except Exception:
+            continue
+        # Largest boxes first - most visible / most educational to the user
+        # on the first-look review pass.
+        boxes.sort(key=lambda b: (b["x2"] - b["x1"]) * (b["y2"] - b["y1"]),
+                   reverse=True)
+        for b in boxes[:top_k]:
+            saved = save_crop(BOOTSTRAP_CAM_ID, frame, [b],
+                              snapshots_root=snapshots_root)
+            if saved:
+                seeded += 1
+
+    root.mkdir(parents=True, exist_ok=True)
+    try:
+        marker.touch()
+    except OSError:
+        pass
+    return seeded
+
+
 def clear_all(snapshots_root: str | Path = SNAPSHOTS_ROOT) -> dict:
     root = _dir(snapshots_root)
     if not root.is_dir():
@@ -186,6 +251,14 @@ def clear_all(snapshots_root: str | Path = SNAPSHOTS_ROOT) -> dict:
             n += 1
         except OSError:
             continue
+    # Also drop the bootstrap marker so the next server start re-seeds the
+    # pool from fixtures. Without this a user who clicked "clear all" would
+    # be left with an empty review UI until the collector catches up.
+    marker = root / BOOTSTRAP_MARKER
+    try:
+        if marker.is_file(): marker.unlink()
+    except OSError:
+        pass
     # Prune per-cam sub-dirs
     for d in sorted(root.rglob("*"), reverse=True):
         if d.is_dir():

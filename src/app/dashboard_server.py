@@ -45,6 +45,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = ROOT / "web"
 SNAPSHOTS_DIR = WEB_DIR / "snapshots"
+# Fixture frames the review-pool bootstrap seeds from. They're real
+# captures from the four production cameras (see src/docs/images/), so
+# the crops the first-time user reviews look exactly like what the
+# collector will produce a few minutes later.
+DOCS_IMAGES_DIR = ROOT / "docs" / "images"
 
 _TVKUR_HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; turkey-footfall-dashboard)",
@@ -131,6 +136,21 @@ class _VisualSearchState:
                     except Exception as e:
                         print(f"visual-search: anomaly-crops refresh failed "
                               f"({type(e).__name__}: {e}) - continuing")
+                    # One-shot bootstrap: seed the review pool from the shipped
+                    # camera fixture frames so the user sees ~8 real crops
+                    # within seconds of dashboard startup, instead of waiting
+                    # 3-5 minutes for the collector's first live samples.
+                    try:
+                        from app.live_samples import bootstrap_from_fixtures
+                        n = bootstrap_from_fixtures(
+                            self.model, DOCS_IMAGES_DIR, SNAPSHOTS_DIR)
+                        if n:
+                            print(f"visual-search: bootstrapped {n} demo "
+                                  f"crops into live_samples/ so the review "
+                                  f"UI has material on the first request")
+                    except Exception as e:
+                        print(f"visual-search: bootstrap skipped "
+                              f"({type(e).__name__}: {e})")
                 self._ready = True
             return self
 
@@ -471,8 +491,33 @@ def port_is_free(port: int) -> bool:
             return False
 
 
+def _warm_visual_search_async() -> None:
+    """Kick off YOLO load + review-pool bootstrap + anomaly-crops refresh
+    in a background daemon thread. Called from bind() so the pool is
+    populated by the time a first user opens the review UI - no cold-start
+    "every stored crop has been reviewed" message on a fresh install.
+
+    Safe to fire even without ultralytics installed: _VisualSearchState.get()
+    catches YOLO import failures and continues in whole-image mode.
+    """
+    def _run() -> None:
+        try:
+            _VISUAL_SEARCH.get()
+        except Exception as e:
+            print(f"  ! visual-search warmup failed: {type(e).__name__}: {e}")
+    threading.Thread(target=_run, daemon=True,
+                     name="visual-search-warmup").start()
+
+
 def bind(port: int, directory: Path | None = None) -> http.server.ThreadingHTTPServer:
-    """Threaded server so simultaneous video segment requests don't queue."""
+    """Threaded server so simultaneous video segment requests don't queue.
+
+    Also fires an async warmup that loads YOLO in the background and
+    bootstraps the review pool from fixture frames, so the first user to
+    open the dashboard finds material to review already sitting there.
+    """
     http.server.ThreadingHTTPServer.allow_reuse_address = True
     http.server.ThreadingHTTPServer.daemon_threads = True
-    return http.server.ThreadingHTTPServer(("", port), make_handler_factory(directory))
+    server = http.server.ThreadingHTTPServer(("", port), make_handler_factory(directory))
+    _warm_visual_search_async()
+    return server
