@@ -162,18 +162,13 @@
          - "find things like this photo"          (image + optional filters)
          - "find recent cars between 18:00-22:00" (class + time, no image)
          - "find any three recent detections"     (count + time, no image) */
-    /* Search panel is sized like a single video tile (roughly half the main
-       column) so it stops dwarfing the rest of the dashboard. On narrow
-       viewports it goes back to full width so the drop zone stays usable. */
     .search-wrap { background: #171a21; border: 1px solid #232733;
-                   border-radius: 12px; padding: 14px; margin-top: 16px;
-                   max-width: 720px; }
-    @media (max-width: 900px) { .search-wrap { max-width: none; } }
+                   border-radius: 12px; padding: 16px; margin-top: 16px; }
     .search-wrap h2 { margin: 0 0 10px; font-size: 15px; font-weight: 600; }
     .search-wrap .sub { color: #8b909a; font-size: 12px; margin-bottom: 12px; }
 
-    .search-form { display: grid; gap: 10px;
-                   grid-template-columns: minmax(180px, 1fr) 1.4fr; }
+    .search-form { display: grid; gap: 12px;
+                   grid-template-columns: minmax(220px, 1fr) 2fr; }
     @media (max-width: 720px) { .search-form { grid-template-columns: 1fr; } }
     .search-form fieldset { margin: 0; padding: 10px 12px 12px;
         background: #0c0e13; border: 1px solid #232733; border-radius: 10px; }
@@ -314,8 +309,15 @@
        runtime), so this is where the system gets a signal for what it got
        wrong - stored in data/reviews.json, later usable to tune per-class
        thresholds and build per-camera static blacklists. */
+    /* The Review panel is sized like a single video tile - the whole point
+       is one frame + its verdict controls, not a widescreen editing bay.
+       max-width caps the canvas so it stops sprawling across the layout;
+       on narrow viewports it goes back to full width so the boxes stay
+       clickable. */
     .review-wrap { background: #171a21; border: 1px solid #232733;
-                   border-radius: 12px; padding: 16px; margin-top: 16px; }
+                   border-radius: 12px; padding: 16px; margin-top: 16px;
+                   max-width: 720px; }
+    @media (max-width: 900px) { .review-wrap { max-width: none; } }
     .review-wrap h2 { margin: 0 0 6px; font-size: 15px; font-weight: 600; }
     .review-wrap .sub { color: #8b909a; font-size: 12px; margin-bottom: 12px; }
     .review-body { display: grid; gap: 16px;
@@ -633,9 +635,9 @@
   <!-- firebase-config.js is gitignored per-clone; see docs/firebase_setup.md -->
   <!-- ?v=N is a cache-buster: bump it whenever any of the JS files changes,
        so the browser doesn't serve a stale ES-module from disk cache. -->
-  <script type="module" src="./firebase-config.js?v=28"></script>
-  <script type="module" src="./cameras.js?v=28"></script>
-  <script type="module" src="./app.js?v=28"></script>
+  <script type="module" src="./firebase-config.js?v=29"></script>
+  <script type="module" src="./cameras.js?v=29"></script>
+  <script type="module" src="./app.js?v=29"></script>
 
   <!-- Search UI. INLINE and NON-MODULE on purpose: it wires POST /api/search
        on this same server, has no Firebase dependency, and must keep working
