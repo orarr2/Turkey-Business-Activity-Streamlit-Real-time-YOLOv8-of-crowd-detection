@@ -43,18 +43,21 @@ VERDICTS = ("correct", "wrong_label", "not_an_object")
 
 @dataclass
 class Review:
-    crop_path: str            # relative to SNAPSHOTS_ROOT, forward-slash form
-    verdict: str              # one of VERDICTS
-    original_cls: str         # what the detector said
-    corrected_cls: str | None # what the user says it actually is (wrong_label)
+    crop_path: str             # relative to SNAPSHOTS_ROOT, forward-slash form
+    verdict: str               # one of VERDICTS (label opinion)
+    original_cls: str          # what the detector said
+    corrected_cls: str | None  # what the user says it actually is (wrong_label)
+    anomaly_verdict: str | None  # "yes" / "no" - was this really an anomaly?
     note: str | None
-    reviewed_at: str          # ISO-8601 UTC
+    reviewed_at: str           # ISO-8601 UTC
 
     def to_public(self) -> dict:
         d = {"crop_path": self.crop_path, "verdict": self.verdict,
              "original_cls": self.original_cls, "reviewed_at": self.reviewed_at}
         if self.corrected_cls:
             d["corrected_cls"] = self.corrected_cls
+        if self.anomaly_verdict:
+            d["anomaly_verdict"] = self.anomaly_verdict
         if self.note:
             d["note"] = self.note
         return d
@@ -86,6 +89,7 @@ class ReviewStore:
                     verdict=str(row["verdict"]),
                     original_cls=str(row.get("original_cls", "?")),
                     corrected_cls=row.get("corrected_cls") or None,
+                    anomaly_verdict=row.get("anomaly_verdict") or None,
                     note=row.get("note") or None,
                     reviewed_at=str(row.get("reviewed_at", "")))
                 self._by_path[r.crop_path] = r
@@ -108,14 +112,19 @@ class ReviewStore:
     def submit(self, crop_path: str, verdict: str, *,
                original_cls: str = "?",
                corrected_cls: str | None = None,
+               anomaly_verdict: str | None = None,
                note: str | None = None) -> Review:
         if verdict not in VERDICTS:
             raise ValueError(f"unknown verdict {verdict!r}; expected one of "
                              f"{VERDICTS}")
+        if anomaly_verdict is not None and anomaly_verdict not in ("yes", "no"):
+            raise ValueError(f"invalid anomaly_verdict {anomaly_verdict!r}; "
+                             f"expected 'yes' | 'no' | None")
         r = Review(
             crop_path=str(crop_path), verdict=verdict,
             original_cls=str(original_cls),
             corrected_cls=(str(corrected_cls) if corrected_cls else None),
+            anomaly_verdict=(str(anomaly_verdict) if anomaly_verdict else None),
             note=(str(note) if note else None),
             reviewed_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
         with self._lock:
@@ -144,24 +153,24 @@ class ReviewStore:
 def sample_crop(store: ReviewStore,
                 snapshots_root: str | Path = SNAPSHOTS_ROOT,
                 seed: int | None = None) -> dict | None:
-    """Pick one crop the user has not reviewed yet, uniformly at random.
+    """Pick one crop the user has not reviewed yet.
 
-    Returns {"path": rel_path, "url": "/snapshots/...", "cls": guessed_cls}
-    or None if every stored crop has already been reviewed.
+    Returns {"path", "url", "cls", "from_anomaly", "remaining"} or None
+    when every stored crop has been reviewed.
 
-    The class guess reuses the manifest+filename heuristics `SnapshotIndex`
-    uses for its own class labeling, so what the user sees on the review
-    card is exactly what would go into the count if they clicked "correct".
+    Sampling favors crops the user has NOT already reviewed AND that came
+    from anomaly frames (they are the ones most likely to teach the system
+    something new). Anomaly candidates are picked with 70% probability
+    when they exist; otherwise fall back to routine returning/events crops.
     """
-    from app.visual_search import SnapshotIndex
+    from app.visual_search import SnapshotIndex, _is_from_anomaly
 
     root = Path(snapshots_root)
-    # A cheap index build just to reuse its class-guessing logic without
-    # touching the embedder cache (we don't need vectors here).
     idx = SnapshotIndex(root)
     manifest_cls = idx._manifest_cls()  # noqa: SLF001 - deliberate reuse
 
-    candidates: list[tuple[str, str]] = []
+    anomaly_pool: list[tuple[str, str]] = []
+    routine_pool: list[tuple[str, str]] = []
     for sub in CROP_SUBDIRS:
         base = root / sub
         if not base.is_dir():
@@ -174,15 +183,22 @@ def sample_crop(store: ReviewStore,
                 continue
             cls = manifest_cls.get(rel)
             if not cls:
-                # last-ditch class guess so the card is never blank
                 import cv2 as _cv2
                 img = _cv2.imread(str(p))
                 cls = idx._guess_cls(p, img.shape) if img is not None else "?"  # noqa: SLF001
-            candidates.append((rel, cls))
+            (anomaly_pool if _is_from_anomaly(rel) else routine_pool).append((rel, cls))
 
-    if not candidates:
+    total = len(anomaly_pool) + len(routine_pool)
+    if total == 0:
         return None
     rng = random.Random(seed) if seed is not None else random
-    rel, cls = rng.choice(candidates)
-    return {"path": rel, "url": f"/snapshots/{rel}", "cls": cls,
-            "remaining": len(candidates)}
+    prefer_anomaly = anomaly_pool and rng.random() < 0.7
+    pool = anomaly_pool if prefer_anomaly else (routine_pool or anomaly_pool)
+    rel, cls = rng.choice(pool)
+    return {
+        "path": rel,
+        "url": f"/snapshots/{rel}",
+        "cls": cls,
+        "from_anomaly": _is_from_anomaly(rel),
+        "remaining": total,
+    }

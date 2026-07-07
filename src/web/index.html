@@ -56,13 +56,17 @@
                       color: #8b909a; font-size: 13px; }
     .video-fallback a { color: #4f8cff; text-decoration: none; }
 
-    /* Bottom overlay strip inside the video-wrap: KPI values + counts-age.
-       A soft dark gradient keeps the numbers legible over any live frame
-       without hiding the scene. pointer-events:none so overlay never
-       intercepts clicks on the underlying player. */
-    .video-overlay-bottom { position: absolute; left: 0; right: 0; bottom: 0;
-        padding: 18px 10px 6px;
-        background: linear-gradient(to top, rgba(0,0,0,0.75), rgba(0,0,0,0));
+    /* TOP overlay strip inside the video-wrap: KPI values + counts-age.
+       The overlay used to sit at the bottom, but that fought with the
+       browser's <video controls> chrome and left users without playback /
+       mute buttons. Moving KPIs to the top of the frame frees the bottom
+       for the native controls (which auto-hide on most desktops when the
+       cursor is away). A soft dark gradient keeps the numbers legible over
+       any live frame. pointer-events:none so the overlay never intercepts
+       clicks on the underlying player. */
+    .video-overlay-bottom { position: absolute; left: 0; right: 0; top: 0;
+        padding: 6px 10px 18px;
+        background: linear-gradient(to bottom, rgba(0,0,0,0.75), rgba(0,0,0,0));
         color: #fff; font-size: 12px; line-height: 1.3;
         display: flex; gap: 10px; flex-wrap: wrap; align-items: baseline;
         pointer-events: none; }
@@ -304,26 +308,48 @@
     .review-panel .current-label .val { font-weight: 700; }
     .review-panel .path { color: #6f7480; font-size: 11px; margin-top: 8px;
         word-break: break-all; }
-    .review-buttons { display: flex; flex-direction: column; gap: 8px;
+    /* Review buttons: minimal, uncolored, uncluttered. Two independent
+       button rows (label + anomaly) plus a next/skip. No emoji, no
+       "wrong-class" selector - the aim is a fast tap through many crops. */
+    .review-buttons { display: flex; flex-direction: column; gap: 12px;
         margin-top: 14px; }
+    .review-buttons .row-label { color: #6f7480; font-size: 11px;
+        text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
     .review-buttons .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
     .review-buttons button { background: transparent; color: #e7e9ee;
-        border: 1px solid #2c3140; border-radius: 8px;
-        padding: 8px 14px; font-size: 13px; cursor: pointer; }
-    .review-buttons button:hover { border-color: #4f8cff; }
-    .review-buttons button.correct { border-color: #36d399; color: #36d399; }
-    .review-buttons button.wrong   { border-color: #f0a35e; color: #f0a35e; }
-    .review-buttons button.reject  { border-color: #ef4444; color: #ef4444; }
-    .review-buttons button.skip    { color: #6f7480; }
-    .review-buttons select { background: #0c0e13; border: 1px solid #2c3140;
-        color: #e7e9ee; border-radius: 6px; padding: 4px 8px; font-size: 12px; }
-    .review-buttons textarea { background: #0c0e13; border: 1px solid #2c3140;
+        border: 1px solid #2c3140; border-radius: 6px;
+        padding: 8px 16px; font-size: 13px; font-weight: 500; cursor: pointer;
+        transition: border-color .1s, background .1s; }
+    .review-buttons button:hover { border-color: #8b909a; }
+    .review-buttons button.on { border-color: #4f8cff;
+        background: rgba(79,140,255,0.10); color: #fff; }
+    .review-buttons button.next { color: #8b909a; margin-left: auto; }
+    .review-buttons button.next:hover { color: #e7e9ee; }
+    /* Note field only appears once the user picks a non-default verdict
+       (see the JS toggle) - stays out of the way for the fast happy path. */
+    .review-note-wrap { display: none; }
+    .review-note-wrap.open { display: block; }
+    .review-note-wrap textarea { background: #0c0e13; border: 1px solid #2c3140;
         color: #e7e9ee; border-radius: 6px; padding: 6px 8px; font-size: 12px;
         font-family: inherit; resize: vertical; width: 100%; }
     .review-stats { font-size: 12px; color: #8b909a; margin-top: 12px; }
     .review-stats b { color: #e7e9ee; }
     .review-status { font-size: 12px; color: #8b909a; margin-top: 8px; }
     .review-status.err { color: #ef4444; }
+    /* Disk-usage indicator + clear button. Small, borderless, sits under
+       the stats so the user knows disk is being touched and can trim. */
+    .disk-usage { display: flex; align-items: center; gap: 10px;
+        font-size: 11px; color: #6f7480; margin-top: 8px; flex-wrap: wrap; }
+    .disk-usage .bar { flex: 1; min-width: 120px; max-width: 240px;
+        height: 4px; background: #232733; border-radius: 2px; overflow: hidden; }
+    .disk-usage .bar i { display: block; height: 100%; background: #4f8cff;
+        transition: width .3s; }
+    .disk-usage .bar.high i { background: #f0a35e; }
+    .disk-usage .bar.full i { background: #ef4444; }
+    .disk-usage button { background: none; border: 1px solid #2c3140;
+        color: #8b909a; border-radius: 4px; padding: 2px 8px; font-size: 10px;
+        cursor: pointer; }
+    .disk-usage button:hover { border-color: #ef4444; color: #ef4444; }
   </style>
 </head>
 <body>
@@ -365,6 +391,9 @@
               works best</div>
           </label>
           <button id="drop-clear" type="button">✕ clear photo</button>
+          <button id="search-reset" type="button" style="background:none;
+              border:0;color:#8b909a;font-size:11px;cursor:pointer;padding:2px 6px;
+              margin-top:2px">↺ reset all filters</button>
           <div class="strictness-row">
             <button class="strict-btn" data-strict="0.30">Loose</button>
             <button class="strict-btn on" data-strict="0.55">Balanced</button>
@@ -403,7 +432,6 @@
       </div>
       <div class="search-actions">
         <button id="search-go">Search</button>
-        <button id="search-reset" class="secondary" type="button">New search</button>
         <span id="search-status"></span>
       </div>
       <div id="search-preview" hidden></div>
@@ -446,10 +474,11 @@
     <!-- Human-in-the-loop review of saved detections. See app/labels.py. -->
     <div class="review-wrap" id="review-section">
       <h2>Review detections - teach the system what it got wrong</h2>
-      <div class="sub">Random sample of a saved crop. YOLOv8 does not learn
-        from the live stream on its own - what you mark here goes to
-        <code>data/reviews.json</code> and is used to tune per-class
-        thresholds and build per-camera blacklists.</div>
+      <div class="sub">Random sample of a saved crop, including crops
+        extracted from anomaly frames. YOLOv8 does not learn from the live
+        stream on its own - your verdicts go to
+        <code>data/reviews.json</code> and repeated rejections in the same
+        area auto-build a per-camera blacklist.</div>
       <div class="review-body">
         <div class="review-crop" id="review-crop">
           <div class="review-empty" id="review-empty">loading…</div>
@@ -460,36 +489,51 @@
             <span class="current-label">
               model says <span class="val" id="review-cls">?</span>
             </span>
+            <span id="review-source-badge" hidden
+                  style="margin-left:8px;padding:2px 8px;border-radius:999px;
+                         font-size:11px;background:rgba(239,68,68,0.12);
+                         color:#ef4444">from anomaly frame</span>
           </div>
           <div class="path" id="review-path"></div>
           <div class="review-buttons">
+            <!-- Row 1: is the CLASS label correct? -->
+            <div>
+              <div class="row-label">Label</div>
+              <div class="btn-row" id="label-row">
+                <button data-label="correct">correct</button>
+                <button data-label="wrong">wrong</button>
+              </div>
+            </div>
+            <!-- Row 2: was this really an anomaly worth flagging?
+                 Shown only when the crop comes from an anomaly frame. -->
+            <div id="anomaly-row-wrap" hidden>
+              <div class="row-label">Anomaly</div>
+              <div class="btn-row" id="anomaly-row">
+                <button data-anomaly="yes">yes</button>
+                <button data-anomaly="no">no</button>
+              </div>
+            </div>
+            <!-- Optional note - collapses in unless the user marked wrong / anomaly=yes -->
+            <div class="review-note-wrap" id="note-wrap">
+              <textarea id="review-note" rows="2"
+                        placeholder="optional note (e.g. 'lamp post in corner')"></textarea>
+            </div>
+            <!-- Submit + next -->
             <div class="btn-row">
-              <button class="correct" data-verdict="correct"
-                      title="the label is right; keep counting it">✅ label is correct</button>
-              <button class="reject" data-verdict="not_an_object"
-                      title="the box is around a static object / background - never count it">🚫 not an object</button>
-              <button class="skip" id="review-skip"
-                      title="next crop; no answer saved for this one">skip →</button>
+              <button id="review-submit" title="save and load the next crop">save + next</button>
+              <button class="next" id="review-skip"
+                      title="skip this crop, no answer saved">skip →</button>
             </div>
-            <div class="btn-row" style="align-items:center;gap:6px">
-              <button class="wrong" data-verdict="wrong_label"
-                      title="the label is wrong; pick the right class">⚠ wrong class</button>
-              <select id="review-correct">
-                <option value="">(pick correct class)</option>
-                <option value="person">person</option>
-                <option value="car">car</option>
-                <option value="truck">truck</option>
-                <option value="bus">bus</option>
-                <option value="motorcycle">motorcycle</option>
-                <option value="bicycle">bicycle</option>
-                <option value="train">train</option>
-              </select>
-            </div>
-            <textarea id="review-note" rows="1"
-                      placeholder="optional note (e.g. 'lamp post in corner')"></textarea>
           </div>
           <div class="review-status" id="review-status"></div>
           <div class="review-stats" id="review-stats">reviewed 0</div>
+          <div class="disk-usage" id="disk-usage" hidden>
+            <span>anomaly crops on disk:</span>
+            <span><b id="disk-used">0</b> / <span id="disk-cap">300</span> MB
+                  · <b id="disk-count">0</b> files</span>
+            <div class="bar" id="disk-bar"><i style="width:0%"></i></div>
+            <button id="disk-clear" title="delete every extracted crop from the disk cache">clear all</button>
+          </div>
         </div>
       </div>
     </div>
@@ -728,39 +772,83 @@
   </script>
 
   <!-- Review UI. Loads one un-reviewed crop at a time from /api/review-sample,
-       submits the verdict to /api/review-submit, then fetches the next. -->
+       submits the verdict to /api/review-submit, then fetches the next.
+       Two independent verdicts collected per crop:
+         labelVerdict:   "correct" | "wrong"
+         anomalyVerdict: "yes" | "no"  (only when crop is from an anomaly)
+       The submit call maps them onto the ReviewStore's fields. -->
   <script>
   (function initReview() {
     const $ = (id) => document.getElementById(id);
     const cropImg = $("review-img"), emptyEl = $("review-empty");
     const clsEl = $("review-cls"), pathEl = $("review-path");
-    const correctSel = $("review-correct"), noteEl = $("review-note");
+    const noteEl = $("review-note"), noteWrap = $("note-wrap");
     const statusEl = $("review-status"), statsEl = $("review-stats");
-    const skipBtn = $("review-skip");
+    const skipBtn = $("review-skip"), submitBtn = $("review-submit");
+    const labelRow = $("label-row"), anomalyRow = $("anomaly-row");
+    const anomalyRowWrap = $("anomaly-row-wrap");
+    const sourceBadge = $("review-source-badge");
+    const diskWrap = $("disk-usage");
+    const diskUsed = $("disk-used"), diskCap = $("disk-cap");
+    const diskCount = $("disk-count"), diskBar = $("disk-bar");
+    const diskClearBtn = $("disk-clear");
     if (!cropImg) return;
 
-    const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) =>
-        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-
     let currentSample = null;
+    let labelVerdict = null;   // "correct" | "wrong"
+    let anomalyVerdict = null; // "yes" | "no"
 
+    // ---- UI state helpers -----------------------------------------------
+    function selectRow(row, dataAttr, value) {
+      row.querySelectorAll("button").forEach((b) => {
+        b.classList.toggle("on", b.dataset[dataAttr] === value);
+      });
+    }
+    function pickLabel(v) {
+      labelVerdict = v;
+      selectRow(labelRow, "label", v);
+      toggleNote();
+    }
+    function pickAnomaly(v) {
+      anomalyVerdict = v;
+      selectRow(anomalyRow, "anomaly", v);
+      toggleNote();
+    }
+    function toggleNote() {
+      // Show the note textarea only when the answer is a "problem" - the
+      // user is about to describe WHAT was wrong. Fast path (correct + no
+      // anomaly) keeps the panel compact.
+      const shouldOpen = labelVerdict === "wrong" || anomalyVerdict === "yes";
+      noteWrap.classList.toggle("open", shouldOpen);
+    }
+    function clearVerdicts() {
+      labelVerdict = null; anomalyVerdict = null;
+      labelRow.querySelectorAll("button.on").forEach((b) => b.classList.remove("on"));
+      anomalyRow.querySelectorAll("button.on").forEach((b) => b.classList.remove("on"));
+      noteEl.value = "";
+      noteWrap.classList.remove("open");
+    }
+
+    // ---- data fetch -----------------------------------------------------
     async function loadNext() {
       statusEl.className = "review-status";
       statusEl.textContent = "";
       emptyEl.textContent = "loading…";
       emptyEl.style.display = "";
       cropImg.hidden = true;
+      clearVerdicts();
       try {
         const r = await fetch("/api/review-sample", { cache: "no-store" });
         const data = await r.json();
         if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
         if (data.done) {
           currentSample = null;
-          emptyEl.innerHTML =
-              "✅ every stored crop has been reviewed.<br>" +
+          emptyEl.innerHTML = "every stored crop has been reviewed.<br>" +
               "<span style=\"font-size:11px\">check <code>data/reviews.json</code> " +
               "to export your verdicts</span>";
           clsEl.textContent = "-"; pathEl.textContent = "";
+          sourceBadge.hidden = true;
+          anomalyRowWrap.hidden = true;
           return;
         }
         currentSample = data;
@@ -769,11 +857,13 @@
         emptyEl.style.display = "none";
         clsEl.textContent = data.cls || "?";
         pathEl.textContent = data.path;
-        correctSel.value = ""; noteEl.value = "";
+        const fromAnomaly = !!data.from_anomaly;
+        sourceBadge.hidden = !fromAnomaly;
+        anomalyRowWrap.hidden = !fromAnomaly;
         const remaining = data.remaining;
         if (typeof remaining === "number") {
-          statsEl.innerHTML = statsEl.innerHTML.split("·")[0] +
-              ` · <b>${remaining}</b> crops still un-reviewed`;
+          statsEl.innerHTML = statsEl.innerHTML.split("·")[0].trim() +
+              ` · <b>${remaining}</b> still un-reviewed`;
         }
       } catch (err) {
         currentSample = null;
@@ -790,29 +880,52 @@
         const s = await r.json();
         const byV = s.by_verdict || {};
         statsEl.innerHTML = `reviewed <b>${s.total_reviewed || 0}</b> ` +
-            `(correct ${byV.correct || 0} · wrong ${byV.wrong_label || 0} · ` +
-            `not-object ${byV.not_an_object || 0})`;
+            `(correct ${byV.correct || 0} · wrong ${byV.wrong_label || 0})`;
       } catch (_) { /* offline ok */ }
     }
 
-    async function submit(verdict) {
-      if (!currentSample) return;
-      if (verdict === "wrong_label" && !correctSel.value) {
+    async function refreshDisk() {
+      try {
+        const r = await fetch("/api/anomaly-crops-stats", { cache: "no-store" });
+        if (!r.ok) { diskWrap.hidden = true; return; }
+        const s = await r.json();
+        if (s.error || s.cap_bytes == null) { diskWrap.hidden = true; return; }
+        diskWrap.hidden = false;
+        const usedMb = (s.bytes / (1024 * 1024)).toFixed(1);
+        diskUsed.textContent = usedMb;
+        diskCap.textContent = s.cap_mb;
+        diskCount.textContent = s.count;
+        const pct = Math.max(0, Math.min(100, (s.bytes / s.cap_bytes) * 100));
+        const bar = diskBar.querySelector("i");
+        bar.style.width = pct + "%";
+        diskBar.classList.toggle("high", pct >= 60 && pct < 90);
+        diskBar.classList.toggle("full", pct >= 90);
+      } catch (_) { diskWrap.hidden = true; }
+    }
+
+    // ---- submit ---------------------------------------------------------
+    async function submit() {
+      if (!currentSample || !labelVerdict) {
         statusEl.className = "review-status err";
-        statusEl.textContent = "pick the correct class first";
+        statusEl.textContent = "pick a label verdict first (correct / wrong)";
         return;
       }
+      // Map the two-dimensional UI to the ReviewStore verdict field. The
+      // core "correct/wrong_label" verdict is decided by labelVerdict; the
+      // anomaly opinion rides along as a structured extra so the store can
+      // later drive auto-blacklist and anomaly-detector tuning.
+      const verdict = labelVerdict === "correct" ? "correct" : "wrong_label";
       statusEl.className = "review-status";
       statusEl.textContent = "saving…";
       try {
         const r = await fetch("/api/review-submit", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            crop_path: currentSample.path,
-            original_cls: currentSample.cls,
-            verdict,
-            corrected_cls: verdict === "wrong_label" ? correctSel.value : null,
-            note: noteEl.value.trim() || null,
+            crop_path:      currentSample.path,
+            original_cls:   currentSample.cls,
+            verdict:        verdict,
+            anomaly_verdict: anomalyVerdict,       // may be null
+            note:           noteEl.value.trim() || null,
           }),
         });
         const data = await r.json();
@@ -825,12 +938,28 @@
       }
     }
 
-    document.querySelectorAll(".review-buttons button[data-verdict]")
-        .forEach((b) => b.addEventListener("click", () => submit(b.dataset.verdict)));
+    // ---- wire events ----------------------------------------------------
+    labelRow.querySelectorAll("button").forEach((b) =>
+        b.addEventListener("click", () => pickLabel(b.dataset.label)));
+    anomalyRow.querySelectorAll("button").forEach((b) =>
+        b.addEventListener("click", () => pickAnomaly(b.dataset.anomaly)));
+    submitBtn.addEventListener("click", submit);
     skipBtn.addEventListener("click", loadNext);
+    diskClearBtn.addEventListener("click", async () => {
+      if (!confirm("Delete every extracted anomaly crop from disk?")) return;
+      try {
+        await fetch("/api/anomaly-crops-clear", { method: "POST" });
+      } catch (_) { /* best-effort */ }
+      await refreshDisk();
+      await loadNext();
+    });
 
     refreshStats();
+    refreshDisk();
     loadNext();
+    // Disk usage refresh runs every 60s while the tab is open - light
+    // touch on the server, gives the user a live sense of accumulation.
+    setInterval(refreshDisk, 60000);
   })();
   </script>
 </body>

@@ -259,11 +259,14 @@ function buildVideoInto(st, cfg, slot) {
     // instead of after the first user interaction. Combined with a hls.js
     // load kick below (autoStartLoad + play()) this pins down the case
     // where one tile stayed frozen until the user clicked into it.
-    // No `controls` on purpose: the tile is a live monitor, not a player.
-    // The browser's control bar would paint a persistent dark strip along
-    // the bottom of every tile - exactly the "black bar" complaint that
-    // motivated the compact layout.
+    // `controls` back on. The KPI overlay moved to the TOP of the video-wrap
+    // (see .video-overlay-bottom CSS which is anchored to top:0 now despite
+    // the historical name), so the browser's control chrome at the bottom
+    // no longer collides with the KPIs. controlsList strips the pieces we
+    // don't want a stream monitor to have (nothing to download; no cast /
+    // remote picker for a public dashboard).
     markup = `<video data-hls="${hlsUrl}" autoplay muted playsinline
+                     controls controlsList="nodownload noremoteplayback"
                      preload="auto"></video>`;
   } else if (embed && embed.includes("player.tvkur.com")) {
     // loading="lazy" postponed the iframe request until scroll, which is

@@ -53,9 +53,20 @@ _SRC_ROOT      = Path(__file__).resolve().parent.parent
 SNAPSHOTS_ROOT = _SRC_ROOT / "web" / "snapshots"
 DEFAULT_DB     = _SRC_ROOT / "data" / "reid.db"
 
-# Snapshot subtrees that contain per-object CROPS (anomalies/ and live/ hold
-# full annotated frames - a whole street never matches an object query).
-CROP_SUBDIRS = ("returning", "events")
+# Snapshot subtrees that contain per-object CROPS. `anomalies/` holds full
+# annotated frames (whole street), so it can't be matched against an
+# object-shaped query directly - instead ``app.anomaly_crops`` pre-extracts
+# per-object crops from every anomaly frame into ``anomalies_crops/`` (with
+# an LRU size cap and de-dup), and that sibling directory joins the index.
+CROP_SUBDIRS = ("returning", "events", "anomalies_crops")
+ANOMALY_CROPS_SUBDIR = "anomalies_crops"
+
+
+def _is_from_anomaly(rel: str) -> bool:
+    """True when the crop's rel path is under the anomaly-crops subtree.
+    Used by the review UI to decide whether to prompt "was this really an
+    anomaly?" alongside the label verdict."""
+    return rel.startswith(ANOMALY_CROPS_SUBDIR + "/")
 
 # Results below this cosine are noise for every embedder we ship; the
 # per-embedder "strong" threshold sits far above it.
@@ -212,8 +223,13 @@ class SnapshotIndex:
                 yield p
 
     def _manifest_cls(self) -> dict[str, str]:
-        """rel_path -> cls from the returning/ manifest.json files."""
+        """rel_path -> cls. Reads two manifest formats:
+        * ``manifest.json`` under ``returning/`` (list of items with
+          crop_url + cls);
+        * ``.anomaly_crops.json`` under ``anomalies_crops/`` written by
+          ``app.anomaly_crops`` (dict keyed by rel_crop_path)."""
         out: dict[str, str] = {}
+        # returning/ format
         for manifest in self.root.rglob("manifest.json"):
             try:
                 items = json.loads(manifest.read_text())
@@ -224,6 +240,16 @@ class SnapshotIndex:
                 cls = it.get("cls")
                 if url.startswith("/snapshots/") and cls:
                     out[url[len("/snapshots/"):]] = cls
+        # anomaly-crops format
+        for manifest in self.root.rglob(".anomaly_crops.json"):
+            try:
+                data = json.loads(manifest.read_text())
+            except Exception:
+                continue
+            for rel, meta in (data.get("crops") or {}).items():
+                cls = meta.get("cls")
+                if cls:
+                    out[rel] = cls
         return out
 
     @staticmethod
@@ -338,7 +364,8 @@ class SnapshotIndex:
                 source="snapshot", similarity=sim, cls=e["cls"],
                 strong=sim >= strong_at, query_cls=query.cls,
                 extra={"url": f"/snapshots/{rel}", "path": rel,
-                       "seen_at": _iso(e["mtime"])}))
+                       "seen_at": _iso(e["mtime"]),
+                       "from_anomaly": _is_from_anomaly(rel)}))
         scored.sort(key=lambda m: m.similarity, reverse=True)
         return scored[:top_n]
 
@@ -370,7 +397,8 @@ class SnapshotIndex:
                 source="snapshot", similarity=0.0, cls=e["cls"],
                 strong=False, query_cls="browse",
                 extra={"url": f"/snapshots/{rel}", "path": rel,
-                       "seen_at": _iso(mtime), "browse_only": True}))
+                       "seen_at": _iso(mtime), "browse_only": True,
+                       "from_anomaly": _is_from_anomaly(rel)}))
         return out
 
 

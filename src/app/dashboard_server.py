@@ -118,6 +118,19 @@ class _VisualSearchState:
                               f"uploads will be embedded whole (no object "
                               f"extraction). pip install ultralytics to fix.")
                 self.index = SnapshotIndex(SNAPSHOTS_DIR, embedder=self.embedder)
+                # Extract per-object crops from the accumulated anomaly frames
+                # so search + review can see them. Safe to fail silently: the
+                # rest of the pipeline just doesn't pick up anomaly candidates
+                # until YOLO is available on the next boot.
+                if self.model is not None:
+                    try:
+                        from app.anomaly_crops import refresh as _anomaly_refresh
+                        summary = _anomaly_refresh(
+                            self.model, self.embedder, SNAPSHOTS_DIR)
+                        print(f"visual-search: anomaly-crops refresh {summary}")
+                    except Exception as e:
+                        print(f"visual-search: anomaly-crops refresh failed "
+                              f"({type(e).__name__}: {e}) - continuing")
                 self._ready = True
             return self
 
@@ -174,6 +187,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/review-stats":
             self._review_stats()
             return
+        if path == "/api/anomaly-crops-stats":
+            self._anomaly_crops_stats()
+            return
         super().do_GET()
 
     def do_POST(self) -> None:
@@ -188,6 +204,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             return
         if path == "/api/review-submit":
             self._review_submit()
+            return
+        if path == "/api/anomaly-crops-clear":
+            self._anomaly_crops_clear()
             return
         self.send_error(404, "unknown POST endpoint")
 
@@ -316,7 +335,17 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 verdict,
                 original_cls=str(payload.get("original_cls", "?")),
                 corrected_cls=payload.get("corrected_cls") or None,
+                anomaly_verdict=payload.get("anomaly_verdict") or None,
                 note=payload.get("note") or None)
+            # After each submit, let the auto-blacklist accumulator decide
+            # whether N repeated rejects in one area now justify auto-adding
+            # a polygon. Silent failure - we never want a blacklist step to
+            # break a save.
+            try:
+                from app.auto_blacklist import consider_review
+                consider_review(_review_store(), r)
+            except Exception as ex:
+                print(f"  ! auto_blacklist skipped: {type(ex).__name__}: {ex}")
             self._send_json(200, {"ok": True, "review": r.to_public(),
                                   "summary": _review_store().summary()})
         except ValueError as e:
@@ -328,6 +357,20 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
     def _review_stats(self) -> None:
         try:
             self._send_json(200, _review_store().summary())
+        except Exception as e:
+            self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
+
+    def _anomaly_crops_stats(self) -> None:
+        try:
+            from app.anomaly_crops import usage_stats
+            self._send_json(200, usage_stats(SNAPSHOTS_DIR))
+        except Exception as e:
+            self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
+
+    def _anomaly_crops_clear(self) -> None:
+        try:
+            from app.anomaly_crops import clear_all
+            self._send_json(200, clear_all(SNAPSHOTS_DIR))
         except Exception as e:
             self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
 

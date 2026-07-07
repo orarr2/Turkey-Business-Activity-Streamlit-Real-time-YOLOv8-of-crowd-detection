@@ -250,6 +250,34 @@ GRID_SLOTS = [
 GRID_CAMERAS = [s["primary"] for s in GRID_SLOTS]
 
 
+# --- auto-blacklist merge -----------------------------------------------------
+# When the review UI accumulates enough "wrong" verdicts in a coherent screen
+# area (see app/auto_blacklist.py), a polygon is appended to
+# data/blacklist_auto.json. Merge those into cam["roi_exclude_class"] on
+# import so the next collector burst drops the same false positives - no
+# code change, no restart, no GPU.
+def _merge_auto_blacklist() -> None:
+    try:
+        from app.auto_blacklist import load_auto_blacklist
+    except ImportError:
+        return    # tests or minimal envs without the module - just skip
+    try:
+        by_cam = load_auto_blacklist()
+    except Exception:
+        return
+    for cam_id, cls_map in by_cam.items():
+        cam = CAMERAS.get(cam_id)
+        if not cam:
+            continue
+        existing = dict(cam.get("roi_exclude_class") or {})
+        for cls, polys in cls_map.items():
+            existing.setdefault(cls, []).extend(polys)
+        cam["roi_exclude_class"] = existing
+
+
+_merge_auto_blacklist()
+
+
 def active_cameras():
     """Cameras that have a usable URL (skips placeholders awaiting a YouTube id)."""
     return {k: v for k, v in CAMERAS.items() if v.get("url")}
