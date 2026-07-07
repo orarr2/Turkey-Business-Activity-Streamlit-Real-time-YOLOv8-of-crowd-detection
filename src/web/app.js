@@ -42,6 +42,25 @@ const HISTORY_LIMIT = 360;
 // label must agree, or the same screen claims "live" and "stale" at once.
 const STALE_AGE_S = 120;
 
+// Activity-index bands + combined-chart bin size. Declared up here (not next
+// to their consumers below) because start() calls renderCombinedChart and
+// computeActivity SYNCHRONOUSLY at file load - a const declared further
+// down would still be in TDZ when those first calls run, and the whole
+// dashboard init would throw (blank tiles, no video, no search, no review).
+const ACTIVITY_BANDS = [
+  { max: 0,   idx: 0  }, // truly empty
+  { max: 2,   idx: 1  }, // 1-2 people = quiet regardless of history
+  { max: 5,   idx: 2  }, // handful passing by = quiet
+  { max: 8,   idx: 3  }, // still quiet
+  { max: 12,  idx: 5  }, // moderate
+  { max: 18,  idx: 6  }, // moderate-to-busy
+  { max: 25,  idx: 7  }, // busy
+  { max: 35,  idx: 8  }, // crowded starts here
+  { max: 50,  idx: 9  }, // crowded
+  { max: 1e9, idx: 10 }, // packed
+];
+const COMBINED_BIN_MIN = 5;
+
 // Anomalies: the collector is the single source of truth. Every footfall doc
 // carries `is_anomaly` and (when flagged) an `anomaly` map with
 // kind/metric/window/z/observed/expected computed server-side from robust
@@ -577,23 +596,10 @@ function updateAggregates(slotId, rows) {
 //   2. When there was steady daylong traffic, a modest instantaneous
 //      dip below the p90 was scored "Quiet" even though 12 people is
 //      objectively a busy scene.
-// The bands below sit on absolute person counts and reflect what
-// "business activity" actually means for a downtown street camera. No
-// history, no p90, no fabricated crowds on empty scenes. If someone
-// wants per-camera calibration later, `ACTIVITY_BANDS` becomes a config
-// hook.
-const ACTIVITY_BANDS = [
-  { max: 0,   idx: 0  }, // truly empty
-  { max: 2,   idx: 1  }, // 1-2 people = quiet regardless of history
-  { max: 5,   idx: 2  }, // handful passing by = quiet
-  { max: 8,   idx: 3  }, // still quiet
-  { max: 12,  idx: 5  }, // moderate
-  { max: 18,  idx: 6  }, // moderate-to-busy
-  { max: 25,  idx: 7  }, // busy
-  { max: 35,  idx: 8  }, // crowded starts here
-  { max: 50,  idx: 9  }, // crowded
-  { max: 1e9, idx: 10 }, // packed
-];
+// The activity bands sit on absolute person counts and reflect what
+// "business activity" means for a downtown street camera - no history, no
+// p90, no fabricated crowds on empty scenes. Table lives at module top for
+// TDZ safety (see ACTIVITY_BANDS declaration near the file header).
 function _bandIndex(n) {
   for (const b of ACTIVITY_BANDS) if (n <= b.max) return b.idx;
   return 10;
@@ -691,8 +697,7 @@ function renderTileChart(slotId, rows) {
 // spaghetti, and per-sample labels distort the time axis (gaps compress).
 // So the combined view averages each camera into fixed 5-minute bins on a
 // true shared timeline; the per-tile mini charts keep the raw samples.
-
-const COMBINED_BIN_MIN = 5;
+// COMBINED_BIN_MIN is declared at module top for TDZ safety.
 
 // Each section below the tiles reveals ITSELF the moment it has content, and
 // stays gone until then. `hidden` on the wrapper element is toggled here so an
