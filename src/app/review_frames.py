@@ -45,6 +45,12 @@ FRAMES_SUBDIR = "review_frames"
 REVIEW_FRAME_EVERY_N = int(os.environ.get("REVIEW_FRAME_EVERY_N") or 5)
 REVIEW_FRAME_MAX_FILES = int(os.environ.get("REVIEW_FRAME_MAX_FILES") or 100)
 
+# Bootstrap: seed the pool from shipped camera fixture frames the moment the
+# dashboard server starts, so the review UI never opens on an empty pool
+# even before the collector has produced its first sample. A marker file in
+# the tree prevents re-seeding on subsequent boots.
+BOOTSTRAP_MARKER = ".bootstrapped"
+
 
 def _dir(snapshots_root: str | Path = SNAPSHOTS_ROOT) -> Path:
     return Path(snapshots_root) / FRAMES_SUBDIR
@@ -126,6 +132,57 @@ def save_frame(cam_id: str, frame, boxes: list[dict],
     rel = str(img_path.relative_to(snapshots_root)).replace("\\", "/")
     enforce_cap(snapshots_root, cap_files)
     return rel
+
+
+def bootstrap_from_fixtures(model,
+                            fixtures_dir: str | Path,
+                            snapshots_root: str | Path = SNAPSHOTS_ROOT,
+                            imgsz: int | None = 640) -> int:
+    """Seed the review-frames pool from shipped fixture frames.
+
+    Runs once per install (guarded by a marker file in the pool tree). The
+    fixture files ship as ``model_view_<cam_id>.jpg`` under ``src/docs/images``,
+    so the cam_id embedded in the review UI matches the real production
+    camera name - the user's first review-frame click looks exactly like a
+    real live frame from that camera, boxes and all. Returns the number of
+    frames written (0 when there was nothing to do).
+    """
+    if model is None or not fixtures_dir:
+        return 0
+    fixtures = Path(fixtures_dir)
+    if not fixtures.is_dir():
+        return 0
+    root = _dir(snapshots_root)
+    marker = root / BOOTSTRAP_MARKER
+    if marker.exists():
+        return 0
+
+    import cv2
+    from app.detect_core import detect_with_boxes, DEFAULT_PER_CLASS_CONF
+
+    seeded = 0
+    for p in sorted(fixtures.glob("model_view_*.jpg")):
+        frame = cv2.imread(str(p))
+        if frame is None:
+            continue
+        try:
+            _, boxes = detect_with_boxes(model, frame, conf=0.30, imgsz=imgsz,
+                                         per_class_conf=DEFAULT_PER_CLASS_CONF)
+        except Exception:
+            continue
+        # cam_id: strip the "model_view_" prefix so the review UI shows the
+        # real production camera name (konya_hukumet etc.), not "_demo".
+        cam_id = p.stem.replace("model_view_", "", 1) or "_demo"
+        rel = save_frame(cam_id, frame, boxes, snapshots_root=snapshots_root)
+        if rel:
+            seeded += 1
+
+    root.mkdir(parents=True, exist_ok=True)
+    try:
+        marker.write_text("")
+    except OSError:
+        pass
+    return seeded
 
 
 def load_metadata(frame_rel_path: str,

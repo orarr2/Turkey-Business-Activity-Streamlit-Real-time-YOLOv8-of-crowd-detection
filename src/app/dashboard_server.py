@@ -151,6 +151,20 @@ class _VisualSearchState:
                     except Exception as e:
                         print(f"visual-search: bootstrap skipped "
                               f"({type(e).__name__}: {e})")
+                    # Same idea for the FRAME-based review pool (review_frames/):
+                    # a fresh install had zero frames until the collector wrote
+                    # one, so the Review-detections panel opened on "no frames
+                    # in the pool yet" and could not teach the user anything.
+                    try:
+                        from app.review_frames import bootstrap_from_fixtures as _rf_bootstrap
+                        n = _rf_bootstrap(self.model, DOCS_IMAGES_DIR, SNAPSHOTS_DIR)
+                        if n:
+                            print(f"visual-search: bootstrapped {n} demo "
+                                  f"frames into review_frames/ so the Review "
+                                  f"panel opens on real content")
+                    except Exception as e:
+                        print(f"visual-search: review-frames bootstrap skipped "
+                              f"({type(e).__name__}: {e})")
                 self._ready = True
             return self
 

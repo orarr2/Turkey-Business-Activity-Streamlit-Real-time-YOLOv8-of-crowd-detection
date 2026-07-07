@@ -130,6 +130,21 @@
     }
     .big-chart-wrap h2, .reid-wrap h2, .anomaly-wrap h2 { margin: 0 0 10px; font-size: 16px; }
 
+    /* Cap the height of every list-shaped panel and let it scroll internally.
+       An unbounded Operational-events table with 40+ returning-visitor rows
+       ate half the browser window and pushed everything below the fold to
+       the next screenful. 420px = ~10 rows visible at 40px each, enough to
+       see structure without dominating the layout. */
+    #events-table-wrap, #anomaly-table-wrap, #reid-table-wrap {
+        max-height: 420px; overflow-y: auto; border-radius: 10px;
+    }
+    /* Keep the sticky-ish header when scrolling long tables. */
+    #events-table-wrap table.reid thead th,
+    #anomaly-table-wrap table.reid thead th,
+    #reid-table-wrap table.reid thead th {
+        position: sticky; top: 0; background: #171a21; z-index: 1;
+    }
+
     /* Anomaly events table: color the direction cell. */
     table.reid td.spike { color: #ef4444; font-weight: 600; }
     table.reid td.drop  { color: #f0a35e; font-weight: 600; }
@@ -147,13 +162,18 @@
          - "find things like this photo"          (image + optional filters)
          - "find recent cars between 18:00-22:00" (class + time, no image)
          - "find any three recent detections"     (count + time, no image) */
+    /* Search panel is sized like a single video tile (roughly half the main
+       column) so it stops dwarfing the rest of the dashboard. On narrow
+       viewports it goes back to full width so the drop zone stays usable. */
     .search-wrap { background: #171a21; border: 1px solid #232733;
-                   border-radius: 12px; padding: 16px; margin-top: 16px; }
+                   border-radius: 12px; padding: 14px; margin-top: 16px;
+                   max-width: 720px; }
+    @media (max-width: 900px) { .search-wrap { max-width: none; } }
     .search-wrap h2 { margin: 0 0 10px; font-size: 15px; font-weight: 600; }
     .search-wrap .sub { color: #8b909a; font-size: 12px; margin-bottom: 12px; }
 
-    .search-form { display: grid; gap: 12px;
-                   grid-template-columns: minmax(220px, 1fr) 2fr; }
+    .search-form { display: grid; gap: 10px;
+                   grid-template-columns: minmax(180px, 1fr) 1.4fr; }
     @media (max-width: 720px) { .search-form { grid-template-columns: 1fr; } }
     .search-form fieldset { margin: 0; padding: 10px 12px 12px;
         background: #0c0e13; border: 1px solid #232733; border-radius: 10px; }
@@ -613,9 +633,9 @@
   <!-- firebase-config.js is gitignored per-clone; see docs/firebase_setup.md -->
   <!-- ?v=N is a cache-buster: bump it whenever any of the JS files changes,
        so the browser doesn't serve a stale ES-module from disk cache. -->
-  <script type="module" src="./firebase-config.js?v=27"></script>
-  <script type="module" src="./cameras.js?v=27"></script>
-  <script type="module" src="./app.js?v=27"></script>
+  <script type="module" src="./firebase-config.js?v=28"></script>
+  <script type="module" src="./cameras.js?v=28"></script>
+  <script type="module" src="./app.js?v=28"></script>
 
   <!-- Search UI. INLINE and NON-MODULE on purpose: it wires POST /api/search
        on this same server, has no Firebase dependency, and must keep working
@@ -698,9 +718,20 @@
       $("search-from").value = toLocalDT(from);
       $("search-to").value = toLocalDT(now);
     };
-    $("preset-1h").addEventListener("click", (e) => { e.preventDefault(); setRange(1); });
-    $("preset-24h").addEventListener("click", (e) => { e.preventDefault(); setRange(24); });
-    $("preset-week").addEventListener("click", (e) => { e.preventDefault(); setRange(24 * 7); });
+    // Track the last-clicked preset so a Search a minute later refreshes
+    // "to" to *now* — otherwise fixture crops written seconds after the
+    // preset click fall OUTSIDE the frozen [from, to] window and browse
+    // mode reports 0 results even though the pool is not empty.
+    let lastPreset = null;
+    $("preset-1h").addEventListener("click", (e) => { e.preventDefault(); setRange(1);       lastPreset = 1; });
+    $("preset-24h").addEventListener("click", (e) => { e.preventDefault(); setRange(24);     lastPreset = 24; });
+    $("preset-week").addEventListener("click", (e) => { e.preventDefault(); setRange(24 * 7); lastPreset = 24 * 7; });
+    // Any manual edit voids the preset - user typed their own bound.
+    $("search-from").addEventListener("input", () => { lastPreset = null; });
+    $("search-to").addEventListener("input",   () => { lastPreset = null; });
+    // Default to "last 24h" so the panel opens in a state that actually
+    // returns the seeded fixture crops on the very first Search click.
+    setRange(24); lastPreset = 24;
 
     // ----- reset ------------------------------------------------------------
     resetBtn.addEventListener("click", () => {
@@ -724,6 +755,10 @@
       statusEl.textContent = hasImage
           ? "searching by image… (first search loads the model, ~10 s)"
           : "browsing…";
+      // If the user picked a preset and then paused before Searching, refresh
+      // its "to" bound so anything written since (fixture crops, live samples)
+      // falls back inside the window.
+      if (lastPreset !== null) setRange(lastPreset);
       try {
         const params = new URLSearchParams({ top: $("search-top").value });
         if (hasImage) params.set("min_sim", String(strictness));
