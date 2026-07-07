@@ -20,7 +20,7 @@ Visual-search knobs (env, all optional):
                  (must match the collector's --reid-model or the registry
                  search part silently no-ops on embedder mismatch);
     REID_DB      path to the collector's reid.db (default data/reid.db);
-    SEARCH_YOLO  YOLO weights for query-object extraction (default yolov8n.pt;
+    SEARCH_YOLO  YOLO weights for query-object extraction (default yolov8s.pt;
                  set to "off" to skip detection and embed uploads whole).
 """
 from __future__ import annotations
@@ -58,6 +58,31 @@ _SSL_CTX = ssl._create_unverified_context()
 MAX_UPLOAD_BYTES = 12 * 1024 * 1024
 
 
+def _parse_time(v: str) -> float | None:
+    """Accept ISO-8601 (`2026-07-06T18:00:00Z`), the browser's datetime-local
+    format (`2026-07-06T18:00`), or a bare epoch-seconds number. Return
+    epoch seconds. Empty / unparseable input returns None (open bound)."""
+    v = (v or "").strip()
+    if not v:
+        return None
+    try:
+        return float(v)
+    except ValueError:
+        pass
+    import datetime as _dt
+    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S",
+                "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            t = _dt.datetime.strptime(v, fmt)
+            # datetime-local sends naive strings; treat as UTC so the API
+            # is timezone-stable across browsers.
+            return t.replace(tzinfo=_dt.timezone.utc).timestamp()
+        except ValueError:
+            continue
+    return None
+
+
 class _VisualSearchState:
     """Lazily-built, process-wide search context shared across requests.
 
@@ -83,7 +108,7 @@ class _VisualSearchState:
                 from app.reid_embed import make_embedder
                 self.embedder = make_embedder(os.environ.get("REID_MODEL") or None)
                 self.db_path = os.environ.get("REID_DB") or DEFAULT_DB
-                weights = os.environ.get("SEARCH_YOLO", "yolov8n.pt")
+                weights = os.environ.get("SEARCH_YOLO", "yolov8s.pt")
                 if weights.lower() not in ("off", "none", ""):
                     try:
                         from app.detect_core import load_model
@@ -98,6 +123,21 @@ class _VisualSearchState:
 
 
 _VISUAL_SEARCH = _VisualSearchState()
+
+# Review store - lazily constructed on the first labels endpoint hit. The
+# store is thread-safe (single lock around its dict + rewrite), so all
+# handler threads share the one instance.
+_REVIEW_STORE = None
+_REVIEW_STORE_LOCK = threading.Lock()
+
+
+def _review_store():
+    global _REVIEW_STORE
+    with _REVIEW_STORE_LOCK:
+        if _REVIEW_STORE is None:
+            from app.labels import ReviewStore
+            _REVIEW_STORE = ReviewStore()
+        return _REVIEW_STORE
 
 
 class DashboardHandler(http.server.SimpleHTTPRequestHandler):
@@ -127,11 +167,27 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if self.path.startswith("/tvkur/"):
             self._proxy_tvkur()
             return
+        path = self.path.split("?")[0]
+        if path == "/api/review-sample":
+            self._review_sample()
+            return
+        if path == "/api/review-stats":
+            self._review_stats()
+            return
         super().do_GET()
 
     def do_POST(self) -> None:
-        if self.path.split("?")[0] == "/api/visual-search":
+        path = self.path.split("?")[0]
+        # /api/search is the current entry point (image + browse modes).
+        # /api/visual-search is the compat alias for the legacy image-only
+        # endpoint - the frontend and tools/search_by_image.py both used it
+        # before the browse mode existed, so keep serving them from the same
+        # handler.
+        if path in ("/api/search", "/api/visual-search"):
             self._visual_search()
+            return
+        if path == "/api/review-submit":
+            self._review_submit()
             return
         self.send_error(404, "unknown POST endpoint")
 
@@ -145,22 +201,29 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def _visual_search(self) -> None:
-        """POST /api/visual-search?top=12&min_sim=0.3&classes=person,car
+        """POST /api/search  (or /api/visual-search - the legacy alias).
 
-        Body: the raw uploaded image bytes (any cv2-decodable format - the
-        search page sends the File blob as-is, no multipart parsing needed).
+        Query params (all optional):
+            top=12               how many results to return
+            min_sim=0.30         image mode: minimum cosine similarity floor
+            classes=person,car   restrict candidates to these classes
+            from=<iso|epoch>     filter: seen at or after this time
+            to=<iso|epoch>       filter: seen at or before this time
+            order=time_desc      browse mode: time_desc | time_asc
+
+        Body:
+            when non-empty: raw image bytes → image mode (rank by similarity)
+            when empty:     browse mode → list crops matching class/time
+                            filters ordered by time
         """
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             length = 0
-        if length <= 0:
-            self._send_json(400, {"error": "empty body - send the image bytes"})
-            return
         if length > MAX_UPLOAD_BYTES:
             self._send_json(413, {"error": f"image too large (>{MAX_UPLOAD_BYTES} bytes)"})
             return
-        data = self.rfile.read(length)
+        data = self.rfile.read(length) if length > 0 else b""
 
         from urllib.parse import parse_qs, urlparse
         q = parse_qs(urlparse(self.path).query)
@@ -171,23 +234,101 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             except (KeyError, IndexError, ValueError):
                 return default
 
-        top_n   = max(1, min(50, _one("top", int, 12)))
+        top_n   = max(1, min(200, _one("top", int, 12)))
         min_sim = _one("min_sim", float, 0.30)
         classes = {c.strip() for c in (q.get("classes", [""])[0]).split(",")
                    if c.strip()} or None
+        time_from = _parse_time(q.get("from", [""])[0])
+        time_to   = _parse_time(q.get("to", [""])[0])
+        order     = q.get("order", ["time_desc"])[0]
         try:
-            from app.visual_search import search_image_bytes
             st = _VISUAL_SEARCH.get()
-            result = search_image_bytes(
-                data, model=st.model, embedder=st.embedder,
-                snapshot_index=st.index, db_path=st.db_path,
-                top_n=top_n, min_sim=min_sim, classes=classes)
-            result["detector"] = "yolo" if st.model is not None else "whole-image"
+            if data:
+                from app.visual_search import search_image_bytes
+                result = search_image_bytes(
+                    data, model=st.model, embedder=st.embedder,
+                    snapshot_index=st.index, db_path=st.db_path,
+                    top_n=top_n, min_sim=min_sim, classes=classes,
+                    time_from=time_from, time_to=time_to)
+                result["detector"] = "yolo" if st.model is not None else "whole-image"
+            else:
+                # Browse mode: no reference photo. The user asked for
+                # "N cars between X and Y" - list crops in time order.
+                from app.visual_search import browse_snapshots
+                result = browse_snapshots(
+                    embedder=st.embedder, snapshot_index=st.index,
+                    classes=classes, time_from=time_from, time_to=time_to,
+                    limit=top_n, order=order)
+                result["detector"] = "browse"
             self._send_json(200, result)
         except ValueError as e:
             self._send_json(400, {"error": str(e)})
         except Exception as e:
             print(f"  ! visual-search failed: {type(e).__name__}: {e}")
+            self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
+
+    # ---- human-in-the-loop review endpoints ------------------------------
+    # Backing the "Review detections" panel in index.html. The user is shown
+    # one random un-reviewed crop with its current label and picks correct /
+    # wrong-label / not-an-object. Answers persist to data/reviews.json via
+    # ReviewStore.
+    def _review_sample(self) -> None:
+        try:
+            from app.labels import sample_crop
+            s = sample_crop(_review_store(), SNAPSHOTS_DIR)
+            if s is None:
+                self._send_json(200, {"done": True,
+                                      "message": "no un-reviewed crops in the store"})
+                return
+            self._send_json(200, s)
+        except Exception as e:
+            print(f"  ! review-sample failed: {type(e).__name__}: {e}")
+            self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
+
+    def _review_submit(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length <= 0 or length > 32 * 1024:
+            self._send_json(400, {"error": "empty or oversized body"})
+            return
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            self._send_json(400, {"error": "body must be JSON"})
+            return
+        crop_path = str(payload.get("crop_path", "")).strip()
+        verdict   = str(payload.get("verdict", "")).strip()
+        if not crop_path or not verdict:
+            self._send_json(400, {"error": "crop_path and verdict are required"})
+            return
+        # crop_path must stay inside snapshots dir - reject anything with a
+        # backslash or path escape ("../"). The store already treats it as a
+        # relative key but we harden the input surface too.
+        if ".." in crop_path.split("/") or crop_path.startswith("/") \
+                or "\\" in crop_path:
+            self._send_json(400, {"error": "invalid crop_path"})
+            return
+        try:
+            r = _review_store().submit(
+                crop_path,
+                verdict,
+                original_cls=str(payload.get("original_cls", "?")),
+                corrected_cls=payload.get("corrected_cls") or None,
+                note=payload.get("note") or None)
+            self._send_json(200, {"ok": True, "review": r.to_public(),
+                                  "summary": _review_store().summary()})
+        except ValueError as e:
+            self._send_json(400, {"error": str(e)})
+        except Exception as e:
+            print(f"  ! review-submit failed: {type(e).__name__}: {e}")
+            self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
+
+    def _review_stats(self) -> None:
+        try:
+            self._send_json(200, _review_store().summary())
+        except Exception as e:
             self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
 
     def do_HEAD(self) -> None:

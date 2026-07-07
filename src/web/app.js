@@ -61,39 +61,43 @@ for (const slot of GRID_SLOTS) {
   const tile = document.createElement("div");
   tile.className = "tile";
   tile.dataset.slot = slot.slot_id;
+  // Compact tile: header row above the video, KPIs/age overlaid on the video.
+  // The tile no longer stacks metrics/badges/chart below the video — those all
+  // moved to the header (badges) and overlay (KPIs + age) so tiles fit two
+  // columns × two rows within one viewport.
   tile.innerHTML = `
-    <div>
-      <h2 data-cam-name>${escapeHtml(slot.placeholder_name)}</h2>
-      <div class="city" data-cam-area>${escapeHtml(slot.display_area)}</div>
+    <div class="tile-head">
+      <div class="tile-head-left">
+        <h2 data-cam-name>${escapeHtml(slot.placeholder_name)}</h2>
+        <div class="city" data-cam-area>${escapeHtml(slot.display_area)}</div>
+      </div>
+      <div class="tile-head-right">
+        <span class="activity-badge act-unknown" data-activity>
+          <span class="dot"></span><span data-activity-text>-/10</span>
+        </span>
+        <span class="anomaly-badge unk" data-anomaly title="no data yet">
+          <span class="dot"></span><span data-anomaly-text>ok</span>
+        </span>
+        <span class="fallback-badge" data-fallback style="display:none"></span>
+        <a class="anomaly-thumb" data-anomaly-thumb target="_blank" rel="noopener"
+           style="display:none" title="open snapshot of latest anomaly">
+          <img alt="" />
+        </a>
+      </div>
     </div>
-    <div class="video-wrap" data-video-wrap></div>
-    <div class="metrics">
-      <div class="metric"><div class="lbl">People (now)</div>
-        <div class="val" data-k="person">-</div></div>
-      <div class="metric vehicles"><div class="lbl">Vehicles (now)</div>
-        <div class="val" data-k="vehicles">-</div></div>
-      <div class="metric"><div class="lbl">24h avg</div>
-        <div class="val" data-k="avg">-</div></div>
-      <div class="metric"><div class="lbl">24h peak</div>
-        <div class="val" data-k="peak">-</div></div>
+    <div class="video-wrap" data-video-wrap>
+      <div class="video-overlay-bottom" data-overlay>
+        <span class="kpi"><span class="lbl">People</span>
+          <span class="val" data-k="person">-</span></span>
+        <span class="kpi vehicles"><span class="lbl">Vehicles</span>
+          <span class="val" data-k="vehicles">-</span></span>
+        <span class="kpi"><span class="lbl">24h avg</span>
+          <span class="val" data-k="avg">-</span></span>
+        <span class="kpi"><span class="lbl">24h peak</span>
+          <span class="val" data-k="peak">-</span></span>
+        <span class="age" data-age title="age of the counts - the video is live, the numbers are the collector's most recent sample"></span>
+      </div>
     </div>
-    <div>
-      <span class="activity-badge act-unknown" data-activity>
-        <span class="dot"></span><span data-activity-text>activity -/10</span>
-      </span>
-      <span class="anomaly-badge unk" data-anomaly>
-        <span class="dot"></span><span data-anomaly-text>no data yet</span>
-      </span>
-      <span class="fallback-badge" data-fallback style="display:none"></span>
-      <a class="anomaly-thumb" data-anomaly-thumb target="_blank" rel="noopener"
-         style="display:none" title="open snapshot of latest anomaly">
-        <img alt="" />
-      </a>
-      <span class="footnote" data-age title="age of the counts shown - the video is live, the numbers are the collector's most recent sample"></span>
-      <span class="footnote" data-crossings title="sampled line crossings during the last burst (cameras with a configured counting line)"></span>
-      <span class="footnote" data-samples></span>
-    </div>
-    <div class="chart-mini"><canvas></canvas></div>
   `;
   tilesEl.appendChild(tile);
 
@@ -103,7 +107,8 @@ for (const slot of GRID_SLOTS) {
     camNameEl:    tile.querySelector("[data-cam-name]"),
     camAreaEl:    tile.querySelector("[data-cam-area]"),
     videoWrap:    tile.querySelector("[data-video-wrap]"),
-    latestVals:   tile.querySelectorAll(".metric .val"),
+    overlay:      tile.querySelector("[data-overlay]"),
+    latestVals:   tile.querySelectorAll("[data-k]"),
     activityBadge: tile.querySelector("[data-activity]"),
     activityText:  tile.querySelector("[data-activity-text]"),
     anomalyBadge: tile.querySelector("[data-anomaly]"),
@@ -111,9 +116,12 @@ for (const slot of GRID_SLOTS) {
     fallbackBadge: tile.querySelector("[data-fallback]"),
     anomalyThumb: tile.querySelector("[data-anomaly-thumb]"),
     ageEl:        tile.querySelector("[data-age]"),
-    crossEl:      tile.querySelector("[data-crossings]"),
-    samplesEl:    tile.querySelector("[data-samples]"),
-    chartCanvas:  tile.querySelector("canvas"),
+    // crossings/samples footnotes were removed with the below-video row;
+    // line-crossing info still flows through updateStrip on the model-view
+    // side card, and 24h sample counts show in the combined chart below.
+    crossEl:      null,
+    samplesEl:    null,
+    chartCanvas:  null,       // per-tile mini chart removed (kept combined 24h chart)
     chart: null,
     history: [],
     lastSampleMs: null,   // epoch ms of the last OK sample; drives the age label
@@ -251,8 +259,12 @@ function buildVideoInto(st, cfg, slot) {
     // instead of after the first user interaction. Combined with a hls.js
     // load kick below (autoStartLoad + play()) this pins down the case
     // where one tile stayed frozen until the user clicked into it.
+    // No `controls` on purpose: the tile is a live monitor, not a player.
+    // The browser's control bar would paint a persistent dark strip along
+    // the bottom of every tile - exactly the "black bar" complaint that
+    // motivated the compact layout.
     markup = `<video data-hls="${hlsUrl}" autoplay muted playsinline
-                     controls preload="auto"></video>`;
+                     preload="auto"></video>`;
   } else if (embed && embed.includes("player.tvkur.com")) {
     // loading="lazy" postponed the iframe request until scroll, which is
     // exactly the wrong behavior for the top row of the dashboard - one of
@@ -267,7 +279,14 @@ function buildVideoInto(st, cfg, slot) {
   } else {
     markup = `<div class="video-fallback">No live video available.</div>`;
   }
-  st.videoWrap.innerHTML = markup;
+  // The KPI overlay lives inside video-wrap so its gradient sits on top of
+  // the live frame. Replacing videoWrap.innerHTML wholesale would blow it
+  // away every time the active cam changes - preserve it by rebuilding the
+  // players' host DOM piecewise instead.
+  for (const el of Array.from(st.videoWrap.children)) {
+    if (el !== st.overlay) el.remove();
+  }
+  st.videoWrap.insertAdjacentHTML("afterbegin", markup);
   const video = st.videoWrap.querySelector("video[data-hls]");
   if (video) attachHls(st, video, cfg);
 }
@@ -283,8 +302,13 @@ function attachHls(st, video, cfg) {
       try { st.currentHlsInstance.destroy(); } catch (_) {}
       st.currentHlsInstance = null;
     }
-    st.videoWrap.innerHTML = `<iframe src="${embed}" allow="autoplay; encrypted-media"
-                     allowfullscreen loading="lazy"></iframe>`;
+    // Same overlay-preserving swap as buildVideoInto.
+    for (const el of Array.from(st.videoWrap.children)) {
+      if (el !== st.overlay) el.remove();
+    }
+    st.videoWrap.insertAdjacentHTML("afterbegin",
+        `<iframe src="${embed}" allow="autoplay; encrypted-media"
+                 allowfullscreen loading="lazy"></iframe>`);
   };
   if (window.Hls && window.Hls.isSupported()) {
     const hls = new window.Hls({ lowLatencyMode: true, liveSyncDuration: 4 });
@@ -390,6 +414,9 @@ function start(cfg) {
     for (const slot of GRID_SLOTS) {
       const rows = bySlot[slot.slot_id].sort((a, b) => a.ts.localeCompare(b.ts));
       tileState[slot.slot_id].history = rows;
+      // Per-tile sparkline moved into the combined 24h chart to reclaim
+      // vertical space; renderTileChart is kept for future re-enabling but
+      // no-ops when chartCanvas is null.
       renderTileChart(slot.slot_id, rows);
       updateAggregates(slot.slot_id, rows);
     }
@@ -431,7 +458,8 @@ function applyGridConfig(cfg) {
     }
     const usingFallback = slotCfg.active_cam !== slotCfg.primary;
     if (usingFallback) {
-      st.fallbackBadge.textContent = `↳ fallback: ${slotCfg.active_cam}`;
+      st.fallbackBadge.textContent = "↳ fallback";
+      st.fallbackBadge.title = `primary cam offline - using fallback: ${slotCfg.active_cam}`;
       st.fallbackBadge.style.display = "inline-block";
     } else {
       st.fallbackBadge.style.display = "none";
@@ -478,13 +506,13 @@ function renderSampleAge(st) {
   if (!st.lastSampleMs) { st.ageEl.textContent = ""; return; }
   const ageS = Math.max(0, Math.round((Date.now() - st.lastSampleMs) / 1000));
   const stale = ageS > STALE_AGE_S;
-  const label = ageS < 90 ? ` · counts from ${ageS}s ago`
-              : ` · counts from ${Math.round(ageS / 60)}m ago`;
+  const label = ageS < 90 ? `${ageS}s ago`
+              : `${Math.round(ageS / 60)}m ago`;
   const memo = label + (stale ? "!" : "");
   if (memo !== st._ageMemo) {            // skip no-op DOM writes
     st._ageMemo = memo;
     st.ageEl.textContent = label;
-    st.ageEl.style.color = stale ? "#ef4444" : "";
+    st.ageEl.classList.toggle("stale", stale);
   }
 }
 
@@ -495,7 +523,6 @@ setInterval(() => {
 function updateAggregates(slotId, rows) {
   const st = tileState[slotId];
   if (!rows.length) {
-    st.samplesEl.textContent = "no samples in the last 24h";
     setActivityBadge(st, null);
     return;
   }
@@ -514,9 +541,12 @@ function updateAggregates(slotId, rows) {
     const last = anomalies[anomalies.length - 1];
     const d = describeAnomaly(last);
     st.anomalyBadge.className = "anomaly-badge warn";
-    st.anomalyText.textContent =
-        `⚠ ${d.arrow} ${d.metricLabel} ${d.kindLabel} at ${fmtTime(last.ts)} - ` +
-        `${d.observed ?? "?"} vs ~${d.expected ?? "?"} expected (${anomalies.length} in 24h)`;
+    // Compact badge in the tile header - full detail on hover via title attr.
+    st.anomalyText.textContent = `⚠ ${d.arrow} ${anomalies.length}`;
+    st.anomalyBadge.title =
+        `${d.arrow} ${d.metricLabel} ${d.kindLabel} at ${fmtTime(last.ts)} - ` +
+        `${d.observed ?? "?"} vs ~${d.expected ?? "?"} expected ` +
+        `(${anomalies.length} in 24h)`;
     const snap = last.snapshot_annotated_url || last.snapshot_url;
     if (snap) {
       st.anomalyThumb.href = snap;
@@ -527,10 +557,10 @@ function updateAggregates(slotId, rows) {
     }
   } else {
     st.anomalyBadge.className = "anomaly-badge ok";
-    st.anomalyText.textContent = "no anomalies in the last 24h";
+    st.anomalyText.textContent = "ok";
+    st.anomalyBadge.title = `no anomalies in the last 24h (${rows.length} samples)`;
     st.anomalyThumb.style.display = "none";
   }
-  st.samplesEl.textContent = ` · ${rows.length} samples in 24h`;
 
   setActivityBadge(st, computeActivity(rows));
 }
@@ -555,18 +585,25 @@ function setActivityBadge(st, act) {
   const text  = st.activityText;
   if (!act) {
     badge.className = "activity-badge act-unknown";
-    text.textContent = "activity -/10";
+    text.textContent = "-/10";
+    badge.title = "activity index - not enough samples yet";
     return;
   }
   const cls = act.label.toLowerCase();
   badge.className = `activity-badge act-${cls}`;
-  text.textContent = `activity ${act.idx}/10 - ${act.label}`;
+  text.textContent = `${act.idx}/10`;
+  badge.title = `activity ${act.idx}/10 - ${act.label} (now ${act.now}, p90 ${act.p90})`;
 }
 
 const TILE_CHART_LAST_N = 30;
 
 function renderTileChart(slotId, rows) {
   const st = tileState[slotId];
+  // Per-tile sparkline was removed to reclaim vertical space; the combined
+  // 24h chart below the tiles carries the same story with more legibility.
+  // Leaving the function in place so a future re-enable is just a skeleton
+  // edit + this early return removal.
+  if (!st.chartCanvas) return;
   const view = rows.slice(-TILE_CHART_LAST_N);
   const labels   = view.map((r) => fmtTime(r.ts));
   const people   = view.map((r) => r.person);

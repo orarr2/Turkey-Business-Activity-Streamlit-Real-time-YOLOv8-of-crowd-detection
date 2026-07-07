@@ -62,6 +62,11 @@ CROP_SUBDIRS = ("returning", "events")
 MIN_SIMILARITY_FLOOR = 0.30
 
 
+def _iso(mtime: float) -> str:
+    """Epoch seconds -> UTC ISO-8601. Kept short so it fits result cards."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(mtime))
+
+
 @dataclass
 class QueryObject:
     """One thing the user is searching for, extracted from their upload."""
@@ -300,13 +305,29 @@ class SnapshotIndex:
 
     def search(self, query: QueryObject, top_n: int = 12,
                min_sim: float = MIN_SIMILARITY_FLOOR,
-               same_class_only: bool = True) -> list[Match]:
-        """Rank indexed crops by cosine similarity to one query object."""
+               same_class_only: bool = True,
+               classes: set[str] | None = None,
+               time_from: float | None = None,
+               time_to: float | None = None) -> list[Match]:
+        """Rank indexed crops by cosine similarity to one query object.
+
+        `classes` (optional set of class names) filters candidates to those
+        classes regardless of the query object's own class - lets a
+        multi-class chip selector ("person or car") match either class
+        against a single upload. `time_from`/`time_to` (epoch seconds; None
+        = open bound) restrict candidates by file mtime.
+        """
         strong_at = getattr(self.embedder, "default_threshold", 0.9)
         scored: list[Match] = []
         for rel, e in self._entries.items():
-            if (same_class_only and query.cls != "image"
+            if classes and e["cls"] not in classes:
+                continue
+            if (same_class_only and not classes and query.cls != "image"
                     and e["cls"] != query.cls):
+                continue
+            if time_from is not None and e["mtime"] < time_from:
+                continue
+            if time_to is not None and e["mtime"] > time_to:
                 continue
             if e["vec"].shape != query.embedding.shape:
                 continue
@@ -316,9 +337,41 @@ class SnapshotIndex:
             scored.append(Match(
                 source="snapshot", similarity=sim, cls=e["cls"],
                 strong=sim >= strong_at, query_cls=query.cls,
-                extra={"url": f"/snapshots/{rel}", "path": rel}))
+                extra={"url": f"/snapshots/{rel}", "path": rel,
+                       "seen_at": _iso(e["mtime"])}))
         scored.sort(key=lambda m: m.similarity, reverse=True)
         return scored[:top_n]
+
+    def browse(self, classes: set[str] | None = None,
+               time_from: float | None = None,
+               time_to: float | None = None,
+               limit: int = 24,
+               order: str = "time_desc") -> list[Match]:
+        """Return crops matching filters WITHOUT a query image.
+
+        The counterpart to `search()` for the "just show me the last three
+        cars between 18:00 and 22:00" case. Ordering is `time_desc` (most
+        recent first) or `time_asc`. Similarity is 0 (not defined for
+        browse), and each match carries `seen_at` (ISO-8601 UTC).
+        """
+        cands: list[tuple[float, str, dict]] = []
+        for rel, e in self._entries.items():
+            if classes and e["cls"] not in classes:
+                continue
+            if time_from is not None and e["mtime"] < time_from:
+                continue
+            if time_to is not None and e["mtime"] > time_to:
+                continue
+            cands.append((e["mtime"], rel, e))
+        cands.sort(key=lambda t: t[0], reverse=(order != "time_asc"))
+        out: list[Match] = []
+        for mtime, rel, e in cands[:limit]:
+            out.append(Match(
+                source="snapshot", similarity=0.0, cls=e["cls"],
+                strong=False, query_cls="browse",
+                extra={"url": f"/snapshots/{rel}", "path": rel,
+                       "seen_at": _iso(mtime), "browse_only": True}))
+        return out
 
 
 # ---- 3. registry search -------------------------------------------------------
@@ -387,14 +440,20 @@ def search_image(image_bgr: np.ndarray, *, model=None, embedder=None,
                  snapshot_index: SnapshotIndex | None = None,
                  top_n: int = 12, min_sim: float = MIN_SIMILARITY_FLOOR,
                  classes: set[str] | None = None,
+                 time_from: float | None = None,
+                 time_to: float | None = None,
                  include_preview: bool = True) -> dict:
     """Full pipeline for one uploaded image. Returns a JSON-serializable dict:
 
-        {"query_objects": [...], "snapshot_matches": [...],
+        {"mode": "image", "query_objects": [...], "snapshot_matches": [...],
          "registry_matches": [...], "index_size": int,
          "query_preview_jpeg_b64": "..."}    # detections drawn on the upload
 
     `snapshot_index` lets a server reuse one warm index across requests.
+    `classes` restricts BOTH the query-object extraction (which classes to
+    pull from the upload) AND the candidate filter on the snapshot index.
+    `time_from`/`time_to` (epoch seconds) restrict snapshot candidates by
+    file mtime.
     """
     if embedder is None:
         embedder = make_embedder()
@@ -410,7 +469,9 @@ def search_image(image_bgr: np.ndarray, *, model=None, embedder=None,
     seen_snap: set[str] = set()
     seen_ent: set[int] = set()
     for q in queries:
-        for m in idx.search(q, top_n=top_n, min_sim=min_sim):
+        for m in idx.search(q, top_n=top_n, min_sim=min_sim,
+                            classes=classes,
+                            time_from=time_from, time_to=time_to):
             if m.extra["path"] in seen_snap:
                 continue
             seen_snap.add(m.extra["path"])
@@ -425,6 +486,7 @@ def search_image(image_bgr: np.ndarray, *, model=None, embedder=None,
     registry_matches.sort(key=lambda m: m["similarity"], reverse=True)
 
     out = {
+        "mode": "image",
         "embedder_id": getattr(embedder, "embedder_id", "unknown"),
         "strong_threshold": getattr(embedder, "default_threshold", None),
         "query_objects": [q.to_public() for q in queries],
@@ -457,6 +519,40 @@ def search_image_bytes(data: bytes, **kwargs) -> dict:
         img = cv2.resize(img, (int(w * s), int(h * s)),
                          interpolation=cv2.INTER_AREA)
     return search_image(img, **kwargs)
+
+
+def browse_snapshots(*, embedder=None,
+                     snapshots_root: str | Path = SNAPSHOTS_ROOT,
+                     snapshot_index: SnapshotIndex | None = None,
+                     classes: set[str] | None = None,
+                     time_from: float | None = None,
+                     time_to: float | None = None,
+                     limit: int = 24,
+                     order: str = "time_desc") -> dict:
+    """Query-less browse: list saved crops matching class/time filters.
+
+    Same result shape as `search_image` (so the frontend renders it with the
+    same code path) but with an empty `query_objects` list and every match
+    tagged `browse_only=True` in its extras. Used for "show me the three
+    most recent cars" without needing a reference photo.
+    """
+    if embedder is None:
+        embedder = make_embedder()
+    idx = snapshot_index
+    if idx is None:
+        idx = SnapshotIndex(snapshots_root, embedder=embedder)
+    idx.refresh()
+    matches = [m.to_public() for m in idx.browse(
+        classes=classes, time_from=time_from, time_to=time_to,
+        limit=limit, order=order)]
+    return {
+        "mode": "browse",
+        "embedder_id": getattr(embedder, "embedder_id", "unknown"),
+        "query_objects": [],
+        "snapshot_matches": matches,
+        "registry_matches": [],
+        "index_size": len(idx),
+    }
 
 
 # ---- demo/index seeding (testing without a running collector) ------------------

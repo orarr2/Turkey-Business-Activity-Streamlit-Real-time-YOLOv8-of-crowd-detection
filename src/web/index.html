@@ -25,64 +25,79 @@
     #status .down { color: #ef4444; }
     main { padding: 20px; max-width: 1400px; margin: 0 auto; }
 
-    .grid { display: grid; gap: 14px;
+    .grid { display: grid; gap: 8px;
             grid-template-columns: repeat(2, minmax(0, 1fr)); }
     @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
 
-    /* Tiles size themselves by content. Two fixes for the fat black strip
-       the user was seeing:
-         1. no more `min-height: 380px` floor - tiles were stretching past
-            their content and the extra space rendered as a black bar;
-         2. no `margin-top: auto` on `.chart-mini` - the sparkline sat at
-            the bottom of whatever height CSS Grid picked for the row, and
-            the "extra" ended up as a dramatic empty band between the
-            badges and the chart. Now the chart sits DIRECTLY below the
-            badges, and any row-height mismatch shows as a small margin
-            below the shorter tile (rare, since all four tiles have the
-            same content structure). */
-    .tile { background: #171a21; border: 1px solid #232733; border-radius: 14px;
-            padding: 14px; display: flex; flex-direction: column; gap: 10px; }
-    .chart-mini { height: 120px; }
-    .tile h2 { margin: 0; font-size: 15px; font-weight: 600; }
-    .tile .city { color: #8b909a; font-size: 12px; }
+    /* Compact tile: header + video only. KPI values, activity/anomaly badges
+       and the counts-age label are OVERLAID on the video, so the tile height
+       reduces to header + 16:9 video + tight padding. Four tiles fit within
+       a single viewport height on 1080p-and-up displays without scroll. */
+    .tile { background: #171a21; border: 1px solid #232733; border-radius: 12px;
+            padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+    .tile-head { display: flex; align-items: baseline; gap: 10px;
+                 justify-content: space-between; padding: 2px 4px 0; }
+    .tile-head-left { min-width: 0; }
+    .tile h2 { margin: 0; font-size: 14px; font-weight: 600;
+               white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .tile .city { color: #8b909a; font-size: 11px;
+                  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .tile-head-right { display: flex; gap: 6px; flex-wrap: nowrap;
+                       align-items: center; flex-shrink: 0; }
+
     .video-wrap { position: relative; width: 100%; aspect-ratio: 16/9;
                   background: #0c0e13; border-radius: 8px; overflow: hidden; }
     .video-wrap iframe, .video-wrap img, .video-wrap video {
         width: 100%; height: 100%; border: 0; object-fit: cover;
-        background: #0c0e13;
+        background: #0c0e13; display: block;
     }
     .video-fallback { display: flex; align-items: center; justify-content: center;
                       width: 100%; height: 100%; padding: 14px; text-align: center;
                       color: #8b909a; font-size: 13px; }
     .video-fallback a { color: #4f8cff; text-decoration: none; }
 
-    .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;
-               align-items: end; }
-    .metric .lbl { color: #8b909a; font-size: 11px; text-transform: uppercase;
-                   letter-spacing: 0.04em; }
-    .metric .val { font-size: 22px; font-weight: 700; line-height: 1.1; }
-    .metric.vehicles .val { color: #f0a35e; }
+    /* Bottom overlay strip inside the video-wrap: KPI values + counts-age.
+       A soft dark gradient keeps the numbers legible over any live frame
+       without hiding the scene. pointer-events:none so overlay never
+       intercepts clicks on the underlying player. */
+    .video-overlay-bottom { position: absolute; left: 0; right: 0; bottom: 0;
+        padding: 18px 10px 6px;
+        background: linear-gradient(to top, rgba(0,0,0,0.75), rgba(0,0,0,0));
+        color: #fff; font-size: 12px; line-height: 1.3;
+        display: flex; gap: 10px; flex-wrap: wrap; align-items: baseline;
+        pointer-events: none; }
+    .video-overlay-bottom .kpi { display: inline-flex; align-items: baseline;
+        gap: 4px; }
+    .video-overlay-bottom .kpi .lbl { color: rgba(255,255,255,0.7);
+        font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; }
+    .video-overlay-bottom .kpi .val { font-size: 15px; font-weight: 700; }
+    .video-overlay-bottom .kpi.vehicles .val { color: #f0a35e; }
+    .video-overlay-bottom .age { color: rgba(255,255,255,0.65); font-size: 11px;
+        margin-left: auto; }
+    .video-overlay-bottom .age.stale { color: #ef4444; font-weight: 600; }
 
-    .anomaly-badge { display: inline-flex; align-items: center; gap: 6px;
-                     padding: 4px 10px; border-radius: 999px; font-size: 12px; }
+    .anomaly-badge { display: inline-flex; align-items: center; gap: 4px;
+                     padding: 2px 8px; border-radius: 999px; font-size: 11px;
+                     max-width: 100%; white-space: nowrap;
+                     overflow: hidden; text-overflow: ellipsis; }
     .anomaly-badge.ok   { background: rgba(54, 211, 153, 0.12); color: #36d399; }
     .anomaly-badge.warn { background: rgba(239, 68, 68, 0.15);   color: #ef4444; }
     .anomaly-badge.unk  { background: rgba(139, 144, 154, 0.12); color: #8b909a; }
-    .anomaly-badge .dot { width: 8px; height: 8px; border-radius: 50%;
-                          background: currentColor; }
+    .anomaly-badge .dot { width: 6px; height: 6px; border-radius: 50%;
+                          background: currentColor; flex-shrink: 0; }
 
     /* Clickable thumbnail of the latest anomaly snapshot. */
-    .anomaly-thumb { display: inline-block; margin-left: 8px; vertical-align: middle;
-                     border-radius: 4px; overflow: hidden; border: 1px solid #2a2f3a; }
-    .anomaly-thumb img { display: block; height: 36px; width: auto; }
+    .anomaly-thumb { display: inline-block; border-radius: 4px; overflow: hidden;
+                     border: 1px solid #2a2f3a; }
+    .anomaly-thumb img { display: block; height: 22px; width: auto; }
     .anomaly-thumb:hover { border-color: #ef4444; }
 
     /* Activity Index: 0-10 + label, color graded from quiet to crowded. */
-    .activity-badge { display: inline-flex; align-items: center; gap: 6px;
-                      padding: 4px 10px; border-radius: 999px; font-size: 12px;
-                      font-weight: 600; }
-    .activity-badge .dot { width: 8px; height: 8px; border-radius: 50%;
-                           background: currentColor; }
+    .activity-badge { display: inline-flex; align-items: center; gap: 4px;
+                      padding: 2px 8px; border-radius: 999px; font-size: 11px;
+                      font-weight: 600; white-space: nowrap; }
+    .activity-badge .dot { width: 6px; height: 6px; border-radius: 50%;
+                           background: currentColor; flex-shrink: 0; }
     .activity-badge.act-quiet    { background: rgba(139,144,154,0.15); color: #8b909a; }
     .activity-badge.act-moderate { background: rgba( 79,140,255,0.15); color: #4f8cff; }
     .activity-badge.act-busy     { background: rgba(240,163, 94,0.15); color: #f0a35e; }
@@ -91,12 +106,10 @@
 
     /* Fallback badge — appears next to a tile whose primary cam has failed
        and the collector has switched to a backup cam in the slot's chain. */
-    .fallback-badge { display: inline-block; margin-left: 8px; padding: 3px 8px;
-                      border-radius: 999px; font-size: 11px;
+    .fallback-badge { display: inline-block; padding: 2px 6px;
+                      border-radius: 999px; font-size: 10px;
                       background: rgba(240,163,94,0.15); color: #f0a35e; }
 
-    .chart-mini { position: relative; width: 100%; }
-    .chart-mini canvas { position: absolute; top: 0; left: 0; width: 100% !important; height: 100% !important; }
     .big-chart-wrap canvas { width: 100% !important; height: 280px !important; }
     .footnote { color: #6f7480; font-size: 11px; }
 
@@ -116,38 +129,84 @@
                background: rgba(139,144,154,0.15); color: #8b909a;
                vertical-align: middle; }
 
-    /* Search-by-image panel: FULL WIDTH, prominent framed drop zone.
-       Reuses the /api/visual-search endpoint from dashboard_server.py. */
+    /* Search panel: a persistent query bar that stays visible across searches
+       instead of the old drop-only flow that locked users into re-uploading
+       to change anything. The three optional filters (image, class chips,
+       time range + count) let the user pose one of three questions:
+         - "find things like this photo"          (image + optional filters)
+         - "find recent cars between 18:00-22:00" (class + time, no image)
+         - "find any three recent detections"     (count + time, no image) */
     .search-wrap { background: #171a21; border: 1px solid #232733;
-                   border-radius: 14px; padding: 22px; margin-top: 20px; }
-    .search-wrap h2 { margin: 0 0 14px; font-size: 17px; font-weight: 600; }
-    /* The drop zone reads as its own object at a glance now: thicker dashed
-       border, roomier vertical rhythm, an upload glyph, and a clear
-       primary/secondary text pair. */
-    #drop { border: 2px dashed #3a4258; border-radius: 14px; padding: 40px 22px;
-            text-align: center; cursor: pointer;
+                   border-radius: 12px; padding: 16px; margin-top: 16px; }
+    .search-wrap h2 { margin: 0 0 10px; font-size: 15px; font-weight: 600; }
+    .search-wrap .sub { color: #8b909a; font-size: 12px; margin-bottom: 12px; }
+
+    .search-form { display: grid; gap: 12px;
+                   grid-template-columns: minmax(220px, 1fr) 2fr; }
+    @media (max-width: 720px) { .search-form { grid-template-columns: 1fr; } }
+    .search-form fieldset { margin: 0; padding: 10px 12px 12px;
+        background: #0c0e13; border: 1px solid #232733; border-radius: 10px; }
+    .search-form legend { color: #8b909a; font-size: 10px;
+        text-transform: uppercase; letter-spacing: 0.05em; padding: 0 6px; }
+
+    /* Compact drop zone - "optional reference photo", not the whole panel. */
+    #drop { border: 2px dashed #3a4258; border-radius: 10px;
+            padding: 18px 12px; text-align: center; cursor: pointer;
             background: linear-gradient(180deg, rgba(79,140,255,0.03), rgba(79,140,255,0));
             transition: border-color .15s, background .15s, transform .05s; }
     #drop:hover { border-color: #4f8cff;
                   background: linear-gradient(180deg, rgba(79,140,255,0.09), rgba(79,140,255,0.02)); }
     #drop.hover { border-color: #4f8cff; background: rgba(79,140,255,0.08); transform: scale(0.998); }
     #drop input { display: none; }
-    #drop .icon { font-size: 28px; line-height: 1; margin-bottom: 10px;
+    #drop .icon { font-size: 22px; line-height: 1; margin-bottom: 6px;
                   color: #4f8cff; }
-    #drop .primary { font-size: 15px; color: #e7e9ee; font-weight: 500; }
-    #drop .hint { font-size: 12px; color: #8b909a; margin-top: 6px; }
-    .search-controls { display: flex; gap: 12px; flex-wrap: wrap; align-items: center;
-                       margin-top: 14px; font-size: 12px; color: #8b909a; }
-    .search-controls label { display: flex; gap: 6px; align-items: center; }
-    .search-controls input[type="number"] { width: 60px; background: #0c0e13;
+    #drop .primary { font-size: 13px; color: #e7e9ee; font-weight: 500; }
+    #drop .hint { font-size: 11px; color: #8b909a; margin-top: 4px; }
+    #drop.has-file { border-style: solid; border-color: #4f8cff;
+        background: rgba(79,140,255,0.08); }
+    #drop-clear { display: none; background: none; border: 0; color: #ef4444;
+        font-size: 11px; cursor: pointer; margin-top: 4px; padding: 2px 6px; }
+    #drop.has-file + #drop-clear { display: inline-block; }
+
+    /* Class chips - clicking a class toggles it on/off. Selecting nothing
+       means "any class" (the natural default). */
+    .chip-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+    .chip { display: inline-block; padding: 3px 10px; border-radius: 999px;
+        font-size: 12px; cursor: pointer; user-select: none;
+        background: #0c0e13; color: #8b909a; border: 1px solid #2c3140; }
+    .chip.on { background: rgba(79,140,255,0.20); color: #e7e9ee;
+        border-color: #4f8cff; }
+    .chip:hover { border-color: #4f8cff; color: #e7e9ee; }
+
+    .field-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+        font-size: 12px; color: #8b909a; margin-top: 6px; }
+    .field-row label { display: flex; gap: 4px; align-items: center; }
+    .field-row input[type="datetime-local"],
+    .field-row input[type="number"] { background: #0c0e13;
         border: 1px solid #2c3140; color: #e7e9ee; border-radius: 6px;
-        padding: 3px 6px; font-size: 12px; }
-    .search-controls select { background: #0c0e13; border: 1px solid #2c3140;
-        color: #e7e9ee; border-radius: 6px; padding: 3px 6px; font-size: 12px; }
-    .search-controls button { background: #4f8cff; color: #fff; border: 0;
-        border-radius: 8px; padding: 6px 14px; font-size: 13px; font-weight: 600;
+        padding: 4px 6px; font-size: 12px; }
+    .field-row input[type="number"] { width: 64px; }
+
+    /* Match strictness - a labeled preset chooser hides the raw min_sim
+       number behind a name the user actually understands. */
+    .strictness-row { display: flex; gap: 6px; margin-top: 6px; }
+    .strict-btn { flex: 1; padding: 4px 8px; border-radius: 6px; font-size: 11px;
+        background: #0c0e13; color: #8b909a; border: 1px solid #2c3140;
         cursor: pointer; }
-    .search-controls button:disabled { opacity: 0.45; cursor: default; }
+    .strict-btn.on { background: rgba(79,140,255,0.18); color: #e7e9ee;
+        border-color: #4f8cff; }
+    .strict-hint { color: #6f7480; font-size: 10px; margin-top: 4px; }
+
+    .search-actions { display: flex; gap: 10px; align-items: center;
+        margin-top: 14px; flex-wrap: wrap; }
+    .search-actions button { background: #4f8cff; color: #fff; border: 0;
+        border-radius: 8px; padding: 8px 18px; font-size: 13px; font-weight: 600;
+        cursor: pointer; }
+    .search-actions button.secondary { background: transparent;
+        color: #8b909a; border: 1px solid #2c3140; padding: 6px 12px;
+        font-weight: 500; }
+    .search-actions button.secondary:hover { color: #e7e9ee; border-color: #4f8cff; }
+    .search-actions button:disabled { opacity: 0.45; cursor: default; }
     #search-status { font-size: 12px; color: #8b909a; }
     #search-status.err { color: #ef4444; }
     #search-preview { display: flex; gap: 12px; flex-wrap: wrap;
@@ -178,33 +237,34 @@
     #search-registry th { color: #8b909a; font-weight: 500; font-size: 10px;
                           text-transform: uppercase; letter-spacing: 0.04em; }
 
-    /* "Model view - live": one annotated frame per slot, laid out as a
-       proper 2x2 grid directly below the search area - same width and
-       column geometry as the live-video grid at the top of the page.
-       Each mini card mirrors a tile's structure (label + image + counts)
-       but skips the KPIs, so it stays visually clearly secondary. */
-    .model-section { margin-top: 20px; background: #171a21;
-                     border: 1px solid #232733; border-radius: 14px; padding: 16px; }
-    .model-section h2 { margin: 0 0 12px; font-size: 15px; font-weight: 600; }
-    .model-strip { display: grid; gap: 14px;
-                   grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    @media (max-width: 760px) { .model-strip { grid-template-columns: 1fr; } }
-    .mini { background: #0c0e13; border: 1px solid #232733; border-radius: 12px;
-            padding: 12px; display: flex; flex-direction: column; gap: 8px; }
-    .mini .lbl { font-size: 12px; color: #8b909a;
+    /* "Model view - live": one annotated frame per slot. Compacted to a
+       4-wide single row on desktop (each card is roughly HALF the width the
+       old 2x2 layout used) so the strip takes about a quarter of the
+       vertical space it used to. Falls back to 2x2 on narrow viewports so
+       nothing is squashed under 900px. */
+    .model-section { margin-top: 16px; background: #171a21;
+                     border: 1px solid #232733; border-radius: 12px; padding: 10px 12px; }
+    .model-section h2 { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+    .model-strip { display: grid; gap: 8px;
+                   grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    @media (max-width: 900px) { .model-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 500px) { .model-strip { grid-template-columns: 1fr; } }
+    .mini { background: #0c0e13; border: 1px solid #232733; border-radius: 10px;
+            padding: 6px; display: flex; flex-direction: column; gap: 4px; }
+    .mini .lbl { font-size: 11px; color: #8b909a;
                  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .mini a { display: block; text-decoration: none; }
     .mini img { width: 100%; aspect-ratio: 16/9; object-fit: cover;
-                background: #05070a; border-radius: 8px;
+                background: #05070a; border-radius: 6px;
                 border: 1px solid #232733; display: block; }
     .mini .mini-empty { width: 100%; aspect-ratio: 16/9;
-                background: #05070a; border-radius: 8px;
+                background: #05070a; border-radius: 6px;
                 border: 1px dashed #2c3140;
                 display: flex; align-items: center; justify-content: center;
-                color: #6f7480; font-size: 12px; text-align: center; padding: 8px; }
-    .mini .nums { display: flex; gap: 16px; font-size: 14px; color: #e7e9ee; }
+                color: #6f7480; font-size: 10px; text-align: center; padding: 4px; }
+    .mini .nums { display: flex; gap: 10px; font-size: 12px; color: #e7e9ee; }
     .mini .nums .v { color: #f0a35e; }
-    .mini .age { font-size: 11px; color: #6f7480; }
+    .mini .age { font-size: 10px; color: #6f7480; }
 
     table.reid { width: 100%; border-collapse: collapse; font-size: 13px; }
     table.reid th, table.reid td { padding: 8px 10px; text-align: left;
@@ -217,6 +277,53 @@
                       padding: 14px 18px; border-radius: 10px; margin: 16px 0;
                       font-size: 13px; line-height: 1.5; }
     .config-warning code { background: #3a1818; padding: 1px 6px; border-radius: 4px; }
+
+    /* Review panel: pick one saved detection, decide if the label is right.
+       The model does not learn from the stream (YOLOv8 is inference-only at
+       runtime), so this is where the system gets a signal for what it got
+       wrong - stored in data/reviews.json, later usable to tune per-class
+       thresholds and build per-camera static blacklists. */
+    .review-wrap { background: #171a21; border: 1px solid #232733;
+                   border-radius: 12px; padding: 16px; margin-top: 16px; }
+    .review-wrap h2 { margin: 0 0 6px; font-size: 15px; font-weight: 600; }
+    .review-wrap .sub { color: #8b909a; font-size: 12px; margin-bottom: 12px; }
+    .review-body { display: grid; gap: 16px;
+                   grid-template-columns: minmax(220px, 320px) 1fr;
+                   align-items: start; }
+    @media (max-width: 720px) { .review-body { grid-template-columns: 1fr; } }
+    .review-crop { background: #0c0e13; border: 1px solid #232733;
+                   border-radius: 10px; overflow: hidden; }
+    .review-crop img { display: block; width: 100%; height: auto;
+                       background: #05070a; max-height: 320px; object-fit: contain; }
+    .review-empty { padding: 40px 20px; text-align: center; color: #6f7480;
+                    font-size: 13px; }
+    .review-panel .current-label { display: inline-flex; gap: 6px;
+        align-items: baseline; padding: 4px 10px; border-radius: 999px;
+        background: rgba(79,140,255,0.15); color: #e7e9ee; font-size: 13px;
+        font-weight: 500; }
+    .review-panel .current-label .val { font-weight: 700; }
+    .review-panel .path { color: #6f7480; font-size: 11px; margin-top: 8px;
+        word-break: break-all; }
+    .review-buttons { display: flex; flex-direction: column; gap: 8px;
+        margin-top: 14px; }
+    .review-buttons .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
+    .review-buttons button { background: transparent; color: #e7e9ee;
+        border: 1px solid #2c3140; border-radius: 8px;
+        padding: 8px 14px; font-size: 13px; cursor: pointer; }
+    .review-buttons button:hover { border-color: #4f8cff; }
+    .review-buttons button.correct { border-color: #36d399; color: #36d399; }
+    .review-buttons button.wrong   { border-color: #f0a35e; color: #f0a35e; }
+    .review-buttons button.reject  { border-color: #ef4444; color: #ef4444; }
+    .review-buttons button.skip    { color: #6f7480; }
+    .review-buttons select { background: #0c0e13; border: 1px solid #2c3140;
+        color: #e7e9ee; border-radius: 6px; padding: 4px 8px; font-size: 12px; }
+    .review-buttons textarea { background: #0c0e13; border: 1px solid #2c3140;
+        color: #e7e9ee; border-radius: 6px; padding: 6px 8px; font-size: 12px;
+        font-family: inherit; resize: vertical; width: 100%; }
+    .review-stats { font-size: 12px; color: #8b909a; margin-top: 12px; }
+    .review-stats b { color: #e7e9ee; }
+    .review-status { font-size: 12px; color: #8b909a; margin-top: 8px; }
+    .review-status.err { color: #ef4444; }
   </style>
 </head>
 <body>
@@ -241,30 +348,62 @@
     <!-- 2x2 grid of camera tiles (LIVE VIDEO + counts only). Cells filled by app.js. -->
     <div class="grid" id="tiles"></div>
 
-    <!-- Search-by-image: full-width, framed drop zone.
-         POST /api/visual-search returns ranked snapshot crops + re-ID
-         registry matches (see app/visual_search.py). -->
+    <!-- Search: image-similarity OR class/time browse, in one persistent
+         panel. Backed by POST /api/search (dashboard_server.py). -->
     <div class="search-wrap">
-      <h2>Search by image - has anything like this been seen?</h2>
-      <label id="drop">
-        <input type="file" id="search-file" accept="image/*" />
-        <div class="icon">⬆</div>
-        <div class="primary">Drop an image here or click to choose</div>
-        <div class="hint">a cropped photo of one person/vehicle works best;
-          full scenes are auto-scanned for people &amp; vehicles</div>
-      </label>
-      <div class="search-controls">
-        <label>results <input type="number" id="search-top" value="12" min="1" max="50" /></label>
-        <label>min sim <input type="number" id="search-minsim" value="0.30"
-                              min="0" max="1" step="0.05" /></label>
-        <label>classes
-          <select id="search-classes">
-            <option value="">any</option>
-            <option value="person">person</option>
-            <option value="car,truck,bus,motorcycle,bicycle">vehicles</option>
-          </select>
-        </label>
-        <button id="search-go" disabled>Search</button>
+      <h2>Search - what has the system seen?</h2>
+      <div class="sub">Search by image, by object class, by time - or any
+        combination. Leave the photo out to browse recent detections.</div>
+      <div class="search-form">
+        <fieldset>
+          <legend>Reference photo (optional)</legend>
+          <label id="drop">
+            <input type="file" id="search-file" accept="image/*" />
+            <div class="icon">⬆</div>
+            <div class="primary">Drop or click to pick</div>
+            <div class="hint">a cropped photo of one person/vehicle
+              works best</div>
+          </label>
+          <button id="drop-clear" type="button">✕ clear photo</button>
+          <div class="strictness-row">
+            <button class="strict-btn" data-strict="0.30">Loose</button>
+            <button class="strict-btn on" data-strict="0.55">Balanced</button>
+            <button class="strict-btn" data-strict="0.80">Strict</button>
+          </div>
+          <div class="strict-hint">match strictness - only used when a photo
+            is provided</div>
+        </fieldset>
+        <fieldset>
+          <legend>Filters</legend>
+          <div>
+            <div style="color:#8b909a;font-size:11px">Object class
+              <span style="color:#6f7480">(pick any; none = all)</span></div>
+            <div class="chip-row" id="class-chips">
+              <span class="chip" data-cls="person">person</span>
+              <span class="chip" data-cls="car">car</span>
+              <span class="chip" data-cls="truck">truck</span>
+              <span class="chip" data-cls="bus">bus</span>
+              <span class="chip" data-cls="motorcycle">motorcycle</span>
+              <span class="chip" data-cls="bicycle">bicycle</span>
+              <span class="chip" data-cls="train">train</span>
+            </div>
+          </div>
+          <div class="field-row">
+            <label>from <input type="datetime-local" id="search-from" /></label>
+            <label>to <input type="datetime-local" id="search-to" /></label>
+            <button type="button" class="secondary" id="preset-1h">last 1h</button>
+            <button type="button" class="secondary" id="preset-24h">last 24h</button>
+            <button type="button" class="secondary" id="preset-week">last 7d</button>
+          </div>
+          <div class="field-row">
+            <label>how many results
+              <input type="number" id="search-top" value="12" min="1" max="200" /></label>
+          </div>
+        </fieldset>
+      </div>
+      <div class="search-actions">
+        <button id="search-go">Search</button>
+        <button id="search-reset" class="secondary" type="button">New search</button>
         <span id="search-status"></span>
       </div>
       <div id="search-preview" hidden></div>
@@ -304,6 +443,57 @@
       <div id="events-table-wrap"></div>
     </div>
 
+    <!-- Human-in-the-loop review of saved detections. See app/labels.py. -->
+    <div class="review-wrap" id="review-section">
+      <h2>Review detections - teach the system what it got wrong</h2>
+      <div class="sub">Random sample of a saved crop. YOLOv8 does not learn
+        from the live stream on its own - what you mark here goes to
+        <code>data/reviews.json</code> and is used to tune per-class
+        thresholds and build per-camera blacklists.</div>
+      <div class="review-body">
+        <div class="review-crop" id="review-crop">
+          <div class="review-empty" id="review-empty">loading…</div>
+          <img id="review-img" hidden alt="crop under review" />
+        </div>
+        <div class="review-panel">
+          <div>
+            <span class="current-label">
+              model says <span class="val" id="review-cls">?</span>
+            </span>
+          </div>
+          <div class="path" id="review-path"></div>
+          <div class="review-buttons">
+            <div class="btn-row">
+              <button class="correct" data-verdict="correct"
+                      title="the label is right; keep counting it">✅ label is correct</button>
+              <button class="reject" data-verdict="not_an_object"
+                      title="the box is around a static object / background - never count it">🚫 not an object</button>
+              <button class="skip" id="review-skip"
+                      title="next crop; no answer saved for this one">skip →</button>
+            </div>
+            <div class="btn-row" style="align-items:center;gap:6px">
+              <button class="wrong" data-verdict="wrong_label"
+                      title="the label is wrong; pick the right class">⚠ wrong class</button>
+              <select id="review-correct">
+                <option value="">(pick correct class)</option>
+                <option value="person">person</option>
+                <option value="car">car</option>
+                <option value="truck">truck</option>
+                <option value="bus">bus</option>
+                <option value="motorcycle">motorcycle</option>
+                <option value="bicycle">bicycle</option>
+                <option value="train">train</option>
+              </select>
+            </div>
+            <textarea id="review-note" rows="1"
+                      placeholder="optional note (e.g. 'lamp post in corner')"></textarea>
+          </div>
+          <div class="review-status" id="review-status"></div>
+          <div class="review-stats" id="review-stats">reviewed 0</div>
+        </div>
+      </div>
+    </div>
+
     <!-- Re-ID summary table -->
     <div class="reid-wrap" id="reid-section" hidden>
       <h2>Re-identification - returning entities per camera <span class="est-tag">appearance-based estimate</span></h2>
@@ -314,34 +504,50 @@
   <!-- firebase-config.js is gitignored per-clone; see docs/firebase_setup.md -->
   <!-- ?v=N is a cache-buster: bump it whenever any of the JS files changes,
        so the browser doesn't serve a stale ES-module from disk cache. -->
-  <script type="module" src="./firebase-config.js?v=23"></script>
-  <script type="module" src="./cameras.js?v=23"></script>
-  <script type="module" src="./app.js?v=23"></script>
+  <script type="module" src="./firebase-config.js?v=24"></script>
+  <script type="module" src="./cameras.js?v=24"></script>
+  <script type="module" src="./app.js?v=24"></script>
 
-  <!-- Search-by-image UI. INLINE and NON-MODULE on purpose: it wires the
-       /api/visual-search endpoint on this same server, has no Firebase
-       dependency, and must keep working even if firebase-app.js can't load
-       (offline demo, blocked CDN, missing config). -->
+  <!-- Search UI. INLINE and NON-MODULE on purpose: it wires POST /api/search
+       on this same server, has no Firebase dependency, and must keep working
+       even if firebase-app.js can't load. The panel supports three modes
+       through the same submit path:
+         (a) image mode          - photo provided, rank by similarity
+         (b) class/time browse   - no photo, filter by class/time/count
+         (c) combination         - photo + class/time filter combine -->
   <script>
   (function initSearch() {
     const $ = (id) => document.getElementById(id);
     const drop = $("drop"), fileInput = $("search-file"), goBtn = $("search-go");
+    const resetBtn = $("search-reset"), clearBtn = $("drop-clear");
     const statusEl = $("search-status"), previewEl = $("search-preview");
     const resultsEl = $("search-results"), registryEl = $("search-registry");
+    const chipRow = $("class-chips");
     if (!drop || !fileInput || !goBtn) return;
 
     const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) =>
         ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
+    // ----- reference photo (optional) --------------------------------------
     let queryFile = null;
     const setFile = (f) => {
       if (!f || !f.type || !f.type.startsWith("image/")) return;
       queryFile = f;
-      goBtn.disabled = false;
-      statusEl.className = "";
-      statusEl.textContent = `${f.name} (${(f.size / 1024).toFixed(0)} KB) ready`;
+      drop.classList.add("has-file");
+      drop.querySelector(".primary").textContent =
+          `${f.name} (${(f.size / 1024).toFixed(0)} KB) ready`;
+      drop.querySelector(".hint").textContent =
+          "similarity match uses this photo. clear to browse without.";
+    };
+    const clearFile = () => {
+      queryFile = null; fileInput.value = "";
+      drop.classList.remove("has-file");
+      drop.querySelector(".primary").textContent = "Drop or click to pick";
+      drop.querySelector(".hint").textContent =
+          "a cropped photo of one person/vehicle works best";
     };
     fileInput.addEventListener("change", () => setFile(fileInput.files[0]));
+    clearBtn.addEventListener("click", (e) => { e.preventDefault(); clearFile(); });
     ["dragover", "dragenter"].forEach((ev) => drop.addEventListener(ev, (e) => {
       e.preventDefault(); drop.classList.add("hover");
     }));
@@ -350,28 +556,89 @@
     }));
     drop.addEventListener("drop", (e) => setFile(e.dataTransfer.files[0]));
 
+    // ----- class chips (multi-select) --------------------------------------
+    chipRow.addEventListener("click", (e) => {
+      const chip = e.target.closest(".chip");
+      if (chip) chip.classList.toggle("on");
+    });
+    const getSelectedClasses = () => [...chipRow.querySelectorAll(".chip.on")]
+        .map((c) => c.dataset.cls);
+
+    // ----- strictness preset ------------------------------------------------
+    let strictness = 0.55;
+    document.querySelectorAll(".strict-btn").forEach((b) => {
+      b.addEventListener("click", (e) => {
+        e.preventDefault();
+        document.querySelectorAll(".strict-btn").forEach((x) =>
+            x.classList.remove("on"));
+        b.classList.add("on");
+        strictness = parseFloat(b.dataset.strict);
+      });
+    });
+
+    // ----- time presets -----------------------------------------------------
+    const toLocalDT = (d) => {
+      // <input type="datetime-local"> wants YYYY-MM-DDTHH:MM in LOCAL time.
+      const pad = (n) => String(n).padStart(2, "0");
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
+             `T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    };
+    const setRange = (hours) => {
+      const now = new Date();
+      const from = new Date(now.getTime() - hours * 3600 * 1000);
+      $("search-from").value = toLocalDT(from);
+      $("search-to").value = toLocalDT(now);
+    };
+    $("preset-1h").addEventListener("click", (e) => { e.preventDefault(); setRange(1); });
+    $("preset-24h").addEventListener("click", (e) => { e.preventDefault(); setRange(24); });
+    $("preset-week").addEventListener("click", (e) => { e.preventDefault(); setRange(24 * 7); });
+
+    // ----- reset ------------------------------------------------------------
+    resetBtn.addEventListener("click", () => {
+      clearFile();
+      chipRow.querySelectorAll(".chip.on").forEach((c) => c.classList.remove("on"));
+      $("search-from").value = ""; $("search-to").value = "";
+      $("search-top").value = 12;
+      previewEl.hidden = true; previewEl.innerHTML = "";
+      resultsEl.innerHTML = ""; registryEl.innerHTML = "";
+      statusEl.className = ""; statusEl.textContent = "";
+      goBtn.disabled = false;
+      window.scrollTo({ top: document.querySelector(".search-wrap").offsetTop - 20,
+                        behavior: "smooth" });
+    });
+
+    // ----- submit -----------------------------------------------------------
     goBtn.addEventListener("click", async () => {
-      if (!queryFile) return;
       goBtn.disabled = true;
       statusEl.className = "";
-      statusEl.textContent = "searching… (first search loads the model, ~10 s)";
+      const hasImage = !!queryFile;
+      statusEl.textContent = hasImage
+          ? "searching by image… (first search loads the model, ~10 s)"
+          : "browsing…";
       try {
-        const params = new URLSearchParams({
-          top: $("search-top").value, min_sim: $("search-minsim").value,
-        });
-        const cls = $("search-classes").value;
-        if (cls) params.set("classes", cls);
-        const r = await fetch(`/api/visual-search?${params}`, {
-          method: "POST", body: queryFile,
-          headers: { "Content-Type": queryFile.type || "application/octet-stream" },
-        });
+        const params = new URLSearchParams({ top: $("search-top").value });
+        if (hasImage) params.set("min_sim", String(strictness));
+        const cls = getSelectedClasses();
+        if (cls.length) params.set("classes", cls.join(","));
+        const from = $("search-from").value, to = $("search-to").value;
+        if (from) params.set("from", from);
+        if (to)   params.set("to", to);
+
+        const opts = hasImage
+            ? { method: "POST", body: queryFile,
+                headers: { "Content-Type": queryFile.type || "application/octet-stream" } }
+            : { method: "POST" };   // empty body = browse mode
+        const r = await fetch(`/api/search?${params}`, opts);
         const data = await r.json();
         if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
         render(data);
+        const mode = data.mode || (hasImage ? "image" : "browse");
         statusEl.textContent =
-          `done · ${data.snapshot_matches.length} snapshot + ` +
-          `${data.registry_matches.length} registry matches ` +
-          `(index: ${data.index_size} crops, detector: ${data.detector})`;
+          `done · ${data.snapshot_matches.length} snapshot` +
+          (mode === "image"
+              ? ` + ${data.registry_matches.length} registry matches`
+              : " results") +
+          ` · ${mode} mode · ${data.index_size} crops indexed`;
       } catch (err) {
         statusEl.className = "err";
         statusEl.textContent = `search failed: ${err.message}`;
@@ -380,45 +647,63 @@
       }
     });
 
+    // ----- render -----------------------------------------------------------
     function render(data) {
       previewEl.innerHTML = "";
-      previewEl.hidden = false;
-      if (data.query_preview_jpeg_b64) {
-        const img = new Image();
-        img.src = "data:image/jpeg;base64," + data.query_preview_jpeg_b64;
-        previewEl.appendChild(img);
+      const mode = data.mode || "image";
+      if (mode === "image") {
+        previewEl.hidden = false;
+        if (data.query_preview_jpeg_b64) {
+          const img = new Image();
+          img.src = "data:image/jpeg;base64," + data.query_preview_jpeg_b64;
+          previewEl.appendChild(img);
+        }
+        const info = document.createElement("div");
+        info.className = "qobjs";
+        info.innerHTML = data.query_objects.length
+          ? "query objects:<br>" + data.query_objects.map((q) =>
+              q.cls === "image"
+                ? "<b>whole image</b> (nothing detected — treated as a ready-made crop)"
+                : `<b>${esc(q.cls)}</b> conf ${q.conf}`).join("<br>")
+          : "nothing usable found in the image";
+        previewEl.appendChild(info);
+      } else {
+        previewEl.hidden = true;
       }
-      const info = document.createElement("div");
-      info.className = "qobjs";
-      info.innerHTML = data.query_objects.length
-        ? "query objects:<br>" + data.query_objects.map((q) =>
-            q.cls === "image"
-              ? "<b>whole image</b> (nothing detected — treated as a ready-made crop)"
-              : `<b>${esc(q.cls)}</b> conf ${q.conf}`).join("<br>")
-        : "nothing usable found in the image";
-      previewEl.appendChild(info);
 
       resultsEl.innerHTML = "";
       for (const m of data.snapshot_matches) {
         const d = document.createElement("div");
         d.className = "hit" + (m.strong ? " strong" : "");
+        const isBrowse = mode === "browse" || m.browse_only;
+        const seenAt = m.seen_at
+            ? esc(String(m.seen_at).replace("T", " ").replace("Z", " UTC"))
+            : "";
+        const badge = isBrowse
+            ? `<span class="badge weak">${esc(m.cls)}</span>`
+            : `<span class="badge ${m.strong ? "strong" : "weak"}">
+                 ${m.strong ? "match" : "similar"} ${(m.similarity * 100).toFixed(1)}%
+               </span>`;
+        const bar = isBrowse ? "" :
+            `<div class="simbar"><i style="width:${(m.similarity * 100).toFixed(0)}%"></i></div>`;
         d.innerHTML = `
           <a href="${m.url}" target="_blank" rel="noopener">
             <img src="${m.url}" loading="lazy" alt="match"/></a>
-          <div class="simbar"><i style="width:${(m.similarity * 100).toFixed(0)}%"></i></div>
-          <div class="meta">
-            <span class="badge ${m.strong ? "strong" : "weak"}">
-              ${m.strong ? "match" : "similar"} ${(m.similarity * 100).toFixed(1)}%
-            </span><br>${esc(m.cls)}
+          ${bar}
+          <div class="meta">${badge}<br>${esc(m.cls)}
+            ${seenAt ? `<br><span style="color:#6f7480">${seenAt}</span>` : ""}
           </div>`;
         resultsEl.appendChild(d);
       }
-      if (!data.snapshot_matches.length)
+      if (!data.snapshot_matches.length) {
+        const msg = mode === "image"
+            ? "no saved snapshot is similar enough - try Loose strictness"
+            : "no crops match these filters - widen the time range or clear classes";
         resultsEl.innerHTML =
-          '<div class="empty" style="color:#8b909a;padding:12px;font-size:12px">' +
-          'no saved snapshot is similar enough</div>';
+          `<div class="empty" style="color:#8b909a;padding:12px;font-size:12px">${msg}</div>`;
+      }
 
-      if (data.registry_matches.length) {
+      if (data.registry_matches && data.registry_matches.length) {
         const rows = data.registry_matches.map((m) => `
           <tr>
             <td><span class="badge ${m.strong ? "strong" : "weak"}">
@@ -439,6 +724,113 @@
         registryEl.innerHTML = "";
       }
     }
+  })();
+  </script>
+
+  <!-- Review UI. Loads one un-reviewed crop at a time from /api/review-sample,
+       submits the verdict to /api/review-submit, then fetches the next. -->
+  <script>
+  (function initReview() {
+    const $ = (id) => document.getElementById(id);
+    const cropImg = $("review-img"), emptyEl = $("review-empty");
+    const clsEl = $("review-cls"), pathEl = $("review-path");
+    const correctSel = $("review-correct"), noteEl = $("review-note");
+    const statusEl = $("review-status"), statsEl = $("review-stats");
+    const skipBtn = $("review-skip");
+    if (!cropImg) return;
+
+    const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+    let currentSample = null;
+
+    async function loadNext() {
+      statusEl.className = "review-status";
+      statusEl.textContent = "";
+      emptyEl.textContent = "loading…";
+      emptyEl.style.display = "";
+      cropImg.hidden = true;
+      try {
+        const r = await fetch("/api/review-sample", { cache: "no-store" });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+        if (data.done) {
+          currentSample = null;
+          emptyEl.innerHTML =
+              "✅ every stored crop has been reviewed.<br>" +
+              "<span style=\"font-size:11px\">check <code>data/reviews.json</code> " +
+              "to export your verdicts</span>";
+          clsEl.textContent = "-"; pathEl.textContent = "";
+          return;
+        }
+        currentSample = data;
+        cropImg.src = data.url;
+        cropImg.hidden = false;
+        emptyEl.style.display = "none";
+        clsEl.textContent = data.cls || "?";
+        pathEl.textContent = data.path;
+        correctSel.value = ""; noteEl.value = "";
+        const remaining = data.remaining;
+        if (typeof remaining === "number") {
+          statsEl.innerHTML = statsEl.innerHTML.split("·")[0] +
+              ` · <b>${remaining}</b> crops still un-reviewed`;
+        }
+      } catch (err) {
+        currentSample = null;
+        statusEl.className = "review-status err";
+        statusEl.textContent = `sample failed: ${err.message}`;
+        emptyEl.textContent = "sample failed";
+      }
+    }
+
+    async function refreshStats() {
+      try {
+        const r = await fetch("/api/review-stats", { cache: "no-store" });
+        if (!r.ok) return;
+        const s = await r.json();
+        const byV = s.by_verdict || {};
+        statsEl.innerHTML = `reviewed <b>${s.total_reviewed || 0}</b> ` +
+            `(correct ${byV.correct || 0} · wrong ${byV.wrong_label || 0} · ` +
+            `not-object ${byV.not_an_object || 0})`;
+      } catch (_) { /* offline ok */ }
+    }
+
+    async function submit(verdict) {
+      if (!currentSample) return;
+      if (verdict === "wrong_label" && !correctSel.value) {
+        statusEl.className = "review-status err";
+        statusEl.textContent = "pick the correct class first";
+        return;
+      }
+      statusEl.className = "review-status";
+      statusEl.textContent = "saving…";
+      try {
+        const r = await fetch("/api/review-submit", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            crop_path: currentSample.path,
+            original_cls: currentSample.cls,
+            verdict,
+            corrected_cls: verdict === "wrong_label" ? correctSel.value : null,
+            note: noteEl.value.trim() || null,
+          }),
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+        await refreshStats();
+        await loadNext();
+      } catch (err) {
+        statusEl.className = "review-status err";
+        statusEl.textContent = `save failed: ${err.message}`;
+      }
+    }
+
+    document.querySelectorAll(".review-buttons button[data-verdict]")
+        .forEach((b) => b.addEventListener("click", () => submit(b.dataset.verdict)));
+    skipBtn.addEventListener("click", loadNext);
+
+    refreshStats();
+    loadNext();
   })();
   </script>
 </body>

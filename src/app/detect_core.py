@@ -14,16 +14,24 @@ import urllib.request
 import cv2
 import numpy as np
 
-# COCO class ids we care about for *business activity* (footfall + vehicles).
+# COCO class ids we care about for *business activity* (footfall + vehicles
+# + rail). `train` was added after a metro train crossing the frame went
+# unlabeled - the model classifies it as class 6, but without id 6 in the
+# `classes=` filter YOLO silently drops it before we ever see the box.
 CLASSES_OF_INTEREST = {
     "person": 0,
     "bicycle": 1,
     "car": 2,
     "motorcycle": 3,
     "bus": 5,
+    "train": 6,
     "truck": 7,
 }
 NAME_BY_ID = {v: k for k, v in CLASSES_OF_INTEREST.items()}
+# `train` is intentionally excluded from `vehicles`: a metro/tram flows at a
+# completely different rate than road traffic and mixing them would corrupt
+# the per-camera baselines. It shows up as its own count on cameras that
+# look at rail.
 VEHICLE_NAMES = ("bicycle", "car", "motorcycle", "bus", "truck")
 
 # Model input size the collector runs at. YOLO's 640 default shrinks a distant
@@ -35,8 +43,17 @@ VEHICLE_NAMES = ("bicycle", "car", "motorcycle", "bus", "truck")
 DEFAULT_IMGSZ = 960
 
 
-def load_model(weights: str = "yolov8n.pt"):
-    """Load a YOLO model once and reuse it. nano runs on CPU; bump to s/m for accuracy."""
+def load_model(weights: str = "yolov8s.pt"):
+    """Load a YOLO model once and reuse it.
+
+    Default is `yolov8s` (small) rather than `yolov8n` (nano). Nano's
+    recall on the wide overhead street views these cameras produce is too
+    low: it silently drops distant/static vehicles, mis-fires `person` on
+    upright thin road furniture, and often mis-classifies a partially-cropped
+    car at the frame edge as `bicycle`. Small is the smallest tier where those
+    three failure modes back off to acceptable levels. CPU cost is ~3x nano
+    per burst - still a fraction of the collector's sampling interval.
+    """
     from ultralytics import YOLO
 
     return YOLO(weights)
@@ -301,10 +318,18 @@ def _foot_point(b: dict) -> tuple[float, float]:
 
 def filter_boxes_roi(boxes: list[dict], frame_shape,
                      roi: list | None,
-                     roi_exclude: list | None = None) -> list[dict]:
+                     roi_exclude: list | None = None,
+                     roi_exclude_class: dict | None = None) -> list[dict]:
     """Keep boxes whose foot point is inside `roi` (if set) and outside every
-    polygon in `roi_exclude`. Polygons use normalized 0..1 coordinates."""
-    if not roi and not roi_exclude:
+    polygon in `roi_exclude`. Polygons use normalized 0..1 coordinates.
+
+    `roi_exclude_class` is per-class: `{cls_name: [poly, poly, ...]}`. A box
+    is dropped when its foot point falls inside ANY polygon listed for its
+    own class. This lets a camera's config say "never accept `person` in the
+    top-left corner (there's a lamp post there)" without hiding real cars
+    that pass through the same pixels.
+    """
+    if not roi and not roi_exclude and not roi_exclude_class:
         return boxes
     H, W = frame_shape[:2]
     kept = []
@@ -315,6 +340,10 @@ def filter_boxes_roi(boxes: list[dict], frame_shape,
             continue
         if roi_exclude and any(point_in_polygon(nx, ny, p) for p in roi_exclude):
             continue
+        if roi_exclude_class:
+            polys = roi_exclude_class.get(b.get("cls")) or ()
+            if any(point_in_polygon(nx, ny, p) for p in polys):
+                continue
         kept.append(b)
     return kept
 
@@ -424,30 +453,32 @@ def count_line_crossings(tracks: list[list[dict]], frame_shape,
     return res
 
 
-# Per-class confidence gate applied AFTER the model's own conf filter. YOLOv8n
-# on overhead street cams routinely reports a distant pedestrian or a rider's
-# bicycle with confidence in the 0.20-0.35 band; a single 0.35 gate for the
-# whole model drops them, and a single 0.15 gate for the whole model inflates
-# the car count with reflections and partial vehicles. Per-class gates lower
-# the bar only where the class needs it (small/thin objects: person, bicycle,
-# motorcycle) and keep the strict bar where the class is easy (car/bus/truck).
-# Callers may override via detect_with_boxes(..., per_class_conf={...}).
+# Per-class confidence gate applied AFTER the model's own conf filter.
+# `person` was raised from 0.22 to 0.35 after users reported roadside static
+# objects (traffic signs, lamp posts) being labeled `person` at confidence
+# ~0.27-0.38 - well under a real pedestrian's typical 0.55+, but above the
+# old floor. Small/distant pedestrians still register at 0.35 in practice;
+# what the higher bar kills off are the low-confidence, upright, thin objects
+# the network mis-fires on.
 DEFAULT_PER_CLASS_CONF = {
-    "person":     0.22,
+    "person":     0.35,
     "bicycle":    0.22,
     "motorcycle": 0.22,
     "car":        0.35,
     "bus":        0.35,
+    "train":      0.35,
     "truck":      0.35,
 }
 
-# Person plausibility: an upright person's height >= its width. Strollers,
-# banners misread as "person", parked shopping carts, and low road furniture
-# ALL fail this check because a top-down view of them is wider-than-tall or
-# roughly square. Set below 1.0 to allow crouching/sitting; set to None to
-# disable the filter entirely (some CCTV pitches lay pedestrians close to
-# horizontal). 0.90 is a soft floor: real walking people are ~2.5:1.
+# Person plausibility - lower and UPPER aspect-ratio floors. Real walking
+# people are ~1.5-3.0 tall/wide; the lower bound rejects strollers/banners
+# (wider than tall), the upper bound rejects lamp posts, traffic signs and
+# thin bollards that the network keeps mis-firing as `person` at confidence
+# 0.27-0.38 with aspects 4:1 and up. Together they turn the shape check into
+# a real "does this look like a person" gate instead of just "not a stroller".
+# Set to None to disable either bound.
 DEFAULT_PERSON_MIN_ASPECT = 0.90
+DEFAULT_PERSON_MAX_ASPECT = 3.5
 
 # "Rider co-detection": if a person box overlaps a two-wheeler that YOLO
 # reported ABOVE its own gate but BELOW the per-class gate, resurrect the
@@ -472,6 +503,7 @@ def detect_with_boxes(model, frame, conf: float = 0.35,
                       imgsz: int | None = None,
                       per_class_conf: dict | None = None,
                       person_min_aspect: float | None = DEFAULT_PERSON_MIN_ASPECT,
+                      person_max_aspect: float | None = DEFAULT_PERSON_MAX_ASPECT,
                       rider_iou: float | None = DEFAULT_RIDER_IOU
                       ) -> tuple[dict, list[dict]]:
     """Like detect_and_count but also returns per-detection boxes.
@@ -479,14 +511,17 @@ def detect_with_boxes(model, frame, conf: float = 0.35,
     Detection is a two-stage filter: the model runs at the MOST PERMISSIVE
     threshold in `per_class_conf` (so nothing that any class needs is dropped
     before we can see it), then each raw detection is kept iff its confidence
-    clears that class's per-class threshold. `person_min_aspect` rejects
-    person boxes whose height/width is below the floor - the "stroller
-    detected as a person" case. `rider_iou` resurrects a two-wheeler box that
-    survived the model gate but not its per-class gate when it overlaps a
-    surviving person box - a rider is a person AND a vehicle.
+    clears that class's per-class threshold. `person_min_aspect` and
+    `person_max_aspect` reject person boxes whose height/width falls outside
+    the plausible band - respectively the "stroller mis-read as person" case
+    and the "lamp post/traffic sign mis-read as person" case. `rider_iou`
+    resurrects a two-wheeler box that survived the model gate but not its
+    per-class gate when it overlaps a surviving person box - a rider is a
+    person AND a vehicle.
 
     Set `per_class_conf=None` to fall back to the single `conf` (legacy).
-    Set `person_min_aspect=None` or `rider_iou=None` to skip that filter.
+    Set `person_min_aspect=None` / `person_max_aspect=None` / `rider_iou=None`
+    to skip that filter.
 
     Returns:
         counts: {class_name: int, "vehicles": int}
@@ -531,13 +566,20 @@ def detect_with_boxes(model, frame, conf: float = 0.35,
         if b["conf"] < gate:
             below_gate.append(b)
             continue
-        if b["cls"] == "person" and person_min_aspect is not None:
+        if b["cls"] == "person" and (person_min_aspect is not None
+                                     or person_max_aspect is not None):
             w, h = _box_wh(b)
-            if w > 0 and (h / w) < person_min_aspect:
-                # Stroller / banner / cart shaped like a person to the model.
-                # Note it in the box for downstream debugging but drop the count.
-                b["_dropped_reason"] = "person_aspect"
-                continue
+            if w > 0:
+                aspect = h / w
+                if person_min_aspect is not None and aspect < person_min_aspect:
+                    # Stroller / banner / cart shaped like a person to the model.
+                    b["_dropped_reason"] = "person_aspect_low"
+                    continue
+                if person_max_aspect is not None and aspect > person_max_aspect:
+                    # Lamp post / traffic sign / bollard: taller-and-thinner
+                    # than any real pedestrian is.
+                    b["_dropped_reason"] = "person_aspect_high"
+                    continue
         kept.append(b)
 
     # Stage 3: rider co-detection - resurrect below-gate two-wheelers that
@@ -598,6 +640,7 @@ _BOX_COLORS = {
     "car":        (60, 130, 246),
     "motorcycle": (200, 130, 0),
     "bus":        (0, 90, 230),
+    "train":      (200, 60, 200),   # magenta - rail is neither road nor foot
     "truck":      (0, 90, 230),
 }
 
@@ -681,6 +724,7 @@ def detect_burst(model, frames: list[np.ndarray], conf: float = 0.35,
                  imgsz: int | None = None,
                  roi: list | None = None,
                  roi_exclude: list | None = None,
+                 roi_exclude_class: dict | None = None,
                  line: list | None = None,
                  per_class_conf: dict | None = None) -> tuple[dict, list[dict], np.ndarray, dict]:
     """Run detection over a burst of frames and aggregate counts by median.
@@ -695,9 +739,13 @@ def detect_burst(model, frames: list[np.ndarray], conf: float = 0.35,
 
     `roi`/`roi_exclude` (normalized polygons) drop detections whose foot point
     is outside the camera's area of interest BEFORE counting, so a parking lot
-    or a neighboring roof can't inflate business-activity numbers. `line`
-    (normalized [[x1,y1],[x2,y2]]) counts burst-window crossings via short
-    centroid tracks - a sampled entry/exit flow rate.
+    or a neighboring roof can't inflate business-activity numbers.
+    `roi_exclude_class` (dict cls -> [poly,...]) is the per-class variant:
+    "in this zone, never accept `person`" - use it for known false-positive
+    hotspots (traffic sign in the middle of the intersection, lamp post in
+    the corner) without hiding other classes that legitimately pass through.
+    `line` (normalized [[x1,y1],[x2,y2]]) counts burst-window crossings via
+    short centroid tracks - a sampled entry/exit flow rate.
     """
     # Opt the collector into class-aware confidence gating by default: the
     # nano model on overhead cams loses two-wheelers and small pedestrians at a
@@ -709,8 +757,9 @@ def detect_burst(model, frames: list[np.ndarray], conf: float = 0.35,
     for fr in frames:
         c, b = detect_with_boxes(model, fr, conf=conf, imgsz=imgsz,
                                  per_class_conf=per_class_conf or None)
-        if roi or roi_exclude:
-            b = filter_boxes_roi(b, fr.shape, roi, roi_exclude)
+        if roi or roi_exclude or roi_exclude_class:
+            b = filter_boxes_roi(b, fr.shape, roi, roi_exclude,
+                                 roi_exclude_class)
             c = counts_from_boxes(b)
         per.append((c, b, fr))
     counts = median_counts([c for c, _, _ in per])

@@ -889,6 +889,7 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
         counts, boxes, frame, burst_dbg = detect_burst(
             model, frames, conf=cam_conf, imgsz=imgsz,
             roi=cam.get("roi"), roi_exclude=cam.get("roi_exclude"),
+            roi_exclude_class=cam.get("roi_exclude_class"),
             line=cam.get("line"))
         ok = 1
         if reid is not None and boxes:
@@ -1212,7 +1213,11 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Continuous YOLO footfall collector "
                                              "(writes to Firestore + Storage for the HTML dashboard)")
     ap.add_argument("--interval", type=int, default=20, help="seconds between sampling rounds")
-    ap.add_argument("--weights", default="yolov8n.pt")
+    ap.add_argument("--weights", default="yolov8s.pt",
+                    help="YOLO weights. Default `yolov8s` recovers small/static "
+                         "objects nano misses (parked cars, distant pedestrians) "
+                         "and mis-classifies less at frame edges. Set to "
+                         "yolov8n.pt to trade accuracy for ~3x less CPU.")
     ap.add_argument("--imgsz", type=int, default=DEFAULT_IMGSZ,
                     help="YOLO input size. 960 recovers the small/distant "
                          "pedestrians and cars these wide street shots are full "

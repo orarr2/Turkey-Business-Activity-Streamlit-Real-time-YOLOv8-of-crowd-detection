@@ -61,7 +61,7 @@ def main() -> None:
     ap.add_argument("--reid-model", default=None,
                     help="OSNet .onnx for the similarity signature "
                          "(default: HSV histogram)")
-    ap.add_argument("--yolo", default="yolov8n.pt",
+    ap.add_argument("--yolo", default="yolov8s.pt",
                     help='YOLO weights for object extraction ("off" to disable)')
     ap.add_argument("--conf", type=float, default=0.30)
     ap.add_argument("--top", type=int, default=10)
