@@ -56,6 +56,13 @@ QUORUM_M = 3
 GRID_ROWS = 5
 GRID_COLS = 5
 
+# Validation constants for the write-side APIs (add_polygon, learn_from_
+# positions). Kept in sync with the same restrictions the confidence-boost
+# store uses so a cam_id/class that one path accepts the other also does.
+_CAM_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+_CLS_ALLOWED = {"person", "bicycle", "car", "motorcycle",
+                "bus", "train", "truck"}
+
 # Bounding-box parser for crop paths that carry the source box in the
 # filename. The anomaly-crop pipeline names files
 # ``<cam>/<frame_stem>__NN_<cls>.jpg`` - no bbox in the name - so we can't
@@ -236,6 +243,147 @@ def _cell_from_review(r: Review,
     # Fallback: use frame center. Conservative because the quorum still
     # requires N rejects landing in the same cell.
     return _grid_cell(0.5, 0.5)
+
+
+def add_polygon(cam_id: str, cls: str, polygon: list[list[float]],
+                reason: str = "user-marked block area",
+                path: str | Path | None = None) -> dict:
+    """Append a user-drawn polygon to the blacklist file.
+
+    Called from the dashboard's ``+ block area`` mode: the user drags a
+    rectangle over a spot on the review canvas where the model repeatedly
+    hallucinates the same class (a lamppost mis-fired as a person, a
+    building silhouette that keeps registering as a truck), and this
+    function persists it so the next collector burst filters that spot
+    out. Returns the created entry, or the pre-existing one if the same
+    (cam, cls, coarse cell) polygon is already stored (dedup on the same
+    grid cell keeps the file bounded).
+    """
+    if not _CAM_ID_RE.match(cam_id or "") or cls not in _CLS_ALLOWED:
+        raise ValueError(f"invalid cam_id/cls: {cam_id!r}/{cls!r}")
+    if not polygon or not all(len(p) == 2 for p in polygon):
+        raise ValueError("polygon must be a non-empty list of [x, y] points")
+    # Snap the freehand rectangle to the same grid the review-based flow uses
+    # so we get automatic dedup and the file stays free of dozens of near-
+    # identical polygons for the same lamppost.
+    xs = [max(0.0, min(1.0, float(p[0]))) for p in polygon]
+    ys = [max(0.0, min(1.0, float(p[1]))) for p in polygon]
+    xc = (min(xs) + max(xs)) / 2.0
+    yc = (min(ys) + max(ys)) / 2.0
+    row, col = _grid_cell(xc, yc)
+    snapped = _cell_polygon(row, col)
+    p = Path(path if path is not None else DEFAULT_BLACKLIST_PATH)
+    store = _load_store(p)
+    if _has_polygon(store, cam_id, cls, snapped):
+        for e in store.get("entries", []):
+            if (e.get("cam_id") == cam_id and e.get("cls") == cls
+                    and e.get("polygon") == snapped):
+                return {"entry": e, "created": False}
+    entry = {
+        "cam_id":     cam_id,
+        "cls":        cls,
+        "polygon":    snapped,
+        "reason":     reason,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "source":     "user-marked",
+    }
+    store.setdefault("entries", []).append(entry)
+    _save_store(store, p)
+    return {"entry": entry, "created": True}
+
+
+def learn_from_positions(review_frames_root: str | Path,
+                         path: str | Path | None = None,
+                         min_frames: int = 20,
+                         min_ratio: float = 0.80,
+                         min_cls_conf: float = 0.30) -> list[dict]:
+    """Add polygons for scene positions where the model consistently fires
+    on what is almost certainly a stationary background feature - a
+    building silhouette, a lamppost, a road divider, a parked structure -
+    without the user having to review every crop.
+
+    Idea: walk the sibling ``.json`` files of every saved review frame
+    (they carry all the boxes YOLO drew, not just the one the user
+    verdicted) and bucket the detections into the same 5x5 grid the
+    review-based flow uses. Any (cam, cls, cell) that has a detection in
+    more than ``min_ratio`` of the last ``min_frames`` frames for that cam
+    is treated as a "position with a stationary false positive" and gets
+    a polygon. Confidence < ``min_cls_conf`` boxes are ignored so a
+    hesitant one-off detection doesn't drag a cell over the line.
+
+    Returns the list of newly-added entries. Existing polygons are not
+    re-added (dedup on (cam, cls, cell) as elsewhere in this module).
+
+    Not called from anywhere by default - the caller (collector startup
+    or a cron job) decides how often to invoke it, so this module stays
+    read-only until asked otherwise.
+    """
+    import json
+    root = Path(review_frames_root)
+    if not root.is_dir():
+        return []
+    # frames_per_cam[cam_id] = list of {cells_hit: set((cls, row, col))}
+    per_cam: dict[str, list[set]] = {}
+    for meta_path in sorted(root.rglob("*.json"),
+                            key=lambda p: p.stat().st_mtime,
+                            reverse=True):
+        try:
+            meta = json.loads(meta_path.read_text())
+        except (OSError, ValueError):
+            continue
+        cam = meta.get("cam_id") or ""
+        w = float(meta.get("frame_w") or 1) or 1.0
+        h = float(meta.get("frame_h") or 1) or 1.0
+        hits: set = set()
+        for b in (meta.get("boxes") or []):
+            cls = b.get("cls"); conf = float(b.get("conf") or 0.0)
+            box = b.get("box") or []
+            if cls not in _CLS_ALLOWED or conf < min_cls_conf or len(box) < 4:
+                continue
+            x_center = (box[0] + box[2]) / 2.0 / w
+            # Foot-point y (same convention as the runtime ROI filter): use the
+            # bottom of the box so the polygon lands where the object stands.
+            y_foot = box[3] / h
+            row, col = _grid_cell(x_center, y_foot)
+            hits.add((cls, row, col))
+        per_cam.setdefault(cam, []).append(hits)
+        # Cap per-cam frames scanned to keep this cheap - we only care about
+        # the most recent min_frames*2 samples per cam anyway.
+        if len(per_cam[cam]) >= min_frames * 2:
+            pass
+    p = Path(path if path is not None else DEFAULT_BLACKLIST_PATH)
+    store = _load_store(p)
+    new_entries: list[dict] = []
+    now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    for cam, frames in per_cam.items():
+        if len(frames) < min_frames or not _CAM_ID_RE.match(cam):
+            continue
+        # Count how many frames each (cls, row, col) fired in.
+        counts: dict[tuple, int] = {}
+        for f in frames[:min_frames * 2]:
+            for key in f:
+                counts[key] = counts.get(key, 0) + 1
+        denom = min(len(frames), min_frames * 2)
+        for (cls, row, col), n in counts.items():
+            if n / denom < min_ratio:
+                continue
+            polygon = _cell_polygon(row, col)
+            if _has_polygon(store, cam, cls, polygon):
+                continue
+            entry = {
+                "cam_id":     cam,
+                "cls":        cls,
+                "polygon":    polygon,
+                "reason":     f"static-position: {n}/{denom} frames "
+                              f"(>= {int(min_ratio*100)}%)",
+                "created_at": now_iso,
+                "source":     "position-persistence",
+            }
+            store.setdefault("entries", []).append(entry)
+            new_entries.append(entry)
+    if new_entries:
+        _save_store(store, p)
+    return new_entries
 
 
 def load_auto_blacklist(path: str | Path | None = None) -> dict:

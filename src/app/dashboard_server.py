@@ -230,6 +230,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/model-metrics":
             self._model_metrics()
             return
+        if path == "/api/boost-status":
+            self._boost_status()
+            return
         if path == "/api/review-frame":
             self._review_frame_get()
             return
@@ -262,6 +265,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             return
         if path == "/api/review-frames-clear":
             self._review_frames_clear()
+            return
+        if path == "/api/blacklist-add":
+            self._blacklist_add()
             return
         self.send_error(404, "unknown POST endpoint")
 
@@ -327,6 +333,28 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                     top_n=top_n, min_sim=min_sim, classes=classes,
                     time_from=time_from, time_to=time_to)
                 result["detector"] = "yolo" if st.model is not None else "whole-image"
+                # Auto-Loose fallback: when the user picks Balanced/Strict and
+                # gets NOTHING back, silently retry at the Loose floor and tag
+                # the response. Better UX than making the user notice the empty
+                # state and click Loose themselves. Only fires when the user
+                # didn't already pick 0.30 - we do not want to hide a genuine
+                # "no similar crops anywhere at any strictness" state.
+                total = (len(result.get("snapshot_matches") or [])
+                         + len(result.get("registry_matches") or []))
+                if total == 0 and min_sim > 0.30:
+                    loose = search_image_bytes(
+                        data, model=st.model, embedder=st.embedder,
+                        snapshot_index=st.index, db_path=st.db_path,
+                        top_n=top_n, min_sim=0.30, classes=classes,
+                        time_from=time_from, time_to=time_to)
+                    loose_total = (len(loose.get("snapshot_matches") or [])
+                                   + len(loose.get("registry_matches") or []))
+                    if loose_total > 0:
+                        result["snapshot_matches"] = loose.get("snapshot_matches") or []
+                        result["registry_matches"] = loose.get("registry_matches") or []
+                        result["fallback"] = {"from_min_sim": min_sim,
+                                              "to_min_sim": 0.30,
+                                              "note": "auto-loose retry"}
             else:
                 # Browse mode: no reference photo. The user asked for
                 # "N cars between X and Y" - list crops in time order.
@@ -591,6 +619,60 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 except Exception as e:
                     result["reseed_error"] = f"{type(e).__name__}: {e}"
             self._send_json(200, result)
+        except Exception as e:
+            self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
+
+    def _blacklist_add(self) -> None:
+        """Accept a user-drawn polygon from the Review canvas and persist it.
+
+        Payload: {"cam_id": "...", "cls": "person"|..., "polygon": [[x,y], ...]}
+        (coordinates normalized to [0, 1]). The response returns the stored
+        entry so the frontend can echo confirmation.
+        """
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length <= 0 or length > 8 * 1024:
+            self._send_json(400, {"error": "empty or oversized body"})
+            return
+        try:
+            body = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            self._send_json(400, {"error": "body must be JSON"})
+            return
+        try:
+            from app.auto_blacklist import add_polygon
+            result = add_polygon(
+                cam_id=str(body.get("cam_id") or "").strip(),
+                cls=str(body.get("cls") or "").strip(),
+                polygon=body.get("polygon") or [],
+                reason=str(body.get("reason") or "user-marked block area"),
+            )
+        except ValueError as e:
+            self._send_json(400, {"error": str(e)})
+            return
+        except Exception as e:
+            self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
+            return
+        # Reload the camera catalog so the next collector burst (locally OR
+        # a hot-reload cycle on the VM) already sees the new polygon.
+        try:
+            from app.cameras import reload_review_overrides
+            reload_review_overrides()
+        except Exception:
+            pass
+        self._send_json(200, result)
+
+    def _boost_status(self) -> None:
+        """Per-(cam,cls) baseline vs current conf plus review counts.
+
+        Powers the dashboard's "Learning proof" panel so the user can
+        watch each verdict move the effective confidence for that camera.
+        """
+        try:
+            from app.confidence_boost import details
+            self._send_json(200, details())
         except Exception as e:
             self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
 

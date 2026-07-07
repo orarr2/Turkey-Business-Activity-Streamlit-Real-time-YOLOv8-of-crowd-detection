@@ -1463,6 +1463,9 @@ def main() -> None:
     # so a fresh "correct" / "wrong" verdict in the review UI actually changes
     # what the next burst sees, without a service restart.
     _REVIEW_RELOAD_EVERY_ROUNDS = 10
+    # Position-persistence pass runs less often (expensive walk over
+    # review_frames/*.json). Every ~1h at 40 s/round.
+    _STATIC_LEARN_EVERY_ROUNDS = 90
     _round_counter = 0
     try:
         while True:
@@ -1474,6 +1477,22 @@ def main() -> None:
                     reload_review_overrides()
                 except Exception as e:
                     print(f"  ! review overrides reload failed: {e}")
+            if _round_counter % _STATIC_LEARN_EVERY_ROUNDS == 0:
+                # Positions where the model consistently fires on the same
+                # background feature (buildings, lampposts, road furniture)
+                # become auto-blacklist polygons with no user in the loop.
+                try:
+                    from app.auto_blacklist import learn_from_positions
+                    from app.review_frames import _dir as _rf_dir
+                    added = learn_from_positions(_rf_dir())
+                    if added:
+                        print(f"  * static-position: added {len(added)} "
+                              f"blacklist polygon(s) - {', '.join(sorted({e['cam_id']+':'+e['cls'] for e in added}))}")
+                        # Rebuild cameras.CAMERAS so the next burst uses them.
+                        from app.cameras import reload_review_overrides
+                        reload_review_overrides()
+                except Exception as e:
+                    print(f"  ! static-position learn failed: {e}")
             for slot in GRID_SLOTS:
                 picker = pickers[slot["slot_id"]]
                 cam_id = picker.current_cam()

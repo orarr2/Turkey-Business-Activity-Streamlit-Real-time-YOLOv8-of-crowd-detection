@@ -135,15 +135,23 @@
        ate half the browser window and pushed everything below the fold to
        the next screenful. 420px = ~10 rows visible at 40px each, enough to
        see structure without dominating the layout. */
-    #events-table-wrap, #anomaly-table-wrap, #reid-table-wrap {
+    #events-table-wrap, #anomaly-table-wrap, #reid-table-wrap,
+    #boost-table-wrap {
         max-height: 420px; overflow-y: auto; border-radius: 10px;
     }
     /* Keep the sticky-ish header when scrolling long tables. */
     #events-table-wrap table.reid thead th,
     #anomaly-table-wrap table.reid thead th,
-    #reid-table-wrap table.reid thead th {
+    #reid-table-wrap table.reid thead th,
+    #boost-table-wrap table.reid thead th {
         position: sticky; top: 0; background: #171a21; z-index: 1;
     }
+    /* Learning-proof table cells: colour the direction and delta so the
+       user can scan a full column of stricter/looser at a glance. */
+    #boost-table-wrap td.stricter { color: #ef4444; font-weight: 600; }
+    #boost-table-wrap td.looser   { color: #36d399; font-weight: 600; }
+    #boost-table-wrap td.unchanged { color: #6f7480; }
+    #boost-table-wrap td.delta-num { font-variant-numeric: tabular-nums; }
 
     /* Anomaly events table: color the direction cell. */
     table.reid td.spike { color: #ef4444; font-weight: 600; }
@@ -154,6 +162,36 @@
                border-radius: 999px; font-size: 11px; font-weight: 500;
                background: rgba(139,144,154,0.15); color: #8b909a;
                vertical-align: middle; }
+
+    /* Entity accordion in the Operational events table: click the ▸ next
+       to a row's time to see every stored sighting of the same entity
+       side-by-side, so "back after 29 min" becomes a claim the user can
+       actually check with their eyes. */
+    .row-toggle { display: inline-block; cursor: pointer;
+                  padding: 0 4px; color: #4f8cff; user-select: none; }
+    .row-toggle:hover { color: #e7e9ee; }
+    .ev-accordion td { background: #0c0e13; padding: 10px 14px;
+                       border-bottom: 1px solid #232733; }
+    .ev-strip .ev-note { color: #8b909a; font-size: 12px; margin-bottom: 8px; }
+    .ev-strip .ev-note b { color: #e7e9ee; }
+    .ev-cards { display: flex; gap: 10px; flex-wrap: wrap; }
+    .ev-card { background: #0f1115; border: 1px solid #232733;
+               border-radius: 8px; padding: 6px; width: 160px;
+               display: flex; flex-direction: column; gap: 4px; }
+    .ev-card.current { border-color: #4f8cff; box-shadow: 0 0 0 1px rgba(79,140,255,0.35); }
+    .ev-badge { font-size: 10px; color: #8b909a; text-transform: uppercase;
+                letter-spacing: 0.04em; }
+    .ev-card.current .ev-badge { color: #4f8cff; }
+    .ev-card img { display: block; width: 100%; height: 90px;
+                   object-fit: contain; background: #05070a;
+                   border-radius: 4px; border: 1px solid #232733; }
+    .ev-nosnap { height: 90px; display: flex; align-items: center;
+                 justify-content: center; color: #6f7480; font-size: 11px;
+                 border-radius: 4px; background: #05070a;
+                 border: 1px dashed #2c3140; }
+    .ev-ts { font-size: 11px; color: #e7e9ee; }
+    .ev-sim { font-size: 10px; color: #f0a35e; }
+    .ev-empty { color: #8b909a; font-size: 12px; padding: 6px 0; }
 
     /* Search panel: a persistent query bar that stays visible across searches
        instead of the old drop-only flow that locked users into re-uploading
@@ -544,6 +582,16 @@
       <div id="events-table-wrap"></div>
     </div>
 
+    <!-- Learning proof: for every (camera, class) the user has ever verdicted,
+         show the baseline confidence, the direction it moved, and the current
+         value the collector is using right now. Section hides itself when the
+         review store is empty so a fresh install has zero visual noise. -->
+    <div class="anomaly-wrap" id="boost-section" hidden>
+      <h2>Learning proof - how your reviews changed the model
+        <span class="est-tag">per-camera, per-class confidence</span></h2>
+      <div id="boost-table-wrap"></div>
+    </div>
+
     <!-- Frame-based review UI. Canvas shows the whole frame with every
          detection overlaid; user clicks each box to verdict it, and can
          draw NEW boxes for objects the model missed (the FN signal that
@@ -581,6 +629,8 @@
           <div class="frame-controls">
             <button id="mode-verdict" class="mode-btn on">verdict mode</button>
             <button id="mode-add" class="mode-btn">+ add missing</button>
+            <button id="mode-block" class="mode-btn"
+                    title="drag a box on the canvas to permanently blacklist this area for the class picked below - useful when the model keeps mis-firing on a static feature like a building corner or lamppost">+ block area</button>
             <select id="add-cls">
               <option value="person">person</option>
               <option value="car">car</option>
@@ -631,9 +681,9 @@
   <!-- firebase-config.js is gitignored per-clone; see docs/firebase_setup.md -->
   <!-- ?v=N is a cache-buster: bump it whenever any of the JS files changes,
        so the browser doesn't serve a stale ES-module from disk cache. -->
-  <script type="module" src="./firebase-config.js?v=30"></script>
-  <script type="module" src="./cameras.js?v=30"></script>
-  <script type="module" src="./app.js?v=30"></script>
+  <script type="module" src="./firebase-config.js?v=31"></script>
+  <script type="module" src="./cameras.js?v=31"></script>
+  <script type="module" src="./app.js?v=31"></script>
 
   <!-- Search UI. INLINE and NON-MODULE on purpose: it wires POST /api/search
        on this same server, has no Firebase dependency, and must keep working
@@ -775,12 +825,15 @@
         if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
         render(data);
         const mode = data.mode || (hasImage ? "image" : "browse");
-        statusEl.textContent =
+        const fb = data.fallback
+            ? ` · <span style="color:#f0a35e">auto-loose fallback</span>`
+            : "";
+        statusEl.innerHTML =
           `done · ${data.snapshot_matches.length} snapshot` +
           (mode === "image"
               ? ` + ${data.registry_matches.length} registry matches`
               : " results") +
-          ` · ${mode} mode · ${data.index_size} crops indexed`;
+          ` · ${mode} mode · ${data.index_size} crops indexed` + fb;
       } catch (err) {
         statusEl.className = "err";
         statusEl.textContent = `search failed: ${err.message}`;
@@ -928,7 +981,7 @@
     let img = null;
     let boxVerdicts = {};            // box_id -> "correct" | "wrong"
     let missedBoxes = [];            // {cls, box:[x1,y1,x2,y2]}
-    let mode = "verdict";            // "verdict" | "add"
+    let mode = "verdict";            // "verdict" | "add" | "block"
     let drag = null;                 // {x0,y0,x1,y1} while dragging in add-mode
     // scale factor from image-space to canvas-space
     let scale = 1;
@@ -939,17 +992,21 @@
       train: "#c464ff",
     };
 
+    const modeBlockBtn = $("mode-block");
     function setMode(m) {
       mode = m;
       modeVerdictBtn.classList.toggle("on", m === "verdict");
       modeAddBtn.classList.toggle("on", m === "add");
-      hintEl.textContent = m === "verdict"
-          ? "click a box: grey → correct → wrong → grey"
-          : "drag on the canvas to draw a box around the missed object";
+      if (modeBlockBtn) modeBlockBtn.classList.toggle("on", m === "block");
+      hintEl.textContent =
+          m === "verdict" ? "click a box: grey → correct → wrong → grey"
+        : m === "add"     ? "drag on the canvas to draw a box around the missed object"
+        :                   "drag a box over a spot where the model keeps mis-firing this class - it becomes a permanent blacklist polygon";
       canvas.style.cursor = m === "verdict" ? "pointer" : "crosshair";
     }
     modeVerdictBtn.addEventListener("click", () => setMode("verdict"));
     modeAddBtn.addEventListener("click", () => setMode("add"));
+    if (modeBlockBtn) modeBlockBtn.addEventListener("click", () => setMode("block"));
 
     function verdictColor(v) {
       return v === "correct" ? "#36d399" : v === "wrong" ? "#ef4444" : "#8b909a";
@@ -1072,7 +1129,7 @@
     });
 
     canvas.addEventListener("mousedown", (e) => {
-      if (mode !== "add" || !current) return;
+      if ((mode !== "add" && mode !== "block") || !current) return;
       const { x, y } = eventCoords(e);
       drag = { x0: x, y0: y, x1: x, y1: y };
     });
@@ -1082,7 +1139,7 @@
       drag.x1 = x; drag.y1 = y;
       draw();
     });
-    canvas.addEventListener("mouseup", (e) => {
+    canvas.addEventListener("mouseup", async (e) => {
       if (!drag) return;
       const { x, y } = eventCoords(e);
       drag.x1 = x; drag.y1 = y;
@@ -1093,7 +1150,36 @@
         const y1 = Math.min(drag.y0, drag.y1) / scale;
         const x2 = Math.max(drag.x0, drag.x1) / scale;
         const y2 = Math.max(drag.y0, drag.y1) / scale;
-        missedBoxes.push({ cls: addClsSel.value, box: [x1, y1, x2, y2] });
+        if (mode === "add") {
+          missedBoxes.push({ cls: addClsSel.value, box: [x1, y1, x2, y2] });
+        } else if (mode === "block") {
+          // Normalize corners to [0,1] and POST as a polygon.
+          const nw = current.frame_w || 1, nh = current.frame_h || 1;
+          const nx1 = Math.max(0, Math.min(1, x1 / nw));
+          const ny1 = Math.max(0, Math.min(1, y1 / nh));
+          const nx2 = Math.max(0, Math.min(1, x2 / nw));
+          const ny2 = Math.max(0, Math.min(1, y2 / nh));
+          const polygon = [[nx1, ny1], [nx2, ny1], [nx2, ny2], [nx1, ny2]];
+          try {
+            const r = await fetch("/api/blacklist-add", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                cam_id: current.cam_id, cls: addClsSel.value, polygon,
+                reason: "user-marked from Review canvas",
+              }),
+            });
+            const data = await r.json();
+            if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+            statusEl.className = "review-status";
+            statusEl.textContent = data.created
+                ? `blocked: ${addClsSel.value} in this area of ${current.cam_id} will be ignored from now on`
+                : `already blocked: ${addClsSel.value} in this area of ${current.cam_id}`;
+          } catch (err) {
+            statusEl.className = "review-status err";
+            statusEl.textContent = `block failed: ${err.message}`;
+          }
+        }
       }
       drag = null;
       draw();
@@ -1278,6 +1364,63 @@
     setInterval(refreshDisk, 60000);
     // Redraw on resize so the canvas keeps its aspect
     window.addEventListener("resize", () => { if (img && current) draw(); });
+  })();
+  </script>
+
+  <!-- Learning proof - per-camera per-class before/after confidence, so a
+       verdict the user just cast has a visible receipt. Refreshes every
+       10 s along with the header scoreboard so the two views stay in step. -->
+  <script>
+  (function initBoostStatus() {
+    const section = document.getElementById("boost-section");
+    const wrap    = document.getElementById("boost-table-wrap");
+    if (!section || !wrap) return;
+    const esc = (s) => String(s ?? "").replace(/[&<>"]/g,
+        (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));
+    const arrow = (d) =>
+        d === "stricter" ? "▲ stricter" :
+        d === "looser"   ? "▼ looser"   : "—";
+    const fmt = (n) => Number(n).toFixed(3);
+    const signed = (n) => (n > 0 ? "+" : "") + fmt(n);
+    async function refresh() {
+      let data;
+      try {
+        const r = await fetch("/api/boost-status", { cache: "no-store" });
+        if (!r.ok) return;
+        data = await r.json();
+      } catch { return; }
+      const rows = data.rows || [];
+      section.hidden = rows.length === 0;
+      if (!rows.length) return;
+      const body = rows.map((r) => `
+        <tr>
+          <td>${esc(r.cam_id)}</td>
+          <td>${esc(r.cls)}</td>
+          <td class="delta-num">${fmt(r.baseline)}</td>
+          <td class="delta-num">${fmt(r.current)}</td>
+          <td class="${r.direction} delta-num">${signed(r.delta)}</td>
+          <td class="${r.direction}">${arrow(r.direction)}</td>
+          <td class="delta-num">${r.approved}</td>
+          <td class="delta-num">${r.rejected}</td>
+        </tr>`).join("");
+      wrap.innerHTML = `<table class="reid">
+        <thead><tr>
+          <th>Camera</th><th>Class</th><th>Baseline</th><th>Current</th>
+          <th>Δ</th><th>Direction</th>
+          <th>✔ correct</th><th>✗ wrong</th>
+        </tr></thead>
+        <tbody>${body}</tbody></table>
+        <div class="footnote" style="margin-top:8px">
+          Every "correct" verdict drops the class's confidence bar by
+          ${fmt(data.step || 0.015)}, letting similar-looking objects pass
+          next round. Every "wrong" raises it, so lookalikes stop firing.
+          Values clamped to [${fmt(data.min_conf || 0.20)},
+          ${fmt(data.max_conf || 0.60)}]. Applied to the live collector
+          within ~7 minutes of each submit.
+        </div>`;
+    }
+    refresh();
+    setInterval(refresh, 10000);
   })();
   </script>
 

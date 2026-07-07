@@ -835,16 +835,21 @@ const EVENT_LABELS = {
   returning: { icon: "↩", label: "returning visitor" },
 };
 
+// Keep the full events list in module scope so the accordion can look up
+// prior sightings of the same entity without re-querying Firestore.
+let _ALL_EVENTS = [];
+
 function renderEventsTable(events) {
   const wrap = document.getElementById("events-table-wrap");
   if (!wrap) return;
+  _ALL_EVENTS = events;
   const slotLabel = (id) => {
     const slot = GRID_SLOTS.find((s) => s.slot_id === id);
     return slot ? slot.display_area : id;
   };
   toggleSection("events-section", events.length > 0);
   if (!events.length) return;
-  const rows = events.slice(0, 60).map((e) => {
+  const rows = events.slice(0, 60).map((e, i) => {
     const meta = EVENT_LABELS[e.kind] || { icon: "•", label: e.kind };
     const detail = e.kind === "loiter"
         ? `${e.cls ?? "?"} stationary ${Math.round((e.duration_sec ?? 0) / 60)} min`
@@ -852,19 +857,85 @@ function renderEventsTable(events) {
         ? `${e.cls ?? "?"} #${e.entity_id ?? "?"} back after ${Math.round((e.gap_seconds ?? 0) / 60)} min`
         : "";
     const snap = e.snapshot_url || e.fullframe_url;
-    return `<tr>
-      <td>${fmtTime(e.ts)}</td>
+    // Every row with an entity_id gets an expand-toggle - clicking it opens
+    // an inline accordion that shows every past sighting of the same entity
+    // at the same slot, so the user can eyeball whether the "back after N min"
+    // claim really is the same object rather than a lookalike.
+    const canExpand = e.entity_id != null;
+    const toggle = canExpand
+        ? `<span class="row-toggle" data-idx="${i}" title="show all sightings of this entity">▸</span>`
+        : "";
+    return `<tr class="ev-row">
+      <td>${toggle} ${fmtTime(e.ts)}</td>
       <td>${escapeHtml(slotLabel(e.slot))}</td>
       <td>${meta.icon} ${escapeHtml(meta.label)}</td>
       <td>${escapeHtml(detail)}</td>
       <td>${snap ? `<a href="${snap}" target="_blank" rel="noopener">view</a>` : "-"}</td>
-    </tr>`;
+    </tr>
+    <tr class="ev-accordion" data-idx="${i}" hidden><td colspan="5"></td></tr>`;
   }).join("");
   wrap.innerHTML = `<table class="reid">
     <thead><tr>
       <th>Time</th><th>Area</th><th>Event</th><th>Detail</th><th>Snapshot</th>
     </tr></thead>
     <tbody>${rows}</tbody></table>`;
+  // Wire up expand clicks
+  wrap.querySelectorAll(".row-toggle").forEach((t) => {
+    t.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      toggleEventAccordion(parseInt(t.dataset.idx, 10), t);
+    });
+  });
+}
+
+function toggleEventAccordion(idx, toggleEl) {
+  const wrap = document.getElementById("events-table-wrap");
+  const row = wrap.querySelector(`.ev-accordion[data-idx="${idx}"]`);
+  if (!row) return;
+  if (!row.hidden) {
+    row.hidden = true;
+    toggleEl.textContent = "▸";
+    return;
+  }
+  const target = _ALL_EVENTS[idx];
+  if (!target || target.entity_id == null) return;
+  // Same-slot, same-entity_id sightings, oldest first so the story reads
+  // left-to-right in the accordion strip.
+  const related = _ALL_EVENTS
+      .filter((e) => e.entity_id === target.entity_id && e.slot === target.slot)
+      .sort((a, b) => (a.ts || "").localeCompare(b.ts || ""));
+  const cell = row.querySelector("td");
+  if (related.length <= 1) {
+    cell.innerHTML = `<div class="ev-empty">
+      Only this sighting is in the last 24h window.
+      Earlier appearances of #${target.entity_id} rolled off with the TTL.
+    </div>`;
+  } else {
+    const cards = related.map((e, k) => {
+      const url = e.snapshot_url || e.fullframe_url;
+      const badge = e === target ? "this event" : `#${k + 1}`;
+      const sim = e.similarity != null
+          ? `<div class="ev-sim">similarity ${Math.round(e.similarity * 100)}%</div>`
+          : "";
+      return `<div class="ev-card ${e === target ? "current" : ""}">
+        <div class="ev-badge">${badge}</div>
+        ${url ? `<a href="${url}" target="_blank" rel="noopener">
+                  <img src="${url}" loading="lazy" alt="sighting ${k+1}"/>
+                </a>` : `<div class="ev-nosnap">no snapshot saved</div>`}
+        <div class="ev-ts">${fmtTime(e.ts)}</div>
+        ${sim}
+      </div>`;
+    }).join("");
+    cell.innerHTML = `<div class="ev-strip">
+      <div class="ev-note">All ${related.length} sightings of
+        <b>${target.cls ?? "?"} #${target.entity_id}</b>
+        at ${escapeHtml((GRID_SLOTS.find(s=>s.slot_id===target.slot)||{}).display_area || target.slot)}
+        in the last 24h - compare side by side.</div>
+      <div class="ev-cards">${cards}</div>
+    </div>`;
+  }
+  row.hidden = false;
+  toggleEl.textContent = "▾";
 }
 
 // ---------- 7. Re-ID summary table ------------------------------------------

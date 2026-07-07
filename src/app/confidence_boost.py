@@ -168,3 +168,63 @@ def summary(path: str | Path | None = None) -> dict:
         "adjusted_cls": adjusted,
         "updated_at":   store.get("updated_at") or "",
     }
+
+
+def details(path: str | Path | None = None,
+            baseline: dict[str, float] | None = None) -> dict:
+    """Per-(cam, cls) baseline vs. current confidence with review counts.
+
+    Powers the dashboard's "Learning proof" panel so the user can watch
+    each verdict shift the threshold. Reports:
+
+      * baseline - the shipped DEFAULT_PER_CLASS_CONF value for the class,
+        so the delta has a reference point the user can read off directly;
+      * current - baseline + delta, clamped to [MIN_CONF, MAX_CONF];
+      * direction - "stricter" when delta > 0 (fewer false positives),
+        "looser" when delta < 0 (fewer missed real objects), "unchanged"
+        when the class has never been reviewed on this camera;
+      * approved / rejected counts + last-updated timestamp per row.
+
+    Rows are emitted only for (cam, cls) pairs the user has actually
+    touched - not every camera x every class - so a fresh install with no
+    reviews returns an empty ``rows`` list rather than 40 zero-delta rows.
+    """
+    p = Path(path if path is not None else DEFAULT_STORE_PATH)
+    store = _load(p)
+    cams = store.get("cams") or {}
+    if baseline is None:
+        try:
+            from app.detect_core import DEFAULT_PER_CLASS_CONF
+            baseline = dict(DEFAULT_PER_CLASS_CONF)
+        except Exception:
+            baseline = {}
+    rows = []
+    for cam_id, cam_map in sorted(cams.items()):
+        for cls, rec in sorted(cam_map.items()):
+            delta = float(rec.get("delta") or 0.0)
+            base  = float(baseline.get(cls, 0.35))
+            current = max(MIN_CONF, min(MAX_CONF, base + delta))
+            if delta > 1e-6:
+                direction = "stricter"
+            elif delta < -1e-6:
+                direction = "looser"
+            else:
+                direction = "unchanged"
+            rows.append({
+                "cam_id":     cam_id,
+                "cls":        cls,
+                "baseline":   round(base, 3),
+                "delta":      round(delta, 3),
+                "current":    round(current, 3),
+                "direction":  direction,
+                "approved":   int(rec.get("approved") or 0),
+                "rejected":   int(rec.get("rejected") or 0),
+                "updated_at": rec.get("updated_at") or "",
+            })
+    return {
+        "rows":       rows,
+        "updated_at": store.get("updated_at") or "",
+        "step":       STEP,
+        "min_conf":   MIN_CONF,
+        "max_conf":   MAX_CONF,
+    }
