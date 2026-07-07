@@ -74,7 +74,14 @@ def _is_from_anomaly(rel: str) -> bool:
 
 # Results below this cosine are noise for every embedder we ship; the
 # per-embedder "strong" threshold sits far above it.
-MIN_SIMILARITY_FLOOR = 0.30
+#
+# Raised from 0.30 to 0.55 as part of the search-hardening pass. At 0.30
+# the HSV histogram embedder returned mid-tier color-similar crops that
+# were often not semantically the same object (a red car vs a red banner).
+# At 0.55 only crops with meaningfully overlapping content clear the bar;
+# the "similar" tier stays useful, the "match" tier stays honest.
+# Callers who want the old floor can still pass min_sim=0.30 explicitly.
+MIN_SIMILARITY_FLOOR = 0.55
 
 
 def _iso(mtime: float) -> str:

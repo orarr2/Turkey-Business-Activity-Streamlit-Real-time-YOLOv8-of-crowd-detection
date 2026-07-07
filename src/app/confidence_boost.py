@@ -54,11 +54,12 @@ from pathlib import Path
 _SRC_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_STORE_PATH = _SRC_ROOT / "data" / "confidence_boost.json"
 
-# Balanced learning rate: five approvals move the effective conf from 0.35
-# to 0.20 (the floor); five rejections move it to 0.50. Not fast enough to
-# oscillate on a single mis-click, fast enough that a focused review sitting
-# shifts the model within 20 minutes.
-STEP = 0.03
+# Balanced learning rate for the new full-frame review UX, where each
+# frame yields 5-10 verdicts (not one). At delta=0.015 a typical five-box
+# frame moves the effective conf by 0.075 - still enough to nudge the model
+# after every focused review pass, but no longer flooded by a burst of
+# verdicts on a single scene.
+STEP = 0.015
 MIN_CONF = 0.20
 MAX_CONF = 0.60
 

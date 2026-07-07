@@ -213,6 +213,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/live-samples-stats":
             self._live_samples_stats()
             return
+        if path == "/api/model-metrics":
+            self._model_metrics()
+            return
         super().do_GET()
 
     def do_POST(self) -> None:
@@ -280,7 +283,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 return default
 
         top_n   = max(1, min(200, _one("top", int, 12)))
-        min_sim = _one("min_sim", float, 0.30)
+        # Default floor lifted from 0.30 to 0.55 to cut color-similar noise
+        # from the results; see visual_search.MIN_SIMILARITY_FLOOR.
+        min_sim = _one("min_sim", float, 0.55)
         classes = {c.strip() for c in (q.get("classes", [""])[0]).split(",")
                    if c.strip()} or None
         time_from = _parse_time(q.get("from", [""])[0])
@@ -431,6 +436,23 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         try:
             from app.live_samples import clear_all as ls_clear
             self._send_json(200, ls_clear(SNAPSHOTS_DIR))
+        except Exception as e:
+            self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
+
+    def _model_metrics(self) -> None:
+        """Scoreboard endpoint driving the header line. Cheap - it just
+        walks the in-memory review store and does arithmetic. Safe to poll
+        every 10s from the browser."""
+        try:
+            from app.model_metrics import compute, header_line
+            metrics = compute(_review_store())
+            try:
+                from app.confidence_boost import summary as _cb_summary
+                boost = _cb_summary()
+            except Exception:
+                boost = None
+            metrics["header_line"] = header_line(metrics, boost)
+            self._send_json(200, metrics)
         except Exception as e:
             self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
 

@@ -20,6 +20,13 @@
              display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
     header h1 { font-size: 20px; margin: 0; }
     .sub { color: #8b909a; font-size: 13px; }
+    /* Model-quality scoreboard: sits directly under the descriptive sub-line
+       and stays visually secondary (same muted grey) but numbers pop in
+       white so the eye lands on the accuracy figure immediately. Updates
+       ~every 10 s via /api/model-metrics. */
+    .model-metrics-line { margin-top: 3px; }
+    .model-metrics-line b { color: #e7e9ee; font-weight: 600; }
+    .model-metrics-line.stale { color: #6f7480; }
     #status .live { color: #36d399; }
     #status .stale { color: #f0a35e; }
     #status .down { color: #ef4444; }
@@ -358,6 +365,12 @@
       <h1>Turkey Business Activity - Live Footfall</h1>
       <div class="sub">4 cameras · people + vehicle counts (burst-median YOLO) ·
         anomalies vs each location's hour-of-week norm · streamed from Firestore</div>
+      <!-- Model quality scoreboard - computed on the server from the review
+           store, refreshed every 10 s so an active review sitting shifts
+           the numbers in near-real-time. -->
+      <div class="sub model-metrics-line" id="model-metrics-line">
+        Model: loading…
+      </div>
     </div>
     <div id="status" class="sub">connecting…</div>
   </header>
@@ -1035,6 +1048,33 @@
     // Disk usage refresh runs every 60s while the tab is open - light
     // touch on the server, gives the user a live sense of accumulation.
     setInterval(refreshDisk, 60000);
+  })();
+  </script>
+
+  <!-- Header scoreboard - Model quality metrics computed from the review
+       store. Refreshes every 10 s so a review sitting shows the numbers
+       shift in near-real-time. -->
+  <script>
+  (function initModelMetrics() {
+    const el = document.getElementById("model-metrics-line");
+    if (!el) return;
+    // Bold the numbers we care about so they pop out of the muted grey.
+    const highlight = (s) => String(s || "").replace(
+        /(\d+(?:\.\d+)?)\s*(%|reviews|classes)/g,
+        "<b>$1</b> $2");
+    async function refresh() {
+      try {
+        const r = await fetch("/api/model-metrics", { cache: "no-store" });
+        if (!r.ok) { el.classList.add("stale"); return; }
+        const data = await r.json();
+        el.classList.remove("stale");
+        el.innerHTML = highlight(data.header_line || "Model: -");
+      } catch (_) {
+        el.classList.add("stale");
+      }
+    }
+    refresh();
+    setInterval(refresh, 10000);
   })();
   </script>
 </body>
