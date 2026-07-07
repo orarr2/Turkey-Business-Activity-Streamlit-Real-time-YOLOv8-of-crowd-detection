@@ -9,21 +9,31 @@ WorkingDirectory=__INSTALL_DIR__/src
 Environment=PYTHONUNBUFFERED=1
 Environment=FIREBASE_CREDENTIALS=__SA_PATH__
 Environment=FIREBASE_STORAGE_BUCKET=__STORAGE_BUCKET__
-ExecStart=__INSTALL_DIR__/src/.venv/bin/python -m app.collector --interval 40
+ExecStart=__INSTALL_DIR__/src/.venv/bin/python -m app.collector --interval 40 --imgsz 640
 # --interval 40s means 4 slots x 3 writes/round x 2160 rounds/day = ~25,920
 # Firestore writes/day - just above the 20K/day free tier, ~$0.85/month on Blaze.
 # At interval=20 it would be ~52K/day (~$1.70/month). Trade-off: half the writes,
 # half the temporal resolution. The dashboard's per-tile mini chart still fills
 # up cleanly and the anomaly z-score window (30 samples) covers ~20 min now.
+#
+# --imgsz 640 is a memory trade-off, not a personal preference:
+#   * app.collector's default weights are now yolov8s (~11.2M params),
+#     which recovers the small/static/edge objects yolov8n was losing;
+#   * yolov8s at imgsz 960 pushes RSS past ~1 GB - it blows past both the
+#     MemoryMax below AND the e2-micro's own 1 GB of physical memory;
+#   * yolov8s at imgsz 640 stays near ~700-800 MB peak, which fits both
+#     this unit's caps and the Always Free host.
+# On a host with more RAM (e2-small = 2 GB and up), drop `--imgsz 640` to
+# recover the last ~10-15% of distant-object recall.
 Restart=always
 RestartSec=15
-# Memory sizing for the e2-micro (1 GB, Always Free) this project runs on:
-# measured peak ~635 MB RSS at the default imgsz 960 with a 3-frame burst,
-# so these caps hold with headroom while still protecting the host. If the
-# journal ever shows reclaim throttling or oom-kill restarts (rounds taking
-# minutes, dashboard numbers frozen between updates), add --imgsz 640 to
-# ExecStart above - roughly half the inference memory, at the cost of
-# small/distant-object recall.
+# Memory sizing for the e2-micro (1 GB, Always Free) this project runs on.
+# Caps unchanged from the yolov8n era because the ExecStart flag above pulls
+# yolov8s's peak into the same envelope. If the journal ever shows reclaim
+# throttling or oom-kill restarts (rounds taking minutes, dashboard numbers
+# frozen between updates), first check that --imgsz 640 is actually still on
+# the ExecStart line; if it is and the caps still fail, either drop back to
+# `--weights yolov8n.pt` or move to e2-small.
 MemoryHigh=700M
 MemoryMax=850M
 StandardOutput=journal

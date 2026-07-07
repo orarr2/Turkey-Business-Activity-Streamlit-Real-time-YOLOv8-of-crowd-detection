@@ -23,10 +23,11 @@ not be trusted as "now".
 ## What the model sees
 
 Live frames from the four grid cameras, annotated by the exact pipeline the
-collector runs (`yolov8n`, `imgsz 960`, `conf 0.30`): green boxes are people,
-orange are vehicles, each with its confidence. The dashboard shows this view
-live under every tile ("Model view"), refreshed with every sample — including
-night scenes like these, where detection is hardest.
+collector runs (`yolov8s`, `imgsz 640` on the shipped systemd unit or `960`
+on hosts with more RAM, `conf 0.30`): green boxes are people, orange are
+vehicles, magenta is a train, each with its confidence. The dashboard shows
+this view live under every tile ("Model view"), refreshed with every sample —
+including night scenes like these, where detection is hardest.
 
 | Konya - Hükümet Meydanı | Konya - Otogar Kavşağı |
 |---|---|
@@ -106,9 +107,15 @@ see [`docs/firebase_setup.md`](src/docs/firebase_setup.md).
 
 ## What the model predicts
 
-**Detector - YOLOv8n (Ultralytics)** loaded once per process with
-[`load_model("yolov8n.pt")`](src/app/detect_core.py:30). Nano variant for CPU-friendly
-inference; swap to `yolov8s.pt` / `yolov8m.pt` for better small-object recall.
+**Detector - YOLOv8s (Ultralytics)** loaded once per process with
+[`load_model("yolov8s.pt")`](src/app/detect_core.py). Small variant is the
+shipped default: nano's recall on wide overhead street shots was too low
+(distant/static vehicles silently dropped, upright road furniture mis-fired
+as `person`, edge-cropped cars mis-classified as `bicycle`). Small clears
+those three failure modes; CPU cost is ~3x nano and the shipped systemd unit
+pairs it with `--imgsz 640` to fit the e2-micro's 1 GB budget. Swap to
+`yolov8n.pt` (fastest) or `yolov8m.pt` (highest recall, needs more RAM) via
+`--weights`.
 
 Each call returns boxes + class ids + confidences for the **COCO classes the project
 cares about** ([`CLASSES_OF_INTEREST`](src/app/detect_core.py:18)):
@@ -120,14 +127,16 @@ cares about** ([`CLASSES_OF_INTEREST`](src/app/detect_core.py:18)):
 | 2       | `car`       | vehicle bucket                             |
 | 3       | `motorcycle`| vehicle bucket                             |
 | 5       | `bus`       | vehicle bucket                             |
+| 6       | `train`     | rail traffic (separate bucket, not summed into vehicles) |
 | 7       | `truck`     | vehicle bucket                             |
 
 `detect_with_boxes(frame, conf, imgsz)` returns:
 
 ```python
 counts = {
-    "person": 23, "car": 4, "bus": 0, "truck": 1, "bicycle": 0, "motorcycle": 2,
-    "vehicles": 7,   # sum of all non-person classes above
+    "person": 23, "car": 4, "bus": 0, "truck": 1,
+    "bicycle": 0, "motorcycle": 2, "train": 0,
+    "vehicles": 7,   # sum of the ROAD vehicle classes (train is separate)
 }
 boxes = [{"x1":…, "y1":…, "x2":…, "y2":…, "cls":"person", "conf":0.71}, …]
 ```
@@ -141,12 +150,34 @@ Re-ID and snapshots use the frame whose count matches the median, so images and
 numbers stay consistent. The raw per-frame series is kept on each doc (`burst`)
 for transparency.
 
-**Input size + confidence.** The collector runs at `--imgsz 960` (vs YOLO's 640
-default): these wide street shots shrink a distant pedestrian or car to a few
-pixels, and at 640 the model undercounts badly. Default confidence is
-`--conf 0.30`, and any camera can carry its own calibrated `"conf"` override in
-[`cameras.py`](src/app/cameras.py) - notebook section 10 measures MAE/bias per
-camera and per input size against your own manual counts and tells you what to set.
+**Input size + confidence.** The `detect_core.DEFAULT_IMGSZ` is `960` (the
+notebook + local runs use it) because these wide street shots shrink a
+distant pedestrian or car to a few pixels, and at 640 the model undercounts.
+The shipped systemd unit for the Always Free e2-micro (1 GB) pins
+`--imgsz 640` instead - not for accuracy but for RSS: yolov8s at 960 would
+overshoot the host's memory. Drop `--imgsz 640` on any host with more RAM
+(e2-small = 2 GB and up) to recover the last ~10-15% of distant-object
+recall. Default confidence is `--conf 0.30`, with per-class overrides in
+[`DEFAULT_PER_CLASS_CONF`](src/app/detect_core.py) - `person` is 0.35 to
+stop the low-confidence "traffic sign labeled as person" mis-fires. Any
+camera can carry its own calibrated `"conf"` override in
+[`cameras.py`](src/app/cameras.py); notebook section 10 measures MAE/bias
+per camera and per input size against your own manual counts and tells you
+what to set.
+
+**Static false-positive gates.** Two shape/aspect gates + a per-camera
+polygon opt-out shave off the classes of mis-detection that a confidence
+threshold alone can't kill:
+
+- `DEFAULT_PERSON_MIN_ASPECT = 0.90` drops person boxes shorter than they
+  are wide (strollers, banners, low road furniture).
+- `DEFAULT_PERSON_MAX_ASPECT = 3.5` drops person boxes far taller than they
+  are wide (lamp posts, thin bollards, some traffic signs) - the case that
+  a lower-bound-only shape check missed.
+- A camera dict can name per-class exclude polygons: `cam["roi_exclude_class"]
+  = {"person": [poly, ...]}` says "in this zone, never accept a `person`",
+  without hiding cars/trains that legitimately cross the same pixels.
+  Foot-point-inside test, same as the existing `roi` / `roi_exclude`.
 
 Per sampling round the collector writes:
 
@@ -236,14 +267,17 @@ hidden logic beyond this section. Values are the shipped defaults - the CLI
 flags / `cameras.py` keys named in each table override them.
 
 **Stage 0 - what a "sample" is.** Every round (`--interval`, 40 s shipped) and
-per camera: resolve the stream → grab a burst of 3 frames ~1 s apart → YOLOv8
-at `imgsz 960`, confidence ≥ 0.30 (`conf` per camera), COCO classes
-person/bicycle/car/motorcycle/bus/truck → optional ROI filter (below) → the
-reported count per class is the **median across the burst** (one bad frame
-can't move the number) → `vehicles` = sum of the non-person classes. The
-representative frame (person count closest to the median) feeds re-ID and
-snapshots so images always match the numbers. Every sample also gets an
-`is_night` tag (mean gray < 60).
+per camera: resolve the stream → grab a burst of 3 frames ~1 s apart → YOLOv8s
+at `imgsz 640` (systemd unit) or `960` (notebook / larger hosts), confidence
+≥ 0.30 with `person`/`car`/`bus`/`train`/`truck` re-tightened to 0.35 and
+the person-shape gate active (see aspect gates above), COCO classes
+person/bicycle/car/motorcycle/bus/train/truck → optional ROI + per-class
+exclude filters (below) → the reported count per class is the **median
+across the burst** (one bad frame can't move the number) → `vehicles` = sum
+of the road-vehicle classes (`train` stays separate). The representative
+frame (person count closest to the median) feeds re-ID and snapshots so
+images always match the numbers. Every sample also gets an `is_night` tag
+(mean gray < 60).
 
 **Stage 0.5 - ROI filter** (only when the camera defines `"roi"` /
 `"roi_exclude"` polygons): a detection exists only if its **foot point**
@@ -443,19 +477,28 @@ it just talks to Firestore from the browser tab.
 
 ---
 
-## Search by image (experimental, not wired into the pipeline yet)
+## Search (image similarity + class/time browse)
 
-Upload a photo of WHAT you are looking for - a person, a car - and the system
-ranks everything it has seen by visual similarity to it. The pieces live next
-to (not inside) the collector pipeline, so nothing changes for the dashboard
+Ask the system what it has seen - by uploading a reference photo, by
+picking a class and time range, or both together. The pieces live next to
+(not inside) the collector pipeline, so nothing changes for the dashboard
 or the VM until you opt in:
 
-- **UI**: `http://localhost:8000/search.html` (served by the same `serve.py`).
-  Drop an image, get back (a) what YOLO detected in it, (b) the most similar
-  saved snapshot crops (returning visitors, loiter events), (c) the most
-  similar known entities in the re-ID registry with their sighting history.
-- **API**: `POST /api/visual-search` with the raw image bytes as the body
-  (`?top=12&min_sim=0.3&classes=person,car` optional). JSON out.
+- **UI**: the "Search" panel on the main dashboard (persistent, always
+  visible). Three inputs, all optional and freely combinable:
+  1. reference photo (drop zone) - similarity match by YOLO+embedder;
+  2. class chips (person / car / truck / bus / motorcycle / bicycle / train,
+     multi-select, "any" = pick nothing);
+  3. from/to datetime + count field, with 1h/24h/7d presets and a
+     Loose/Balanced/Strict strictness switch that hides the raw `min_sim`
+     behind a name a user actually understands.
+  The "New search" button clears the panel so you can run search after
+  search without re-uploading anything.
+- **API**: `POST /api/search` - image mode when the body is non-empty (rank
+  by cosine similarity), browse mode when the body is empty (list crops by
+  filter, ordered by time). Query params: `top`, `min_sim`, `classes`,
+  `from`, `to`, `order`. `POST /api/visual-search` is kept as a
+  backwards-compatible alias for the older image-only shape.
 - **CLI**: `python -m tools.search_by_image --query photo.jpg`. Before the
   collector has accumulated real snapshots you can seed a demo index from
   still images: `--seed-images "docs/images/*.jpg"`.
@@ -484,6 +527,32 @@ brightness, JPEG q70) retrieved their own object as top-1; uploading the full
 kulturpark frame matched 5/6 of its objects above the identity threshold
 (93.8-99.8%). `tests/test_visual_search.py` covers the index/cache/registry
 behaviors without needing YOLO.
+
+---
+
+## Review detections - human in the loop
+
+YOLOv8 is inference-only at runtime - it does not learn from the live stream,
+so there is no built-in feedback loop for the mistakes users care about
+("that lamp post has been counted as a person all week"). The Review panel
+on the dashboard is that feedback loop:
+
+- **UI**: the "Review detections" section on the dashboard picks one saved
+  crop the user has not reviewed yet, shows it next to the model's label,
+  and offers three verdicts: `correct`, `wrong label` (with a select for
+  the right class), `not an object`. An optional free-form note is stored
+  alongside. Submitting fetches the next crop, so a user can grind through
+  a batch quickly.
+- **API**: `GET /api/review-sample`, `POST /api/review-submit`,
+  `GET /api/review-stats`. Storage is a plain JSON file at
+  [`data/reviews.json`](src/data) - thread-safe, atomic rewrite per submit,
+  no new DB dependency.
+- **Downstream** ([`app/labels.py`](src/app/labels.py)):
+  `ReviewStore.rejects_for_cls("person")` returns the crop paths a user
+  flagged as `wrong_label` or `not_an_object` for that class - the input
+  to hand-crafting the per-camera `roi_exclude_class` polygons above, or
+  to exporting a COCO-format fine-tuning dataset once a few hundred
+  labels have accumulated.
 
 ---
 
