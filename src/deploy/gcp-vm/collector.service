@@ -9,6 +9,13 @@ WorkingDirectory=__INSTALL_DIR__/src
 Environment=PYTHONUNBUFFERED=1
 Environment=FIREBASE_CREDENTIALS=__SA_PATH__
 Environment=FIREBASE_STORAGE_BUCKET=__STORAGE_BUCKET__
+# OSNet re-identification embedder. When the ONNX file is present the
+# collector + dashboard-server use semantic identity matching (~5-10 ms
+# per crop on CPU); when it's absent, both fall back to the HSV histogram
+# transparently. Run `bash tools/setup_reid.sh` after `git pull` to fetch
+# the model - it's a one-shot ~5 MB download and safe to skip if you're
+# happy with the color-signature baseline.
+Environment=REID_MODEL=__INSTALL_DIR__/src/data/osnet_x0_25_msmt17.onnx
 ExecStart=__INSTALL_DIR__/src/.venv/bin/python -m app.collector --interval 40 --imgsz 640
 # --interval 40s means 4 slots x 3 writes/round x 2160 rounds/day = ~25,920
 # Firestore writes/day - just above the 20K/day free tier, ~$0.85/month on Blaze.

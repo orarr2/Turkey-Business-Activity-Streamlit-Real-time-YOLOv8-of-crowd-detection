@@ -554,6 +554,42 @@ on the dashboard is that feedback loop:
   to exporting a COCO-format fine-tuning dataset once a few hundred
   labels have accumulated.
 
+**Full-frame review UX (canvas)** - the shipped default. The panel
+loads one saved frame at a time and draws every detection as a
+class-colored rectangle over it. Click a box: grey → green
+(correct) → red (wrong) → grey. Switch to "add missing", pick a
+class, drag a rectangle around an object the model failed to see -
+that's the **FN signal** that finally makes recall computable.
+Verdicts land in `data/reviews.json::frame_reviews`, feed the same
+confidence-boost + auto-blacklist pipes as the crop-level flow.
+
+**Model-quality scoreboard** - the header carries a live one-liner
+computed from the review store:
+
+    Model: 87% accuracy · P(person) 82% · P(car) 91% · R 74% · F1 79%
+           · FP 13% · 312 reviews · tuned 5 classes
+
+The line refreshes every 10 s so a review sitting shifts the numbers
+in near-real-time. Recall and F1 appear once any frame review has
+landed an FN (missed-detection); until then only precision and
+accuracy are honest, and the line reflects that.
+
+**OSNet upgrade (optional)** - the shipped default appearance embedder
+is an HSV histogram. It's dependency-free but color-only and collapses
+across lighting shifts. To upgrade to a semantic identity embedder
+(OSNet, ~5 MB ONNX, ~5-10 ms per crop on CPU):
+
+    bash tools/setup_reid.sh
+
+The script tries a few public mirrors, falls back to printing
+"produce your own" instructions if the network is locked down. The
+systemd unit already sets `REID_MODEL=<install>/src/data/osnet_x0_25_msmt17.onnx`;
+when the file exists both the collector and the dashboard server pick
+it up on their next start (`reid_embed.make_embedder` degrades to the
+histogram transparently when the file is absent). At the same time
+this raises the search-similarity floor from 0.30 to 0.55 by default
+so mid-tier color-similar noise stops appearing in results.
+
 ---
 
 ## Notebook - `turkey_business_activity.ipynb`
