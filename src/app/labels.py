@@ -40,6 +40,10 @@ DEFAULT_REVIEWS_PATH = _SRC_ROOT / "data" / "reviews.json"
 # Verdict values the UI is allowed to POST. Anything else is rejected.
 VERDICTS = ("correct", "wrong_label", "not_an_object")
 
+# Frame-level box verdicts: same semantic space as the crop-level VERDICTS
+# but the wire values coming from the canvas UI are more compact.
+BOX_VERDICTS = ("correct", "wrong")
+
 
 @dataclass
 class Review:
@@ -63,18 +67,46 @@ class Review:
         return d
 
 
-class ReviewStore:
-    """Thread-safe on-disk store keyed by crop_path (relative to SNAPSHOTS_ROOT).
+@dataclass
+class FrameReview:
+    """Multi-verdict review of a full frame from the new canvas UX.
 
-    The JSON file is loaded once on construction and rewritten wholesale on
-    each submit. Fine for the expected write volume (interactive UI); if
-    labeling ever scales up, swap to sqlite without touching callers.
+    Recall becomes computable at this level: box_verdicts["3"] = "wrong"
+    is an FP, and missed_detections lists FN (boxes the user drew because
+    the model failed to see them).
+    """
+    frame_path:  str
+    cam_id:      str
+    box_verdicts: dict[str, str]  # {"<box_id>": "correct" | "wrong"}
+    missed_detections: list[dict]  # [{"cls": str, "box": [x1,y1,x2,y2]}]
+    note:        str | None
+    reviewed_at: str
+
+    def to_public(self) -> dict:
+        d = {"frame_path":         self.frame_path,
+             "cam_id":             self.cam_id,
+             "box_verdicts":       self.box_verdicts,
+             "missed_detections":  self.missed_detections,
+             "reviewed_at":        self.reviewed_at}
+        if self.note:
+            d["note"] = self.note
+        return d
+
+
+class ReviewStore:
+    """Thread-safe on-disk store for both crop-level and frame-level reviews.
+
+    Crop reviews are keyed by ``crop_path`` (legacy from the single-crop
+    review UI). Frame reviews are keyed by ``frame_path`` (new canvas UI).
+    Both live in the same JSON file so a single fsync writes both sides;
+    the metrics endpoint aggregates verdicts from both.
     """
 
     def __init__(self, path: str | Path = DEFAULT_REVIEWS_PATH):
         self.path = Path(path)
         self._lock = threading.Lock()
         self._by_path: dict[str, Review] = {}
+        self._frames_by_path: dict[str, FrameReview] = {}
         self._load()
 
     def _load(self) -> None:
@@ -95,12 +127,34 @@ class ReviewStore:
                 self._by_path[r.crop_path] = r
             except (KeyError, TypeError):
                 continue
+        for row in data.get("frame_reviews", []):
+            try:
+                bv = row.get("box_verdicts") or {}
+                if not isinstance(bv, dict):
+                    continue
+                miss = row.get("missed_detections") or []
+                if not isinstance(miss, list):
+                    miss = []
+                fr = FrameReview(
+                    frame_path=str(row["frame_path"]),
+                    cam_id=str(row.get("cam_id", "?")),
+                    box_verdicts={str(k): str(v) for k, v in bv.items()
+                                  if v in BOX_VERDICTS},
+                    missed_detections=[m for m in miss
+                                       if isinstance(m, dict)
+                                       and m.get("cls") and m.get("box")],
+                    note=row.get("note") or None,
+                    reviewed_at=str(row.get("reviewed_at", "")))
+                self._frames_by_path[fr.frame_path] = fr
+            except (KeyError, TypeError):
+                continue
 
     def _save_locked(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "reviews": [r.to_public() for r in self._by_path.values()],
+            "frame_reviews": [r.to_public() for r in self._frames_by_path.values()],
         }
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
         tmp.write_text(json.dumps(payload, indent=2))
@@ -132,11 +186,61 @@ class ReviewStore:
             self._save_locked()
         return r
 
+    def is_frame_reviewed(self, frame_path: str) -> bool:
+        return frame_path in self._frames_by_path
+
+    def submit_frame(self, frame_path: str, cam_id: str,
+                     box_verdicts: dict[str, str],
+                     missed_detections: list[dict],
+                     note: str | None = None) -> FrameReview:
+        clean_bv: dict[str, str] = {}
+        for k, v in (box_verdicts or {}).items():
+            if v in BOX_VERDICTS:
+                clean_bv[str(k)] = v
+        clean_missed: list[dict] = []
+        for m in (missed_detections or []):
+            cls = m.get("cls") if isinstance(m, dict) else None
+            box = m.get("box") if isinstance(m, dict) else None
+            if not (cls and isinstance(box, (list, tuple)) and len(box) == 4):
+                continue
+            try:
+                clean_missed.append({
+                    "cls": str(cls),
+                    "box": [float(x) for x in box],
+                })
+            except (TypeError, ValueError):
+                continue
+        r = FrameReview(
+            frame_path=str(frame_path),
+            cam_id=str(cam_id or "?"),
+            box_verdicts=clean_bv,
+            missed_detections=clean_missed,
+            note=(str(note) if note else None),
+            reviewed_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+        with self._lock:
+            self._frames_by_path[r.frame_path] = r
+            self._save_locked()
+        return r
+
     def summary(self) -> dict:
         counts = {v: 0 for v in VERDICTS}
         for r in self._by_path.values():
             counts[r.verdict] = counts.get(r.verdict, 0) + 1
-        return {"total_reviewed": len(self._by_path), "by_verdict": counts}
+        # Frame-level aggregates: TP, FP, FN counts across every submitted frame.
+        tp = fp = fn = 0
+        for fr in self._frames_by_path.values():
+            for v in fr.box_verdicts.values():
+                if v == "correct": tp += 1
+                elif v == "wrong": fp += 1
+            fn += len(fr.missed_detections or ())
+        return {
+            "total_reviewed":    len(self._by_path),
+            "by_verdict":        counts,
+            "frames_reviewed":   len(self._frames_by_path),
+            "frame_tp":          tp,
+            "frame_fp":          fp,
+            "frame_fn":          fn,
+        }
 
     def rejects_for_cls(self, cls: str) -> list[str]:
         """Crop paths the user rejected as `wrong_label` or `not_an_object`
@@ -148,6 +252,50 @@ class ReviewStore:
             if r.verdict in ("wrong_label", "not_an_object"):
                 out.append(r.crop_path)
         return out
+
+
+def sample_frame(store: ReviewStore,
+                 snapshots_root: str | Path = SNAPSHOTS_ROOT,
+                 seed: int | None = None) -> dict | None:
+    """Pick one un-reviewed frame from ``review_frames/`` and return its
+    metadata packaged for the canvas UI:
+
+        {
+          "frame_path":  "review_frames/cam/1000000.jpg",
+          "url":         "/snapshots/review_frames/cam/1000000.jpg",
+          "cam_id":      "cam",
+          "frame_w":     1280,
+          "frame_h":     720,
+          "boxes":       [{id, cls, conf, box:[x1,y1,x2,y2]}, ...],
+          "remaining":   17
+        }
+
+    Returns None when every stored frame has been reviewed.
+    """
+    from app.review_frames import list_all_frames, load_metadata
+
+    rels = list_all_frames(snapshots_root)
+    pool: list[tuple[str, dict]] = []
+    for rel in rels:
+        if store.is_frame_reviewed(rel):
+            continue
+        meta = load_metadata(rel, snapshots_root)
+        if not meta:
+            continue
+        pool.append((rel, meta))
+    if not pool:
+        return None
+    rng = random.Random(seed) if seed is not None else random
+    rel, meta = rng.choice(pool)
+    return {
+        "frame_path": rel,
+        "url":        f"/snapshots/{rel}",
+        "cam_id":     meta.get("cam_id", "?"),
+        "frame_w":    meta.get("frame_w"),
+        "frame_h":    meta.get("frame_h"),
+        "boxes":      meta.get("boxes", []),
+        "remaining":  len(pool),
+    }
 
 
 def sample_crop(store: ReviewStore,

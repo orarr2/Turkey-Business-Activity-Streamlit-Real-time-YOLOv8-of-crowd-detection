@@ -343,6 +343,42 @@
     .review-stats b { color: #e7e9ee; }
     .review-status { font-size: 12px; color: #8b909a; margin-top: 8px; }
     .review-status.err { color: #ef4444; }
+    /* Full-frame canvas review layout: image left, controls right, wraps
+       to a stack on narrow viewports. */
+    .review-frame-body { display: grid; gap: 16px;
+        grid-template-columns: minmax(320px, 2fr) minmax(220px, 1fr);
+        align-items: start; }
+    @media (max-width: 800px) { .review-frame-body { grid-template-columns: 1fr; } }
+    .canvas-wrap { position: relative; background: #0c0e13;
+        border: 1px solid #232733; border-radius: 10px; overflow: hidden;
+        min-height: 240px; }
+    .canvas-wrap canvas { display: block; width: 100%; height: auto;
+        cursor: pointer; touch-action: none; }
+    .canvas-empty { padding: 60px 20px; text-align: center; color: #6f7480;
+        font-size: 13px; }
+    .canvas-hint { position: absolute; left: 8px; bottom: 6px;
+        color: rgba(255,255,255,0.7); font-size: 11px; text-shadow: 0 0 4px #000;
+        pointer-events: none; }
+    .frame-meta { display: flex; gap: 10px; align-items: baseline; }
+    .frame-cam { color: #e7e9ee; font-weight: 600; font-size: 13px; }
+    .frame-path { color: #6f7480; font-size: 11px;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .frame-boxes-summary { display: flex; gap: 12px; flex-wrap: wrap;
+        margin-top: 8px; font-size: 12px; color: #8b909a; }
+    .frame-boxes-summary .fbs-box { display: inline-flex; align-items: center; gap: 4px; }
+    .frame-boxes-summary .dot { display: inline-block; width: 8px; height: 8px;
+        border-radius: 50%; }
+    .frame-boxes-summary b { color: #e7e9ee; }
+    .frame-controls { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap;
+        align-items: center; }
+    .mode-btn { background: transparent; color: #8b909a;
+        border: 1px solid #2c3140; border-radius: 6px;
+        padding: 6px 12px; font-size: 12px; cursor: pointer; }
+    .mode-btn.on { background: rgba(79,140,255,0.15); color: #e7e9ee;
+        border-color: #4f8cff; }
+    .frame-controls select { background: #0c0e13; border: 1px solid #2c3140;
+        color: #e7e9ee; border-radius: 6px; padding: 5px 8px; font-size: 12px; }
+
     /* Disk-usage indicator + clear button. Small, borderless, sits under
        the stats so the user knows disk is being touched and can trim. */
     .disk-usage { display: flex; align-items: center; gap: 10px;
@@ -484,62 +520,71 @@
       <div id="events-table-wrap"></div>
     </div>
 
-    <!-- Human-in-the-loop review of saved detections. See app/labels.py. -->
+    <!-- Frame-based review UI. Canvas shows the whole frame with every
+         detection overlaid; user clicks each box to verdict it, and can
+         draw NEW boxes for objects the model missed (the FN signal that
+         finally lets us compute recall). See app/review_frames.py +
+         app/labels.py::sample_frame. -->
     <div class="review-wrap" id="review-section">
       <h2>Review detections - teach the system what it got wrong</h2>
-      <div class="sub">Random sample of a saved crop, including crops
-        extracted from anomaly frames. YOLOv8 does not learn from the live
-        stream on its own - your verdicts go to
-        <code>data/reviews.json</code> and repeated rejections in the same
-        area auto-build a per-camera blacklist.</div>
-      <div class="review-body">
-        <div class="review-crop" id="review-crop">
-          <div class="review-empty" id="review-empty">loading…</div>
-          <img id="review-img" hidden alt="crop under review" />
+      <div class="sub">Full frame with all detections overlaid. Click a
+        box to cycle its verdict (grey → green correct → red wrong → grey).
+        Click "Add missing" and drag on the canvas to mark an object the
+        model failed to see. Every verdict goes to
+        <code>data/reviews.json</code> and hot-reloads the collector's
+        per-camera confidence within ~7 minutes.</div>
+      <div class="review-frame-body">
+        <div class="canvas-wrap">
+          <div class="canvas-empty" id="canvas-empty">loading…</div>
+          <canvas id="review-canvas" width="800" height="450" hidden></canvas>
+          <div class="canvas-hint" id="canvas-hint"></div>
         </div>
         <div class="review-panel">
-          <div>
-            <span class="current-label">
-              model says <span class="val" id="review-cls">?</span>
-            </span>
-            <span id="review-source-badge" hidden
-                  style="margin-left:8px;padding:2px 8px;border-radius:999px;
-                         font-size:11px;background:rgba(239,68,68,0.12);
-                         color:#ef4444">from anomaly frame</span>
+          <div class="frame-meta">
+            <span class="frame-cam" id="frame-cam">-</span>
+            <span class="frame-path" id="frame-path"></span>
           </div>
-          <div class="path" id="review-path"></div>
-          <div class="review-buttons">
-            <!-- Row 1: is the CLASS label correct? -->
-            <div>
-              <div class="row-label">Label</div>
-              <div class="btn-row" id="label-row">
-                <button data-label="correct">correct</button>
-                <button data-label="wrong">wrong</button>
-              </div>
-            </div>
-            <!-- Row 2: was this really an anomaly worth flagging?
-                 Shown only when the crop comes from an anomaly frame. -->
-            <div id="anomaly-row-wrap" hidden>
-              <div class="row-label">Anomaly</div>
-              <div class="btn-row" id="anomaly-row">
-                <button data-anomaly="yes">yes</button>
-                <button data-anomaly="no">no</button>
-              </div>
-            </div>
-            <!-- Optional note - collapses in unless the user marked wrong / anomaly=yes -->
-            <div class="review-note-wrap" id="note-wrap">
-              <textarea id="review-note" rows="2"
-                        placeholder="optional note (e.g. 'lamp post in corner')"></textarea>
-            </div>
-            <!-- Submit + next -->
-            <div class="btn-row">
-              <button id="review-submit" title="save and load the next crop">save + next</button>
-              <button class="next" id="review-skip"
-                      title="skip this crop, no answer saved">skip →</button>
-            </div>
+          <div class="frame-boxes-summary" id="frame-boxes-summary">
+            <span class="fbs-box"><span class="dot" style="background:#8b909a"></span>
+              <b id="fbs-untouched">0</b> untouched</span>
+            <span class="fbs-box"><span class="dot" style="background:#36d399"></span>
+              <b id="fbs-correct">0</b> correct</span>
+            <span class="fbs-box"><span class="dot" style="background:#ef4444"></span>
+              <b id="fbs-wrong">0</b> wrong</span>
+            <span class="fbs-box"><span class="dot" style="background:#4f8cff"></span>
+              <b id="fbs-missed">0</b> missed</span>
+          </div>
+          <div class="frame-controls">
+            <button id="mode-verdict" class="mode-btn on">verdict mode</button>
+            <button id="mode-add" class="mode-btn">+ add missing</button>
+            <select id="add-cls">
+              <option value="person">person</option>
+              <option value="car">car</option>
+              <option value="truck">truck</option>
+              <option value="bus">bus</option>
+              <option value="motorcycle">motorcycle</option>
+              <option value="bicycle">bicycle</option>
+              <option value="train">train</option>
+            </select>
+          </div>
+          <div class="review-note-wrap" id="note-wrap">
+            <textarea id="review-note" rows="2"
+                      placeholder="optional note about this frame"></textarea>
+          </div>
+          <div class="btn-row">
+            <button id="frame-save">save + next frame →</button>
+            <button class="next" id="frame-skip">skip</button>
           </div>
           <div class="review-status" id="review-status"></div>
           <div class="review-stats" id="review-stats">reviewed 0</div>
+          <div class="disk-usage" id="frames-usage" hidden>
+            <span>review frames on disk:</span>
+            <span><b id="frames-mb">0</b> MB · <b id="frames-count">0</b> /
+                  <span id="frames-cap">100</span> frames
+                  (every <span id="frames-every">5</span> bursts)</span>
+            <div class="bar" id="frames-bar"><i style="width:0%"></i></div>
+            <button id="frames-clear" title="delete stored review frames">clear all</button>
+          </div>
           <div class="disk-usage" id="disk-usage" hidden>
             <span>anomaly crops on disk:</span>
             <span><b id="disk-used">0</b> / <span id="disk-cap">300</span> MB
@@ -568,9 +613,9 @@
   <!-- firebase-config.js is gitignored per-clone; see docs/firebase_setup.md -->
   <!-- ?v=N is a cache-buster: bump it whenever any of the JS files changes,
        so the browser doesn't serve a stale ES-module from disk cache. -->
-  <script type="module" src="./firebase-config.js?v=24"></script>
-  <script type="module" src="./cameras.js?v=24"></script>
-  <script type="module" src="./app.js?v=24"></script>
+  <script type="module" src="./firebase-config.js?v=25"></script>
+  <script type="module" src="./cameras.js?v=25"></script>
+  <script type="module" src="./app.js?v=25"></script>
 
   <!-- Search UI. INLINE and NON-MODULE on purpose: it wires POST /api/search
        on this same server, has no Firebase dependency, and must keep working
@@ -796,155 +841,334 @@
   })();
   </script>
 
-  <!-- Review UI. Loads one un-reviewed crop at a time from /api/review-sample,
-       submits the verdict to /api/review-submit, then fetches the next.
-       Two independent verdicts collected per crop:
-         labelVerdict:   "correct" | "wrong"
-         anomalyVerdict: "yes" | "no"  (only when crop is from an anomaly)
-       The submit call maps them onto the ReviewStore's fields. -->
+  <!-- Frame-based review UI. Canvas renders the whole frame with every
+       detection overlaid; user clicks each box to cycle its verdict, or
+       switches into "add missing" mode to drag out a new box for an
+       object the model didn't detect. Submitting a frame writes:
+           box_verdicts:       {box_id: "correct" | "wrong"}
+           missed_detections:  [{cls, box: [x1,y1,x2,y2]}]
+       to /api/review-frame-submit, which yields real TP/FP/FN counts. -->
   <script>
-  (function initReview() {
+  (function initFrameReview() {
     const $ = (id) => document.getElementById(id);
-    const cropImg = $("review-img"), emptyEl = $("review-empty");
-    const clsEl = $("review-cls"), pathEl = $("review-path");
-    const noteEl = $("review-note"), noteWrap = $("note-wrap");
+    const canvas = $("review-canvas"), emptyEl = $("canvas-empty");
+    const hintEl = $("canvas-hint");
+    const camEl = $("frame-cam"), pathEl = $("frame-path");
+    const modeVerdictBtn = $("mode-verdict"), modeAddBtn = $("mode-add");
+    const addClsSel = $("add-cls");
+    const saveBtn = $("frame-save"), skipBtn = $("frame-skip");
+    const noteEl = $("review-note");
     const statusEl = $("review-status"), statsEl = $("review-stats");
-    const skipBtn = $("review-skip"), submitBtn = $("review-submit");
-    const labelRow = $("label-row"), anomalyRow = $("anomaly-row");
-    const anomalyRowWrap = $("anomaly-row-wrap");
-    const sourceBadge = $("review-source-badge");
-    const diskWrap = $("disk-usage");
-    const diskUsed = $("disk-used"), diskCap = $("disk-cap");
-    const diskCount = $("disk-count"), diskBar = $("disk-bar");
-    const diskClearBtn = $("disk-clear");
+    const framesWrap = $("frames-usage"), framesMb = $("frames-mb"),
+          framesCount = $("frames-count"), framesCap = $("frames-cap"),
+          framesEvery = $("frames-every"), framesBar = $("frames-bar"),
+          framesClearBtn = $("frames-clear");
+    const diskWrap = $("disk-usage"), diskUsed = $("disk-used"),
+          diskCap = $("disk-cap"), diskCount = $("disk-count"),
+          diskBar = $("disk-bar"), diskClearBtn = $("disk-clear");
     const liveWrap = $("live-usage"), liveCount = $("live-count"),
           liveCap = $("live-cap"), liveMb = $("live-mb"),
           liveEvery = $("live-every"), liveBar = $("live-bar"),
           liveClearBtn = $("live-clear");
-    if (!cropImg) return;
+    const fbsU = $("fbs-untouched"), fbsC = $("fbs-correct"),
+          fbsW = $("fbs-wrong"), fbsM = $("fbs-missed");
+    if (!canvas) return;
 
-    let currentSample = null;
-    let labelVerdict = null;   // "correct" | "wrong"
-    let anomalyVerdict = null; // "yes" | "no"
+    const ctx = canvas.getContext("2d");
 
-    // ---- UI state helpers -----------------------------------------------
-    function selectRow(row, dataAttr, value) {
-      row.querySelectorAll("button").forEach((b) => {
-        b.classList.toggle("on", b.dataset[dataAttr] === value);
-      });
+    // ---- state ---------------------------------------------------------
+    let current = null;             // {frame_path, url, cam_id, boxes[], ...}
+    let img = null;
+    let boxVerdicts = {};            // box_id -> "correct" | "wrong"
+    let missedBoxes = [];            // {cls, box:[x1,y1,x2,y2]}
+    let mode = "verdict";            // "verdict" | "add"
+    let drag = null;                 // {x0,y0,x1,y1} while dragging in add-mode
+    // scale factor from image-space to canvas-space
+    let scale = 1;
+
+    const clsColor = {
+      person: "#36d399", car: "#4f8cff", truck: "#f0a35e",
+      bus: "#f0a35e", motorcycle: "#ff9de0", bicycle: "#ff9de0",
+      train: "#c464ff",
+    };
+
+    function setMode(m) {
+      mode = m;
+      modeVerdictBtn.classList.toggle("on", m === "verdict");
+      modeAddBtn.classList.toggle("on", m === "add");
+      hintEl.textContent = m === "verdict"
+          ? "click a box: grey → correct → wrong → grey"
+          : "drag on the canvas to draw a box around the missed object";
+      canvas.style.cursor = m === "verdict" ? "pointer" : "crosshair";
     }
-    function pickLabel(v) {
-      labelVerdict = v;
-      selectRow(labelRow, "label", v);
-      toggleNote();
-    }
-    function pickAnomaly(v) {
-      anomalyVerdict = v;
-      selectRow(anomalyRow, "anomaly", v);
-      toggleNote();
-    }
-    function toggleNote() {
-      // Show the note textarea only when the answer is a "problem" - the
-      // user is about to describe WHAT was wrong. Fast path (correct + no
-      // anomaly) keeps the panel compact.
-      const shouldOpen = labelVerdict === "wrong" || anomalyVerdict === "yes";
-      noteWrap.classList.toggle("open", shouldOpen);
-    }
-    function clearVerdicts() {
-      labelVerdict = null; anomalyVerdict = null;
-      labelRow.querySelectorAll("button.on").forEach((b) => b.classList.remove("on"));
-      anomalyRow.querySelectorAll("button.on").forEach((b) => b.classList.remove("on"));
-      noteEl.value = "";
-      noteWrap.classList.remove("open");
+    modeVerdictBtn.addEventListener("click", () => setMode("verdict"));
+    modeAddBtn.addEventListener("click", () => setMode("add"));
+
+    function verdictColor(v) {
+      return v === "correct" ? "#36d399" : v === "wrong" ? "#ef4444" : "#8b909a";
     }
 
-    // ---- data fetch -----------------------------------------------------
+    function renderSummary() {
+      if (!current) { fbsU.textContent = fbsC.textContent =
+          fbsW.textContent = fbsM.textContent = "0"; return; }
+      const boxes = current.boxes || [];
+      let c = 0, w = 0;
+      for (const b of boxes) {
+        const v = boxVerdicts[String(b.id)];
+        if (v === "correct") c++;
+        else if (v === "wrong") w++;
+      }
+      fbsC.textContent = c;
+      fbsW.textContent = w;
+      fbsU.textContent = boxes.length - c - w;
+      fbsM.textContent = missedBoxes.length;
+    }
+
+    function draw() {
+      if (!img || !current) return;
+      const targetW = Math.min(800, canvas.parentElement.clientWidth - 2);
+      const naturalW = current.frame_w || img.naturalWidth;
+      const naturalH = current.frame_h || img.naturalHeight;
+      scale = targetW / naturalW;
+      canvas.width = targetW;
+      canvas.height = Math.round(naturalH * scale);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+      // Detected boxes
+      for (const b of current.boxes || []) {
+        const [x1, y1, x2, y2] = b.box;
+        const v = boxVerdicts[String(b.id)];
+        const col = v ? verdictColor(v) : (clsColor[b.cls] || "#e7e9ee");
+        ctx.lineWidth = v === "wrong" || v === "correct" ? 3 : 2;
+        ctx.strokeStyle = col;
+        ctx.strokeRect(x1 * scale, y1 * scale,
+                       (x2 - x1) * scale, (y2 - y1) * scale);
+        const label = `${b.cls} ${(b.conf * 100).toFixed(0)}%${v ? ` [${v}]` : ""}`;
+        ctx.font = "12px system-ui, sans-serif";
+        const tm = ctx.measureText(label);
+        const lx = x1 * scale, ly = Math.max(14, y1 * scale - 2);
+        ctx.fillStyle = col;
+        ctx.fillRect(lx, ly - 12, tm.width + 6, 14);
+        ctx.fillStyle = "#0c0e13";
+        ctx.fillText(label, lx + 3, ly - 1);
+      }
+
+      // Missed boxes (drawn by user)
+      for (const m of missedBoxes) {
+        const [x1, y1, x2, y2] = m.box;
+        ctx.setLineDash([6, 3]);
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = "#4f8cff";
+        ctx.strokeRect(x1 * scale, y1 * scale,
+                       (x2 - x1) * scale, (y2 - y1) * scale);
+        ctx.setLineDash([]);
+        const label = `missed ${m.cls}`;
+        ctx.font = "12px system-ui, sans-serif";
+        const tm = ctx.measureText(label);
+        ctx.fillStyle = "#4f8cff";
+        ctx.fillRect(x1 * scale, y1 * scale - 12, tm.width + 6, 14);
+        ctx.fillStyle = "#0c0e13";
+        ctx.fillText(label, x1 * scale + 3, y1 * scale - 1);
+      }
+
+      // Live drag rect
+      if (drag) {
+        ctx.setLineDash([4, 4]);
+        ctx.lineWidth = 2; ctx.strokeStyle = "#4f8cff";
+        const dx = Math.min(drag.x0, drag.x1),
+              dy = Math.min(drag.y0, drag.y1),
+              dw = Math.abs(drag.x1 - drag.x0),
+              dh = Math.abs(drag.y1 - drag.y0);
+        ctx.strokeRect(dx, dy, dw, dh);
+        ctx.setLineDash([]);
+      }
+
+      renderSummary();
+    }
+
+    function eventCoords(e) {
+      const rect = canvas.getBoundingClientRect();
+      const x = (e.clientX - rect.left) * (canvas.width / rect.width);
+      const y = (e.clientY - rect.top) * (canvas.height / rect.height);
+      return { x, y };
+    }
+
+    function findBoxAt(cx, cy) {
+      // Return the smallest detected box whose canvas-space rect contains cx,cy.
+      // Smallest-first so overlapping boxes let the user grab the inner one.
+      let best = null;
+      let bestArea = Infinity;
+      for (const b of current.boxes || []) {
+        const [x1, y1, x2, y2] = b.box;
+        const cx1 = x1 * scale, cy1 = y1 * scale;
+        const cx2 = x2 * scale, cy2 = y2 * scale;
+        if (cx >= cx1 && cx <= cx2 && cy >= cy1 && cy <= cy2) {
+          const area = (cx2 - cx1) * (cy2 - cy1);
+          if (area < bestArea) { best = b; bestArea = area; }
+        }
+      }
+      return best;
+    }
+
+    canvas.addEventListener("click", (e) => {
+      if (mode !== "verdict" || !current) return;
+      const { x, y } = eventCoords(e);
+      const b = findBoxAt(x, y);
+      if (!b) return;
+      const cur = boxVerdicts[String(b.id)];
+      // cycle: undef → correct → wrong → undef
+      const next = cur === undefined ? "correct"
+                 : cur === "correct" ? "wrong" : undefined;
+      if (next) boxVerdicts[String(b.id)] = next;
+      else delete boxVerdicts[String(b.id)];
+      draw();
+    });
+
+    canvas.addEventListener("mousedown", (e) => {
+      if (mode !== "add" || !current) return;
+      const { x, y } = eventCoords(e);
+      drag = { x0: x, y0: y, x1: x, y1: y };
+    });
+    canvas.addEventListener("mousemove", (e) => {
+      if (!drag) return;
+      const { x, y } = eventCoords(e);
+      drag.x1 = x; drag.y1 = y;
+      draw();
+    });
+    canvas.addEventListener("mouseup", (e) => {
+      if (!drag) return;
+      const { x, y } = eventCoords(e);
+      drag.x1 = x; drag.y1 = y;
+      const dw = Math.abs(drag.x1 - drag.x0),
+            dh = Math.abs(drag.y1 - drag.y0);
+      if (dw > 6 && dh > 6) {
+        const x1 = Math.min(drag.x0, drag.x1) / scale;
+        const y1 = Math.min(drag.y0, drag.y1) / scale;
+        const x2 = Math.max(drag.x0, drag.x1) / scale;
+        const y2 = Math.max(drag.y0, drag.y1) / scale;
+        missedBoxes.push({ cls: addClsSel.value, box: [x1, y1, x2, y2] });
+      }
+      drag = null;
+      draw();
+    });
+    canvas.addEventListener("mouseleave", () => { drag = null; draw(); });
+
+    // ---- loading + submit ---------------------------------------------
     async function loadNext() {
-      statusEl.className = "review-status";
-      statusEl.textContent = "";
-      emptyEl.textContent = "loading…";
-      emptyEl.style.display = "";
-      cropImg.hidden = true;
-      clearVerdicts();
+      statusEl.className = "review-status"; statusEl.textContent = "";
+      canvas.hidden = true;
+      emptyEl.textContent = "loading…"; emptyEl.style.display = "";
+      current = null; img = null;
+      boxVerdicts = {}; missedBoxes = []; drag = null;
+      noteEl.value = "";
       try {
-        const r = await fetch("/api/review-sample", { cache: "no-store" });
+        const r = await fetch("/api/review-frame", { cache: "no-store" });
         const data = await r.json();
         if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
         if (data.done) {
-          currentSample = null;
-          // Two possible reasons for "done":
-          //   1. every stored crop has been reviewed - user is caught up
-          //   2. the pools are still empty because the collector hasn't
-          //      produced any samples yet
-          // Live-samples-stats disambiguates: 0 files means (2).
-          let msg;
+          camEl.textContent = "-"; pathEl.textContent = "";
           try {
-            const rr = await fetch("/api/live-samples-stats");
+            const rr = await fetch("/api/review-frames-stats");
             const s = rr.ok ? await rr.json() : null;
-            if (s && s.count === 0) {
-              msg = "no crops in the pool yet.<br>" +
-                    "<span style=\"font-size:11px\">the collector saves one " +
-                    "detection every " + (s.every_n || 5) + " bursts to " +
-                    "<code>live_samples/</code>; come back in a few minutes " +
-                    "for fresh material</span>";
-            } else {
-              msg = "every stored crop has been reviewed.<br>" +
-                    "<span style=\"font-size:11px\">check " +
-                    "<code>data/reviews.json</code> for your verdicts, or " +
-                    "wait for more samples</span>";
-            }
+            emptyEl.innerHTML = (s && s.count === 0)
+                ? "no frames in the pool yet.<br>" +
+                  "<span style=\"font-size:11px\">the collector saves one " +
+                  "frame every " + (s.every_n || 5) + " bursts to " +
+                  "<code>review_frames/</code></span>"
+                : "every stored frame has been reviewed.";
           } catch (_) {
-            msg = "no crops available right now.";
+            emptyEl.textContent = "no frames available.";
           }
-          emptyEl.innerHTML = msg;
-          clsEl.textContent = "-"; pathEl.textContent = "";
-          sourceBadge.hidden = true;
-          anomalyRowWrap.hidden = true;
+          renderSummary();
           return;
         }
-        currentSample = data;
-        cropImg.src = data.url;
-        cropImg.hidden = false;
-        emptyEl.style.display = "none";
-        clsEl.textContent = data.cls || "?";
-        pathEl.textContent = data.path;
-        const fromAnomaly = !!data.from_anomaly;
-        sourceBadge.hidden = !fromAnomaly;
-        anomalyRowWrap.hidden = !fromAnomaly;
-        const remaining = data.remaining;
-        if (typeof remaining === "number") {
-          statsEl.innerHTML = statsEl.innerHTML.split("·")[0].trim() +
-              ` · <b>${remaining}</b> still un-reviewed`;
-        }
+        current = data;
+        camEl.textContent = data.cam_id || "-";
+        pathEl.textContent = data.frame_path;
+        img = new Image();
+        img.onload = () => {
+          emptyEl.style.display = "none";
+          canvas.hidden = false;
+          draw();
+        };
+        img.onerror = () => {
+          emptyEl.textContent = "frame image failed to load";
+        };
+        img.src = data.url;
       } catch (err) {
-        currentSample = null;
         statusEl.className = "review-status err";
-        statusEl.textContent = `sample failed: ${err.message}`;
-        emptyEl.textContent = "sample failed";
+        statusEl.textContent = `frame load failed: ${err.message}`;
+        emptyEl.textContent = "load failed";
       }
     }
+
+    async function submit() {
+      if (!current) return;
+      statusEl.className = "review-status";
+      statusEl.textContent = "saving…";
+      try {
+        const body = {
+          frame_path:        current.frame_path,
+          cam_id:            current.cam_id,
+          box_verdicts:      boxVerdicts,
+          missed_detections: missedBoxes,
+          note:              noteEl.value.trim() || null,
+        };
+        const r = await fetch("/api/review-frame-submit", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+        await refreshStats();
+        await loadNext();
+      } catch (err) {
+        statusEl.className = "review-status err";
+        statusEl.textContent = `save failed: ${err.message}`;
+      }
+    }
+    saveBtn.addEventListener("click", submit);
+    skipBtn.addEventListener("click", loadNext);
 
     async function refreshStats() {
       try {
         const r = await fetch("/api/review-stats", { cache: "no-store" });
         if (!r.ok) return;
         const s = await r.json();
-        const byV = s.by_verdict || {};
         const boost = s.boost || {};
-        const boostLine = boost.approved != null && boost.rejected != null
-            ? ` · confidence tuned on <b>${boost.adjusted_cls || 0}</b> ` +
-              `class(es) (+${boost.approved} / -${boost.rejected})`
+        const tp = s.frame_tp || 0, fp = s.frame_fp || 0, fn = s.frame_fn || 0;
+        const totalBoxes = tp + fp + fn;
+        const line1 = `frames reviewed <b>${s.frames_reviewed || 0}</b> ` +
+            `(TP ${tp} · FP ${fp} · FN ${fn})`;
+        const line2 = (s.total_reviewed || 0) > 0
+            ? ` · legacy crop reviews: <b>${s.total_reviewed || 0}</b>` : "";
+        const line3 = boost.approved != null
+            ? ` · confidence tuned on <b>${boost.adjusted_cls || 0}</b> class(es)`
             : "";
-        statsEl.innerHTML = `reviewed <b>${s.total_reviewed || 0}</b> ` +
-            `(correct ${byV.correct || 0} · wrong ${byV.wrong_label || 0})` +
-            boostLine;
+        statsEl.innerHTML = line1 + line2 + line3;
       } catch (_) { /* offline ok */ }
     }
 
     async function refreshDisk() {
-      // Two independent disk indicators - the anomaly-crops cache and the
-      // live-samples pool. Both are optional widgets; each hides itself if
-      // its endpoint isn't answering.
+      // review_frames
+      try {
+        const r = await fetch("/api/review-frames-stats", { cache: "no-store" });
+        if (r.ok) {
+          const s = await r.json();
+          if (!s.error) {
+            framesWrap.hidden = false;
+            framesMb.textContent = (s.bytes / (1024 * 1024)).toFixed(1);
+            framesCount.textContent = s.count;
+            framesCap.textContent = s.cap_files;
+            framesEvery.textContent = s.every_n;
+            const pct = Math.max(0, Math.min(100, (s.count / s.cap_files) * 100));
+            framesBar.querySelector("i").style.width = pct + "%";
+            framesBar.classList.toggle("high", pct >= 60 && pct < 90);
+            framesBar.classList.toggle("full", pct >= 90);
+          }
+        }
+      } catch (_) { framesWrap.hidden = true; }
+      // anomaly_crops
       try {
         const r = await fetch("/api/anomaly-crops-stats", { cache: "no-store" });
         if (!r.ok) { diskWrap.hidden = true; }
@@ -953,18 +1177,17 @@
           if (s.error || s.cap_bytes == null) { diskWrap.hidden = true; }
           else {
             diskWrap.hidden = false;
-            const usedMb = (s.bytes / (1024 * 1024)).toFixed(1);
-            diskUsed.textContent = usedMb;
+            diskUsed.textContent = (s.bytes / (1024 * 1024)).toFixed(1);
             diskCap.textContent = s.cap_mb;
             diskCount.textContent = s.count;
             const pct = Math.max(0, Math.min(100, (s.bytes / s.cap_bytes) * 100));
-            const bar = diskBar.querySelector("i");
-            bar.style.width = pct + "%";
+            diskBar.querySelector("i").style.width = pct + "%";
             diskBar.classList.toggle("high", pct >= 60 && pct < 90);
             diskBar.classList.toggle("full", pct >= 90);
           }
         }
       } catch (_) { diskWrap.hidden = true; }
+      // live_samples
       try {
         const r = await fetch("/api/live-samples-stats", { cache: "no-store" });
         if (!r.ok) { liveWrap.hidden = true; return; }
@@ -976,78 +1199,38 @@
         liveMb.textContent = (s.bytes / (1024 * 1024)).toFixed(1);
         liveEvery.textContent = s.every_n;
         const pct = Math.max(0, Math.min(100, (s.count / s.cap_files) * 100));
-        const bar = liveBar.querySelector("i");
-        bar.style.width = pct + "%";
+        liveBar.querySelector("i").style.width = pct + "%";
         liveBar.classList.toggle("high", pct >= 60 && pct < 90);
         liveBar.classList.toggle("full", pct >= 90);
       } catch (_) { liveWrap.hidden = true; }
     }
 
-    // ---- submit ---------------------------------------------------------
-    async function submit() {
-      if (!currentSample || !labelVerdict) {
-        statusEl.className = "review-status err";
-        statusEl.textContent = "pick a label verdict first (correct / wrong)";
-        return;
-      }
-      // Map the two-dimensional UI to the ReviewStore verdict field. The
-      // core "correct/wrong_label" verdict is decided by labelVerdict; the
-      // anomaly opinion rides along as a structured extra so the store can
-      // later drive auto-blacklist and anomaly-detector tuning.
-      const verdict = labelVerdict === "correct" ? "correct" : "wrong_label";
-      statusEl.className = "review-status";
-      statusEl.textContent = "saving…";
-      try {
-        const r = await fetch("/api/review-submit", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            crop_path:      currentSample.path,
-            original_cls:   currentSample.cls,
-            verdict:        verdict,
-            anomaly_verdict: anomalyVerdict,       // may be null
-            note:           noteEl.value.trim() || null,
-          }),
-        });
-        const data = await r.json();
-        if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
-        await refreshStats();
-        await loadNext();
-      } catch (err) {
-        statusEl.className = "review-status err";
-        statusEl.textContent = `save failed: ${err.message}`;
-      }
-    }
-
-    // ---- wire events ----------------------------------------------------
-    labelRow.querySelectorAll("button").forEach((b) =>
-        b.addEventListener("click", () => pickLabel(b.dataset.label)));
-    anomalyRow.querySelectorAll("button").forEach((b) =>
-        b.addEventListener("click", () => pickAnomaly(b.dataset.anomaly)));
-    submitBtn.addEventListener("click", submit);
-    skipBtn.addEventListener("click", loadNext);
+    framesClearBtn.addEventListener("click", async () => {
+      if (!confirm("Delete every saved review frame?")) return;
+      try { await fetch("/api/review-frames-clear", { method: "POST" }); }
+      catch (_) {}
+      await refreshDisk(); await loadNext();
+    });
     diskClearBtn.addEventListener("click", async () => {
-      if (!confirm("Delete every extracted anomaly crop from disk?")) return;
-      try {
-        await fetch("/api/anomaly-crops-clear", { method: "POST" });
-      } catch (_) { /* best-effort */ }
+      if (!confirm("Delete every extracted anomaly crop?")) return;
+      try { await fetch("/api/anomaly-crops-clear", { method: "POST" }); }
+      catch (_) {}
       await refreshDisk();
-      await loadNext();
     });
     liveClearBtn.addEventListener("click", async () => {
       if (!confirm("Delete every crop in the live-samples pool?")) return;
-      try {
-        await fetch("/api/live-samples-clear", { method: "POST" });
-      } catch (_) { /* best-effort */ }
+      try { await fetch("/api/live-samples-clear", { method: "POST" }); }
+      catch (_) {}
       await refreshDisk();
-      await loadNext();
     });
 
+    setMode("verdict");
     refreshStats();
     refreshDisk();
     loadNext();
-    // Disk usage refresh runs every 60s while the tab is open - light
-    // touch on the server, gives the user a live sense of accumulation.
     setInterval(refreshDisk, 60000);
+    // Redraw on resize so the canvas keeps its aspect
+    window.addEventListener("resize", () => { if (img && current) draw(); });
   })();
   </script>
 

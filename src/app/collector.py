@@ -902,6 +902,16 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
                 _ls_save(cam_id, frame, boxes)
         except Exception as _ls_err:
             print(f"[{ts}] live_samples skipped: {_ls_err}")
+        # Frame-based review pool: save the WHOLE frame + all boxes so the
+        # canvas review UI can present the full scene with clickable boxes
+        # and gather multiple verdicts per frame (including "missed
+        # detection" - the input we need for real recall).
+        try:
+            from app.review_frames import should_save as _rf_should, save_frame as _rf_save
+            if boxes and _rf_should(cam_id):
+                _rf_save(cam_id, frame, boxes)
+        except Exception as _rf_err:
+            print(f"[{ts}] review_frames skipped: {_rf_err}")
         if reid is not None and boxes:
             results = reid.update_from_frame(cam_id, frame, boxes)
             for r in results:

@@ -216,6 +216,12 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/model-metrics":
             self._model_metrics()
             return
+        if path == "/api/review-frame":
+            self._review_frame_get()
+            return
+        if path == "/api/review-frames-stats":
+            self._review_frames_stats()
+            return
         super().do_GET()
 
     def do_POST(self) -> None:
@@ -236,6 +242,12 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             return
         if path == "/api/live-samples-clear":
             self._live_samples_clear()
+            return
+        if path == "/api/review-frame-submit":
+            self._review_frame_submit()
+            return
+        if path == "/api/review-frames-clear":
+            self._review_frames_clear()
             return
         self.send_error(404, "unknown POST endpoint")
 
@@ -436,6 +448,97 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         try:
             from app.live_samples import clear_all as ls_clear
             self._send_json(200, ls_clear(SNAPSHOTS_DIR))
+        except Exception as e:
+            self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
+
+    # ---- Frame-based review endpoints ----------------------------------
+    # The new canvas UX: one frame carries multiple detections, the user
+    # gives a verdict per BOX, plus optional "missed" boxes drawn on the
+    # canvas. That last piece is what finally gives us FN → recall → F1.
+    def _review_frame_get(self) -> None:
+        try:
+            from app.labels import sample_frame
+            s = sample_frame(_review_store(), SNAPSHOTS_DIR)
+            if s is None:
+                self._send_json(200, {"done": True,
+                                      "message": "no un-reviewed frames yet"})
+                return
+            self._send_json(200, s)
+        except Exception as e:
+            print(f"  ! review-frame failed: {type(e).__name__}: {e}")
+            self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
+
+    def _review_frame_submit(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length <= 0 or length > 128 * 1024:
+            self._send_json(400, {"error": "empty or oversized body"})
+            return
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            self._send_json(400, {"error": "body must be JSON"})
+            return
+        frame_path = str(payload.get("frame_path", "")).strip()
+        cam_id     = str(payload.get("cam_id", "")).strip() or "?"
+        if not frame_path:
+            self._send_json(400, {"error": "frame_path required"})
+            return
+        # Path harden: keep it inside snapshots dir
+        if ".." in frame_path.split("/") or frame_path.startswith("/") \
+                or "\\" in frame_path:
+            self._send_json(400, {"error": "invalid frame_path"})
+            return
+        try:
+            r = _review_store().submit_frame(
+                frame_path=frame_path, cam_id=cam_id,
+                box_verdicts=payload.get("box_verdicts") or {},
+                missed_detections=payload.get("missed_detections") or [],
+                note=payload.get("note") or None)
+            # Confidence boost per-box: each correct verdict lowers the
+            # per-cam per-cls conf; each wrong verdict raises it. Same
+            # nudges as the crop-level submit path.
+            try:
+                from app.confidence_boost import apply_review
+                # Metadata (class per box_id) sits next to the frame - reload it.
+                from app.review_frames import load_metadata
+                meta = load_metadata(frame_path, SNAPSHOTS_DIR) or {}
+                cls_by_id = {str(b["id"]): b.get("cls", "?")
+                             for b in (meta.get("boxes") or [])}
+                for box_id, verdict in (r.box_verdicts or {}).items():
+                    cls = cls_by_id.get(str(box_id))
+                    if not cls: continue
+                    v = "correct" if verdict == "correct" else "wrong_label"
+                    apply_review(cam_id, cls, v)
+                # Missed detections signal: the model needs to be LESS strict
+                # for the missed class in this camera. Treat each miss like a
+                # user-confirmed "correct" verdict for its class - it lowers
+                # conf so the next burst catches similar objects.
+                for miss in (r.missed_detections or []):
+                    cls = miss.get("cls")
+                    if cls:
+                        apply_review(cam_id, cls, "correct")
+            except Exception as ex:
+                print(f"  ! frame confidence_boost skipped: {type(ex).__name__}: {ex}")
+            self._send_json(200, {"ok": True, "frame_review": r.to_public(),
+                                  "summary": _review_store().summary()})
+        except Exception as e:
+            print(f"  ! review-frame-submit failed: {type(e).__name__}: {e}")
+            self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
+
+    def _review_frames_stats(self) -> None:
+        try:
+            from app.review_frames import usage_stats
+            self._send_json(200, usage_stats(SNAPSHOTS_DIR))
+        except Exception as e:
+            self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
+
+    def _review_frames_clear(self) -> None:
+        try:
+            from app.review_frames import clear_all
+            self._send_json(200, clear_all(SNAPSHOTS_DIR))
         except Exception as e:
             self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
 
