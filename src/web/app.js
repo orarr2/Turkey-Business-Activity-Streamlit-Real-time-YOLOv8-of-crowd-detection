@@ -568,19 +568,46 @@ function updateAggregates(slotId, rows) {
   setActivityBadge(st, computeActivity(rows));
 }
 
+// Absolute activity scale in FIXED bands. Replaces the old
+// `(now / p90) * 8` formula which was broken in two ways:
+//   1. On a quiet street the 24h p90 collapsed to 1, so a single
+//      false-positive detection (a lamp post read as "person") produced
+//      (2/1)*8 = 16 → clamped to 10/10 "Crowded". The user saw exactly
+//      this on empty streets.
+//   2. When there was steady daylong traffic, a modest instantaneous
+//      dip below the p90 was scored "Quiet" even though 12 people is
+//      objectively a busy scene.
+// The bands below sit on absolute person counts and reflect what
+// "business activity" actually means for a downtown street camera. No
+// history, no p90, no fabricated crowds on empty scenes. If someone
+// wants per-camera calibration later, `ACTIVITY_BANDS` becomes a config
+// hook.
+const ACTIVITY_BANDS = [
+  { max: 0,   idx: 0  }, // truly empty
+  { max: 2,   idx: 1  }, // 1-2 people = quiet regardless of history
+  { max: 5,   idx: 2  }, // handful passing by = quiet
+  { max: 8,   idx: 3  }, // still quiet
+  { max: 12,  idx: 5  }, // moderate
+  { max: 18,  idx: 6  }, // moderate-to-busy
+  { max: 25,  idx: 7  }, // busy
+  { max: 35,  idx: 8  }, // crowded starts here
+  { max: 50,  idx: 9  }, // crowded
+  { max: 1e9, idx: 10 }, // packed
+];
+function _bandIndex(n) {
+  for (const b of ACTIVITY_BANDS) if (n <= b.max) return b.idx;
+  return 10;
+}
 function computeActivity(rows) {
   const ppl = rows.map((r) => r.person ?? 0).filter((x) => x >= 0);
-  if (ppl.length < 4) return null;
-  const sorted = [...ppl].sort((a, b) => a - b);
-  const p90Idx = Math.max(0, Math.floor(sorted.length * 0.9) - 1);
-  const p90    = sorted[p90Idx] || 1;
-  const now    = ppl[ppl.length - 1];
-  const idx    = Math.max(0, Math.min(10, Math.round((now / p90) * 8)));
-  const label  = idx <= 2 ? "Quiet"
-               : idx <= 5 ? "Moderate"
-               : idx <= 7 ? "Busy"
-               : "Crowded";
-  return { idx, label, now, p90 };
+  if (ppl.length < 1) return null;
+  const now = ppl[ppl.length - 1];
+  const idx = _bandIndex(now);
+  const label = idx <= 3 ? "Quiet"
+              : idx <= 6 ? "Moderate"
+              : idx <= 8 ? "Busy"
+              : "Crowded";
+  return { idx, label, now };
 }
 
 function setActivityBadge(st, act) {
@@ -595,7 +622,7 @@ function setActivityBadge(st, act) {
   const cls = act.label.toLowerCase();
   badge.className = `activity-badge act-${cls}`;
   text.textContent = `${act.idx}/10`;
-  badge.title = `activity ${act.idx}/10 - ${act.label} (now ${act.now}, p90 ${act.p90})`;
+  badge.title = `activity ${act.idx}/10 - ${act.label} (now ${act.now} people; absolute scale)`;
 }
 
 const TILE_CHART_LAST_N = 30;
