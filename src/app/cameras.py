@@ -275,7 +275,44 @@ def _merge_auto_blacklist() -> None:
         cam["roi_exclude_class"] = existing
 
 
+# --- confidence-boost merge ---------------------------------------------------
+# Per-camera per-class confidence adjustment learned from the review UI's
+# correct/wrong verdicts (see app/confidence_boost.py). Applied as a delta
+# on top of DEFAULT_PER_CLASS_CONF; the collector clamps the effective
+# value at read time. Live-reloaded by collector.main() every few rounds.
+def _merge_confidence_boost() -> None:
+    try:
+        from app.confidence_boost import load_boosts
+        from app.detect_core import DEFAULT_PER_CLASS_CONF
+    except ImportError:
+        return
+    try:
+        by_cam = load_boosts()
+    except Exception:
+        return
+    for cam_id, cls_map in by_cam.items():
+        cam = CAMERAS.get(cam_id)
+        if not cam:
+            continue
+        pcc = dict(cam.get("per_class_conf") or DEFAULT_PER_CLASS_CONF)
+        for cls, delta in cls_map.items():
+            try:
+                base = float(pcc.get(cls, DEFAULT_PER_CLASS_CONF.get(cls, 0.35)))
+                pcc[cls] = max(0.10, min(0.80, base + float(delta)))
+            except (TypeError, ValueError):
+                continue
+        cam["per_class_conf"] = pcc
+
+
+def reload_review_overrides() -> None:
+    """Public entry point for the collector's hot-reload timer. Re-runs
+    both merges without importing/reloading the whole module."""
+    _merge_auto_blacklist()
+    _merge_confidence_boost()
+
+
 _merge_auto_blacklist()
+_merge_confidence_boost()
 
 
 def active_cameras():

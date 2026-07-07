@@ -454,31 +454,39 @@ def count_line_crossings(tracks: list[list[dict]], frame_shape,
 
 
 # Per-class confidence gate applied AFTER the model's own conf filter.
-# `person` was raised from 0.22 to 0.35 after users reported roadside static
-# objects (traffic signs, lamp posts) being labeled `person` at confidence
-# ~0.27-0.38 - well under a real pedestrian's typical 0.55+, but above the
-# old floor. Small/distant pedestrians still register at 0.35 in practice;
-# what the higher bar kills off are the low-confidence, upright, thin objects
-# the network mis-fires on.
+# `person`, `car`, `bus`, `truck` at 0.35 keep the model honest on the classes
+# it's usually confident about. `train` sits at 0.25 because a partial-view
+# tram or metro car at street-camera angles rarely lands above 0.35 in
+# practice, and losing it entirely (as the user reported) is a worse failure
+# than the occasional low-confidence false positive at that class.
 DEFAULT_PER_CLASS_CONF = {
     "person":     0.35,
     "bicycle":    0.22,
     "motorcycle": 0.22,
     "car":        0.35,
     "bus":        0.35,
-    "train":      0.35,
+    "train":      0.25,
     "truck":      0.35,
 }
 
-# Person plausibility - lower and UPPER aspect-ratio floors. Real walking
-# people are ~1.5-3.0 tall/wide; the lower bound rejects strollers/banners
-# (wider than tall), the upper bound rejects lamp posts, traffic signs and
-# thin bollards that the network keeps mis-firing as `person` at confidence
-# 0.27-0.38 with aspects 4:1 and up. Together they turn the shape check into
-# a real "does this look like a person" gate instead of just "not a stroller".
-# Set to None to disable either bound.
+# Person shape / size gates. A real pedestrian on a street cam is TALLER
+# than wide (aspect >= 0.90) but NOT wildly so (aspect <= 3.0); has at
+# least a couple of dozen pixels of vertical extent; and never spans more
+# than a fraction of the frame's width (a "person" box wider than that is
+# almost always the model misfiring on a metro car, a bus at close range,
+# or a large signage board mistaken for a human).
+#
+# Values below were pulled in after user reports of
+#   * a metro / light-rail car (spanning ~half the frame) labeled `person`;
+#   * a separator pole (very narrow, tall) labeled `person` at conf 0.4;
+#   * false positives on distant road furniture that clear MIN_ASPECT but
+#     look nothing like a person.
 DEFAULT_PERSON_MIN_ASPECT = 0.90
-DEFAULT_PERSON_MAX_ASPECT = 3.5
+DEFAULT_PERSON_MAX_ASPECT = 3.0
+DEFAULT_PERSON_MIN_HEIGHT_PX = 24     # smaller than this and there's no
+                                       # meaningful person signal anyway
+DEFAULT_PERSON_MAX_WIDTH_FRAC = 0.30   # any "person" wider than 30% of
+                                       # frame width is misfiring
 
 # "Rider co-detection": if a person box overlaps a two-wheeler that YOLO
 # reported ABOVE its own gate but BELOW the per-class gate, resurrect the
@@ -504,6 +512,8 @@ def detect_with_boxes(model, frame, conf: float = 0.35,
                       per_class_conf: dict | None = None,
                       person_min_aspect: float | None = DEFAULT_PERSON_MIN_ASPECT,
                       person_max_aspect: float | None = DEFAULT_PERSON_MAX_ASPECT,
+                      person_min_height_px: int | None = DEFAULT_PERSON_MIN_HEIGHT_PX,
+                      person_max_width_frac: float | None = DEFAULT_PERSON_MAX_WIDTH_FRAC,
                       rider_iou: float | None = DEFAULT_RIDER_IOU
                       ) -> tuple[dict, list[dict]]:
     """Like detect_and_count but also returns per-detection boxes.
@@ -566,10 +576,23 @@ def detect_with_boxes(model, frame, conf: float = 0.35,
         if b["conf"] < gate:
             below_gate.append(b)
             continue
-        if b["cls"] == "person" and (person_min_aspect is not None
-                                     or person_max_aspect is not None):
+        if b["cls"] == "person":
             w, h = _box_wh(b)
-            if w > 0:
+            if person_min_height_px is not None and h < person_min_height_px:
+                # Below this the box is too small to carry meaningful person
+                # signal; usually a false pop on textured background.
+                b["_dropped_reason"] = "person_too_small"
+                continue
+            if person_max_width_frac is not None:
+                frame_w = frame.shape[1] if hasattr(frame, "shape") else None
+                if frame_w and w > frame_w * person_max_width_frac:
+                    # A "person" box wider than 30% of the frame is a metro
+                    # car, a bus at close range, or a large signage board -
+                    # never an actual pedestrian.
+                    b["_dropped_reason"] = "person_too_wide"
+                    continue
+            if w > 0 and (person_min_aspect is not None
+                          or person_max_aspect is not None):
                 aspect = h / w
                 if person_min_aspect is not None and aspect < person_min_aspect:
                     # Stroller / banner / cart shaped like a person to the model.

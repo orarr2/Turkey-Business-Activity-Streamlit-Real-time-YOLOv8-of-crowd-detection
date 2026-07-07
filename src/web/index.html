@@ -534,6 +534,13 @@
             <div class="bar" id="disk-bar"><i style="width:0%"></i></div>
             <button id="disk-clear" title="delete every extracted crop from the disk cache">clear all</button>
           </div>
+          <div class="disk-usage" id="live-usage" hidden>
+            <span>live samples pool:</span>
+            <span><b id="live-count">0</b> / <span id="live-cap">200</span> crops
+                  (~<b id="live-mb">0</b> MB · every <span id="live-every">5</span> bursts)</span>
+            <div class="bar" id="live-bar"><i style="width:0%"></i></div>
+            <button id="live-clear" title="delete the live-sample pool from disk">clear all</button>
+          </div>
         </div>
       </div>
     </div>
@@ -740,9 +747,14 @@
         resultsEl.appendChild(d);
       }
       if (!data.snapshot_matches.length) {
-        const msg = mode === "image"
-            ? "no saved snapshot is similar enough - try Loose strictness"
-            : "no crops match these filters - widen the time range or clear classes";
+        // Distinguish "no matches for your query" from "the index itself is
+        // empty" so the user knows whether to change filters or wait.
+        const empty = data.index_size === 0;
+        const msg = empty
+            ? "the snapshot pool is empty right now - the collector fills it during operation. Come back in a few minutes."
+            : (mode === "image"
+                ? "no saved snapshot is similar enough - try Loose strictness or clear the class chips"
+                : "no crops match these filters - widen the time range, clear the class chips, or raise the count");
         resultsEl.innerHTML =
           `<div class="empty" style="color:#8b909a;padding:12px;font-size:12px">${msg}</div>`;
       }
@@ -792,6 +804,10 @@
     const diskUsed = $("disk-used"), diskCap = $("disk-cap");
     const diskCount = $("disk-count"), diskBar = $("disk-bar");
     const diskClearBtn = $("disk-clear");
+    const liveWrap = $("live-usage"), liveCount = $("live-count"),
+          liveCap = $("live-cap"), liveMb = $("live-mb"),
+          liveEvery = $("live-every"), liveBar = $("live-bar"),
+          liveClearBtn = $("live-clear");
     if (!cropImg) return;
 
     let currentSample = null;
@@ -843,9 +859,31 @@
         if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
         if (data.done) {
           currentSample = null;
-          emptyEl.innerHTML = "every stored crop has been reviewed.<br>" +
-              "<span style=\"font-size:11px\">check <code>data/reviews.json</code> " +
-              "to export your verdicts</span>";
+          // Two possible reasons for "done":
+          //   1. every stored crop has been reviewed - user is caught up
+          //   2. the pools are still empty because the collector hasn't
+          //      produced any samples yet
+          // Live-samples-stats disambiguates: 0 files means (2).
+          let msg;
+          try {
+            const rr = await fetch("/api/live-samples-stats");
+            const s = rr.ok ? await rr.json() : null;
+            if (s && s.count === 0) {
+              msg = "no crops in the pool yet.<br>" +
+                    "<span style=\"font-size:11px\">the collector saves one " +
+                    "detection every " + (s.every_n || 5) + " bursts to " +
+                    "<code>live_samples/</code>; come back in a few minutes " +
+                    "for fresh material</span>";
+            } else {
+              msg = "every stored crop has been reviewed.<br>" +
+                    "<span style=\"font-size:11px\">check " +
+                    "<code>data/reviews.json</code> for your verdicts, or " +
+                    "wait for more samples</span>";
+            }
+          } catch (_) {
+            msg = "no crops available right now.";
+          }
+          emptyEl.innerHTML = msg;
           clsEl.textContent = "-"; pathEl.textContent = "";
           sourceBadge.hidden = true;
           anomalyRowWrap.hidden = true;
@@ -879,28 +917,57 @@
         if (!r.ok) return;
         const s = await r.json();
         const byV = s.by_verdict || {};
+        const boost = s.boost || {};
+        const boostLine = boost.approved != null && boost.rejected != null
+            ? ` · confidence tuned on <b>${boost.adjusted_cls || 0}</b> ` +
+              `class(es) (+${boost.approved} / -${boost.rejected})`
+            : "";
         statsEl.innerHTML = `reviewed <b>${s.total_reviewed || 0}</b> ` +
-            `(correct ${byV.correct || 0} · wrong ${byV.wrong_label || 0})`;
+            `(correct ${byV.correct || 0} · wrong ${byV.wrong_label || 0})` +
+            boostLine;
       } catch (_) { /* offline ok */ }
     }
 
     async function refreshDisk() {
+      // Two independent disk indicators - the anomaly-crops cache and the
+      // live-samples pool. Both are optional widgets; each hides itself if
+      // its endpoint isn't answering.
       try {
         const r = await fetch("/api/anomaly-crops-stats", { cache: "no-store" });
-        if (!r.ok) { diskWrap.hidden = true; return; }
-        const s = await r.json();
-        if (s.error || s.cap_bytes == null) { diskWrap.hidden = true; return; }
-        diskWrap.hidden = false;
-        const usedMb = (s.bytes / (1024 * 1024)).toFixed(1);
-        diskUsed.textContent = usedMb;
-        diskCap.textContent = s.cap_mb;
-        diskCount.textContent = s.count;
-        const pct = Math.max(0, Math.min(100, (s.bytes / s.cap_bytes) * 100));
-        const bar = diskBar.querySelector("i");
-        bar.style.width = pct + "%";
-        diskBar.classList.toggle("high", pct >= 60 && pct < 90);
-        diskBar.classList.toggle("full", pct >= 90);
+        if (!r.ok) { diskWrap.hidden = true; }
+        else {
+          const s = await r.json();
+          if (s.error || s.cap_bytes == null) { diskWrap.hidden = true; }
+          else {
+            diskWrap.hidden = false;
+            const usedMb = (s.bytes / (1024 * 1024)).toFixed(1);
+            diskUsed.textContent = usedMb;
+            diskCap.textContent = s.cap_mb;
+            diskCount.textContent = s.count;
+            const pct = Math.max(0, Math.min(100, (s.bytes / s.cap_bytes) * 100));
+            const bar = diskBar.querySelector("i");
+            bar.style.width = pct + "%";
+            diskBar.classList.toggle("high", pct >= 60 && pct < 90);
+            diskBar.classList.toggle("full", pct >= 90);
+          }
+        }
       } catch (_) { diskWrap.hidden = true; }
+      try {
+        const r = await fetch("/api/live-samples-stats", { cache: "no-store" });
+        if (!r.ok) { liveWrap.hidden = true; return; }
+        const s = await r.json();
+        if (s.error || s.cap_files == null) { liveWrap.hidden = true; return; }
+        liveWrap.hidden = false;
+        liveCount.textContent = s.count;
+        liveCap.textContent = s.cap_files;
+        liveMb.textContent = (s.bytes / (1024 * 1024)).toFixed(1);
+        liveEvery.textContent = s.every_n;
+        const pct = Math.max(0, Math.min(100, (s.count / s.cap_files) * 100));
+        const bar = liveBar.querySelector("i");
+        bar.style.width = pct + "%";
+        liveBar.classList.toggle("high", pct >= 60 && pct < 90);
+        liveBar.classList.toggle("full", pct >= 90);
+      } catch (_) { liveWrap.hidden = true; }
     }
 
     // ---- submit ---------------------------------------------------------
@@ -949,6 +1016,14 @@
       if (!confirm("Delete every extracted anomaly crop from disk?")) return;
       try {
         await fetch("/api/anomaly-crops-clear", { method: "POST" });
+      } catch (_) { /* best-effort */ }
+      await refreshDisk();
+      await loadNext();
+    });
+    liveClearBtn.addEventListener("click", async () => {
+      if (!confirm("Delete every crop in the live-samples pool?")) return;
+      try {
+        await fetch("/api/live-samples-clear", { method: "POST" });
       } catch (_) { /* best-effort */ }
       await refreshDisk();
       await loadNext();

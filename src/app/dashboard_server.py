@@ -190,6 +190,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/anomaly-crops-stats":
             self._anomaly_crops_stats()
             return
+        if path == "/api/live-samples-stats":
+            self._live_samples_stats()
+            return
         super().do_GET()
 
     def do_POST(self) -> None:
@@ -207,6 +210,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             return
         if path == "/api/anomaly-crops-clear":
             self._anomaly_crops_clear()
+            return
+        if path == "/api/live-samples-clear":
+            self._live_samples_clear()
             return
         self.send_error(404, "unknown POST endpoint")
 
@@ -346,6 +352,20 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 consider_review(_review_store(), r)
             except Exception as ex:
                 print(f"  ! auto_blacklist skipped: {type(ex).__name__}: {ex}")
+            # Positive/negative confidence boost. Correct verdicts lower
+            # per-cam per-cls conf (missing real ones); wrong verdicts raise
+            # it (false positives). Value is persisted so the collector
+            # picks it up on its next hot-reload without a restart.
+            try:
+                from app.confidence_boost import apply_review
+                from app.auto_blacklist import _cam_id_from_crop
+                cam_id_from_crop = _cam_id_from_crop(crop_path)
+                if cam_id_from_crop:
+                    apply_review(cam_id_from_crop,
+                                 str(payload.get("original_cls", "?")),
+                                 verdict)
+            except Exception as ex:
+                print(f"  ! confidence_boost skipped: {type(ex).__name__}: {ex}")
             self._send_json(200, {"ok": True, "review": r.to_public(),
                                   "summary": _review_store().summary()})
         except ValueError as e:
@@ -356,7 +376,13 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
     def _review_stats(self) -> None:
         try:
-            self._send_json(200, _review_store().summary())
+            summary = _review_store().summary()
+            try:
+                from app.confidence_boost import summary as _cb_summary
+                summary["boost"] = _cb_summary()
+            except Exception as ex:
+                summary["boost"] = {"error": f"{type(ex).__name__}"}
+            self._send_json(200, summary)
         except Exception as e:
             self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
 
@@ -371,6 +397,20 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         try:
             from app.anomaly_crops import clear_all
             self._send_json(200, clear_all(SNAPSHOTS_DIR))
+        except Exception as e:
+            self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
+
+    def _live_samples_stats(self) -> None:
+        try:
+            from app.live_samples import usage_stats
+            self._send_json(200, usage_stats(SNAPSHOTS_DIR))
+        except Exception as e:
+            self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
+
+    def _live_samples_clear(self) -> None:
+        try:
+            from app.live_samples import clear_all as ls_clear
+            self._send_json(200, ls_clear(SNAPSHOTS_DIR))
         except Exception as e:
             self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
 

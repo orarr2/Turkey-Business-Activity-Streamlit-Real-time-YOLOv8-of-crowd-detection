@@ -892,6 +892,16 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
             roi_exclude_class=cam.get("roi_exclude_class"),
             line=cam.get("line"))
         ok = 1
+        # Live-sample pool: save one random detection per LIVE_SAMPLE_EVERY_N
+        # bursts so the review UI has fresh material even on cameras that
+        # don't trigger returning / events / anomalies. Best-effort; a
+        # failure here must never abort a successful sample write.
+        try:
+            from app.live_samples import should_sample as _ls_should, save_crop as _ls_save
+            if boxes and _ls_should(cam_id):
+                _ls_save(cam_id, frame, boxes)
+        except Exception as _ls_err:
+            print(f"[{ts}] live_samples skipped: {_ls_err}")
         if reid is not None and boxes:
             results = reid.update_from_frame(cam_id, frame, boxes)
             for r in results:
@@ -1438,9 +1448,22 @@ def main() -> None:
             except Exception as e:
                 print(f"  ! profile save failed for {cid} ({e})")
 
+    # Hot-reload cadence for review-driven camera overrides. Every N rounds
+    # the collector re-reads data/blacklist_auto.json + data/confidence_boost.json
+    # so a fresh "correct" / "wrong" verdict in the review UI actually changes
+    # what the next burst sees, without a service restart.
+    _REVIEW_RELOAD_EVERY_ROUNDS = 10
+    _round_counter = 0
     try:
         while True:
             round_start = time.time()
+            _round_counter += 1
+            if _round_counter % _REVIEW_RELOAD_EVERY_ROUNDS == 0:
+                try:
+                    from app.cameras import reload_review_overrides
+                    reload_review_overrides()
+                except Exception as e:
+                    print(f"  ! review overrides reload failed: {e}")
             for slot in GRID_SLOTS:
                 picker = pickers[slot["slot_id"]]
                 cam_id = picker.current_cam()

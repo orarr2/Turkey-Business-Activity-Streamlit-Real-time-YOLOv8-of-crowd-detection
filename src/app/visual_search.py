@@ -58,7 +58,11 @@ DEFAULT_DB     = _SRC_ROOT / "data" / "reid.db"
 # object-shaped query directly - instead ``app.anomaly_crops`` pre-extracts
 # per-object crops from every anomaly frame into ``anomalies_crops/`` (with
 # an LRU size cap and de-dup), and that sibling directory joins the index.
-CROP_SUBDIRS = ("returning", "events", "anomalies_crops")
+# `live_samples/` is the collector's continuous pool: one random detection
+# crop per LIVE_SAMPLE_EVERY_N bursts per camera, so the review UI has
+# fresh material even on cameras that never fire returning / events /
+# anomalies. See app.live_samples for the writer side.
+CROP_SUBDIRS = ("returning", "events", "anomalies_crops", "live_samples")
 ANOMALY_CROPS_SUBDIR = "anomalies_crops"
 
 

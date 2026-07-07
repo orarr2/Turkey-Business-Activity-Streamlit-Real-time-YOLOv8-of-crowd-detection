@@ -81,12 +81,22 @@ def _save_store(store: dict, path: Path) -> None:
     tmp.replace(path)
 
 
+_CAM_ID_TREES = ("anomalies_crops", "live_samples")
+
+
 def _cam_id_from_crop(crop_path: str) -> str | None:
-    """Anomaly crops are stored under ``anomalies_crops/<cam_id>/...``; other
-    crops don't carry cam_id in the path. Best-effort: return the first
-    directory component when we're inside anomalies_crops, else None."""
+    """Return the ``cam_id`` this crop belongs to, or None when the path
+    doesn't encode it.
+
+    Trees that name the camera in the second path component:
+    ``anomalies_crops/<cam_id>/...`` (written by ``app.anomaly_crops``)
+    and ``live_samples/<cam_id>/...`` (written by ``app.live_samples``).
+    Other subtrees (``returning``, ``events``) don't have a stable
+    cam-in-path convention, so the caller has to pull cam_id from
+    manifest metadata for those - we return None here.
+    """
     parts = crop_path.split("/")
-    if len(parts) >= 3 and parts[0] == "anomalies_crops":
+    if len(parts) >= 3 and parts[0] in _CAM_ID_TREES:
         return parts[1]
     return None
 
