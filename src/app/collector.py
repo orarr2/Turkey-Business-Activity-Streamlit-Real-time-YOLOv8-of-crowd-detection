@@ -890,7 +890,7 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
             model, frames, conf=cam_conf, imgsz=imgsz,
             roi=cam.get("roi"), roi_exclude=cam.get("roi_exclude"),
             roi_exclude_class=cam.get("roi_exclude_class"),
-            line=cam.get("line"))
+            line=cam.get("line"), burst_stride=burst_stride)
         ok = 1
         # Live-sample pool: save one random detection per LIVE_SAMPLE_EVERY_N
         # bursts so the review UI has fresh material even on cameras that
@@ -985,6 +985,11 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
         "seen_entities": len(seen_again),
     }
     if ok:
+        # Vehicle speed estimates surface top-level so the dashboard tiles
+        # can read them without digging through burst debug internals.
+        speeds = burst_dbg.pop("speeds", None)
+        if speeds:
+            record["speeds"] = speeds
         record["burst"] = burst_dbg
         # Day/night tag: lets the dashboard and any offline analysis split
         # baselines - the same street has very different "normal" after dark.

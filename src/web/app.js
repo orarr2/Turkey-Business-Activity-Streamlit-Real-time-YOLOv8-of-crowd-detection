@@ -131,6 +131,10 @@ for (const slot of GRID_SLOTS) {
           <span class="val" data-k="person">-</span></span>
         <span class="kpi vehicles"><span class="lbl">Vehicles</span>
           <span class="val" data-k="vehicles">-</span></span>
+        <span class="kpi" data-speed-wrap style="display:none"
+              title="median speed of moving vehicles this sample - burst-based estimate (each vehicle scaled by its own class length), roughly ±40%">
+          <span class="lbl">~Speed</span>
+          <span class="val" data-k="speed">-</span></span>
         <span class="kpi"><span class="lbl">24h avg</span>
           <span class="val" data-k="avg">-</span></span>
         <span class="kpi"><span class="lbl">24h peak</span>
@@ -151,6 +155,7 @@ for (const slot of GRID_SLOTS) {
     latestVals:   tile.querySelectorAll("[data-k]"),
     activityBadge: tile.querySelector("[data-activity]"),
     activityText:  tile.querySelector("[data-activity-text]"),
+    speedWrap:     tile.querySelector("[data-speed-wrap]"),
     anomalyBadge: tile.querySelector("[data-anomaly]"),
     anomalyText:  tile.querySelector("[data-anomaly-text]"),
     fallbackBadge: tile.querySelector("[data-fallback]"),
@@ -521,6 +526,22 @@ function setLatest(st, d) {
   };
   set("person",   d.person);
   set("vehicles", d.vehicles);
+  // Vehicle speed chip: shown only when this sample tracked moving vehicles
+  // (a burst-based estimate; the tooltip carries the honesty disclaimer).
+  if (st.speedWrap) {
+    const sp = d.speeds;
+    if (sp && sp.moving > 0 && sp.median_kmh > 0) {
+      st.speedWrap.style.display = "";
+      set("speed", `${sp.median_kmh} km/h`);
+      st.speedWrap.title =
+          `median of ${sp.moving} moving vehicle(s) this sample - ` +
+          `burst estimate ±40% · max ~${sp.max_kmh} km/h` +
+          (sp.per_class ? " · " + Object.entries(sp.per_class)
+              .map(([c, v]) => `${c} ${v}`).join(", ") : "");
+    } else {
+      st.speedWrap.style.display = "none";
+    }
+  }
   // Sampled line-crossing flow, shown only for cameras with a configured
   // counting line (cameras.py "line"): in/out during this sample's burst.
   if (st.crossEl) {

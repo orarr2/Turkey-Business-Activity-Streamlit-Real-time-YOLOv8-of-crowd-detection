@@ -415,6 +415,108 @@ def track_burst(frames_boxes: list[list[dict]], frame_shape,
     return tracks
 
 
+# ---- Burst-based vehicle speed estimation --------------------------------------
+# Rides the same 3-frame burst (frames ~stride/fps apart) and the same greedy
+# centroid tracks. The trick that avoids per-camera calibration: every vehicle
+# is its own ruler. Its class has a typical real-world length, so the box's
+# pixel extent calibrates meters-per-pixel AT THAT SPOT in the frame, and the
+# centroid displacement between burst frames converts straight to m/s. This
+# is an ESTIMATE: viewing angle folds the true length into the projection
+# (a head-on car shows its 1.8 m width, not its 4.5 m length), so the error
+# band is roughly +-30-50%. Good for "crawling vs city-speed vs fast", not
+# for issuing speeding tickets - the UI labels it accordingly.
+
+VEHICLE_LENGTH_M = {
+    "car": 4.5, "truck": 10.0, "bus": 12.0,
+    "motorcycle": 2.2, "bicycle": 1.8, "train": 22.0,
+}
+# Typical HLS street cam frame rate; grab_burst spaces frames `stride` frames
+# apart, so dt between burst frames = stride / fps.
+BURST_FPS_ASSUMED = 25.0
+# Sanity band, km/h: below = parked/jitter (reported as 0), above = a track
+# mismatch (two different vehicles fused), discarded outright.
+SPEED_MIN_KMH = 3.0
+SPEED_MAX_KMH = 130.0
+# Vehicles at speed move further between burst frames than pedestrians, so
+# their track pass gets a wider matching budget than the default 0.12.
+SPEED_TRACK_MOVE_FRAC = 0.30
+
+
+def estimate_speeds(frames_boxes: list[list[dict]], frame_shape,
+                    stride: int = 25, fps: float = BURST_FPS_ASSUMED
+                    ) -> list[dict]:
+    """Per-vehicle speed estimates from a burst's box lists.
+
+    Returns one entry per vehicle track observed in >= 2 burst frames:
+        {"cls", "kmh", "points", "box"}   (box = last matched box, so the
+    caller can annotate the representative frame). Tracks whose implied
+    speed is impossibly high are dropped as mismatches; near-zero speeds
+    clamp to 0.0 (parked).
+    """
+    if len(frames_boxes) < 2 or stride <= 0 or fps <= 0:
+        return []
+    dt = stride / fps
+    vehicle_frames = [[b for b in boxes if b.get("cls") in VEHICLE_LENGTH_M]
+                      for boxes in frames_boxes]
+    if sum(len(f) for f in vehicle_frames) < 2:
+        return []
+    tracks = track_burst(vehicle_frames, frame_shape,
+                         max_move_frac=SPEED_TRACK_MOVE_FRAC)
+    out: list[dict] = []
+    for t in tracks:
+        if len(t) < 2:
+            continue
+        cls = t[0].get("cls")
+        real_len = VEHICLE_LENGTH_M.get(cls)
+        if not real_len:
+            continue
+        # meters-per-pixel from the track's own boxes (mean of extents, so a
+        # size flicker between frames doesn't swing the scale).
+        exts = []
+        for b in t:
+            w, h = _box_wh(b)
+            ext = max(w, h)
+            if ext > 0:
+                exts.append(ext)
+        if not exts:
+            continue
+        m_per_px = real_len / (sum(exts) / len(exts))
+        (x0, y0), (x1, y1) = _centroid(t[0]), _centroid(t[-1])
+        disp_px = ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5
+        kmh = disp_px * m_per_px / (dt * (len(t) - 1)) * 3.6
+        if kmh > SPEED_MAX_KMH:
+            continue                      # two different vehicles fused
+        if kmh < SPEED_MIN_KMH:
+            kmh = 0.0                     # parked / detection jitter
+        out.append({"cls": cls, "kmh": round(kmh, 1), "points": len(t),
+                    "box": t[-1]})
+    return out
+
+
+def summarize_speeds(speeds: list[dict]) -> dict | None:
+    """Aggregate estimate_speeds() output for the Firestore record:
+    {"median_kmh", "max_kmh", "moving", "tracked", "per_class": {cls: median}}.
+    Medians are over MOVING vehicles only - parked cars would drag a street's
+    "typical speed" to zero. None when nothing was tracked."""
+    if not speeds:
+        return None
+    moving = sorted(s["kmh"] for s in speeds if s["kmh"] > 0)
+    per_cls: dict[str, list[float]] = {}
+    for s in speeds:
+        if s["kmh"] > 0:
+            per_cls.setdefault(s["cls"], []).append(s["kmh"])
+    def _med(xs: list[float]) -> float:
+        return xs[len(xs) // 2] if xs else 0.0
+    return {
+        "tracked":    len(speeds),
+        "moving":     len(moving),
+        "median_kmh": round(_med(moving), 1) if moving else 0.0,
+        "max_kmh":    round(moving[-1], 1) if moving else 0.0,
+        "per_class":  {c: round(_med(sorted(v)), 1)
+                       for c, v in sorted(per_cls.items())},
+    }
+
+
 def _line_side(px: float, py: float, line: list) -> float:
     """Signed side of point vs the line A->B (cross product z)."""
     (ax, ay), (bx, by) = line
@@ -681,6 +783,9 @@ def draw_boxes(frame: np.ndarray, boxes: list[dict]) -> np.ndarray:
         color = _BOX_COLORS.get(b.get("cls", ""), (255, 255, 255))
         cv2.rectangle(out, (x1, y1), (x2, y2), color, 2)
         label = f'{b.get("cls", "?")} {b.get("conf", 0):.2f}'
+        if b.get("kmh"):
+            # burst-based estimate (see estimate_speeds) - "~" marks it as such
+            label += f' ~{b["kmh"]:.0f}km/h'
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
         ty = y1 - 4 if y1 - th - 6 >= 0 else y2 + th + 4
         cv2.rectangle(out, (x1, ty - th - 3), (x1 + tw + 4, ty + 3), color, -1)
@@ -749,7 +854,8 @@ def detect_burst(model, frames: list[np.ndarray], conf: float = 0.35,
                  roi_exclude: list | None = None,
                  roi_exclude_class: dict | None = None,
                  line: list | None = None,
-                 per_class_conf: dict | None = None) -> tuple[dict, list[dict], np.ndarray, dict]:
+                 per_class_conf: dict | None = None,
+                 burst_stride: int = 25) -> tuple[dict, list[dict], np.ndarray, dict]:
     """Run detection over a burst of frames and aggregate counts by median.
 
     Returns (counts, boxes, frame, debug):
@@ -795,6 +901,19 @@ def detect_burst(model, frames: list[np.ndarray], conf: float = 0.35,
     if line and len(per) >= 2:
         tracks = track_burst([b for _, b, _ in per], per[0][2].shape)
         debug["crossings"] = count_line_crossings(tracks, per[0][2].shape, line)
+    # Vehicle speed estimates ride the same burst. The matched boxes get a
+    # `kmh` tag in place - the representative frame's box list shares these
+    # dict objects, so every annotated surface (live view, review frame)
+    # shows the speed without a second model pass.
+    if len(per) >= 2:
+        speeds = estimate_speeds([b for _, b, _ in per], per[0][2].shape,
+                                 stride=burst_stride)
+        summary = summarize_speeds(speeds)
+        if summary:
+            debug["speeds"] = summary
+            for s in speeds:
+                if s["kmh"] > 0:
+                    s["box"]["kmh"] = s["kmh"]
     return counts, best[1], best[2], debug
 
 
