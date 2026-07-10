@@ -105,6 +105,32 @@ def test_sync_up_without_storage_is_none(tmp_path):
     assert pool_sync.sync_up(None, tmp_path) is None
 
 
+def test_sync_up_pushes_compacted_reid_db(tmp_path):
+    import sqlite3
+    db = tmp_path / "reid.db"
+    con = sqlite3.connect(str(db))
+    con.execute("CREATE TABLE meta (key TEXT, value TEXT)")
+    con.execute("INSERT INTO meta VALUES ('embedder_id', 'osnet_test')")
+    con.commit(); con.close()
+    fb = FakeFirebase()
+    stats = pool_sync.sync_up(fb, tmp_path, reid_db_path=db)
+    assert stats["uploaded"] == 1
+    blob_name = f"{pool_sync.PREFIX}/reid.db"
+    assert blob_name in fb.storage.blobs
+    # the pushed bytes are a valid sqlite snapshot with our row
+    snap = tmp_path / "snap.db"
+    snap.write_bytes(fb.storage.blobs[blob_name])
+    con = sqlite3.connect(str(snap))
+    assert con.execute("SELECT value FROM meta").fetchone()[0] == "osnet_test"
+    con.close()
+    manifest = json.loads(
+        fb.storage.blobs[f"{pool_sync.PREFIX}/{pool_sync.MANIFEST_NAME}"])
+    assert manifest.get("reid_db", {}).get("url")
+    # throttled: immediate second pass does not re-push
+    stats2 = pool_sync.sync_up(fb, tmp_path, reid_db_path=db)
+    assert stats2["uploaded"] == 0
+
+
 def test_sync_up_batches_large_backlog(tmp_path, monkeypatch):
     """First sync against a big accumulated pool must NOT upload everything
     in one pass (that burst oom-killed the 1 GB VM); it drains over rounds

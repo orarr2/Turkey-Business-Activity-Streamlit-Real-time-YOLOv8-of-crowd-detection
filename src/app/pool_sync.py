@@ -110,6 +110,34 @@ def _pool_files(snapshots_root: Path) -> dict[str, float]:
 
 # ---- VM side ------------------------------------------------------------------
 
+def _compact_sqlite_copy(db_path: Path) -> bytes | None:
+    """Point-in-time compacted snapshot of a live sqlite db (VACUUM INTO).
+    Returns the bytes, or None when the copy could not be produced."""
+    import sqlite3
+    import tempfile
+    tmp = Path(tempfile.gettempdir()) / f".{db_path.stem}_sync_copy.db"
+    try:
+        tmp.unlink()
+    except OSError:
+        pass
+    try:
+        con = sqlite3.connect(str(db_path))
+        try:
+            con.execute("VACUUM INTO ?", (str(tmp),))
+        finally:
+            con.close()
+        data = tmp.read_bytes()
+        return data
+    except Exception as e:
+        print(f"pool_sync: reid.db compact failed ({type(e).__name__}: {e})")
+        return None
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
 def sync_up(firebase, snapshots_root: str | Path,
             reid_db_path: str | Path | None = None,
             state_path: str | Path | None = None) -> dict | None:
@@ -159,6 +187,13 @@ def sync_up(firebase, snapshots_root: str | Path,
                     state[rel] = entry
                     uploaded += 1
                     changed = True
+                    # Persist progress mid-pass: on a memory-starved host the
+                    # upload window is exactly when the process is most likely
+                    # to be killed, and losing the ledger meant re-uploading
+                    # the same files every life while the manifest stayed
+                    # frozen at the last COMPLETED pass.
+                    if uploaded % 10 == 0:
+                        _write_state(sp, state)
             manifest_files[rel] = {"mtime": entry["mtime"],
                                    "url": entry["url"],
                                    "size": entry.get("size", 0)}
@@ -176,6 +211,10 @@ def sync_up(firebase, snapshots_root: str | Path,
 
         # Re-ID registry: throttled, it changes every round but a snapshot
         # every REID_PUSH_EVERY_S is plenty for the local search/registry view.
+        # Pushed as a VACUUM INTO compact copy: the live db accumulates free
+        # pages between prunes and can exceed the per-file cap (which silently
+        # blocked the push forever); the compacted snapshot is both smaller on
+        # the wire and a consistent point-in-time read of a live WAL database.
         reid_entry = state.get("_reid_db") or {}
         if reid_db_path:
             rp = Path(reid_db_path)
@@ -188,8 +227,8 @@ def sync_up(firebase, snapshots_root: str | Path,
                 if (r_mtime is not None
                         and now - float(reid_entry.get("pushed_at", 0)) >= REID_PUSH_EVERY_S
                         and r_mtime != reid_entry.get("mtime")):
-                    data = rp.read_bytes()
-                    if len(data) <= MAX_FILE_BYTES:
+                    data = _compact_sqlite_copy(rp)
+                    if data is not None and len(data) <= MAX_FILE_BYTES:
                         blob = bucket.blob(f"{PREFIX}/reid.db")
                         blob.upload_from_string(
                             data, content_type="application/octet-stream")
@@ -199,6 +238,10 @@ def sync_up(firebase, snapshots_root: str | Path,
                         state["_reid_db"] = reid_entry
                         uploaded += 1
                         changed = True
+                    elif data is not None:
+                        print(f"pool_sync: reid.db compact copy still "
+                              f"{len(data)} bytes > cap {MAX_FILE_BYTES} - "
+                              f"skipping push")
 
         if changed:
             manifest = {
