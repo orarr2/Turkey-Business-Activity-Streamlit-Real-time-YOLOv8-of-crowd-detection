@@ -17,6 +17,7 @@ different dimensions AND different metric scales).
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import cv2
@@ -25,6 +26,26 @@ import numpy as np
 PERSON_CROP  = (64, 128)   # w x h - histogram embedder
 VEHICLE_CROP = (96, 96)
 OSNET_INPUT  = (128, 256)  # w x h - standard torchreid input
+
+# The conventional drop location tools/setup_reid.sh downloads to. When the
+# file exists it is picked up automatically (see resolve_model_path), so one
+# script run upgrades the collector AND the dashboard with zero config edits.
+_SRC_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_OSNET_PATH = _SRC_ROOT / "data" / "osnet_x0_25_msmt17.onnx"
+
+
+def resolve_model_path(model_path: str | None = None) -> str | None:
+    """Resolve which re-ID model to load: explicit argument first, then the
+    REID_MODEL env var, then the conventional data/ path if the ONNX has
+    been downloaded there. None means 'histogram fallback'."""
+    if model_path:
+        return model_path
+    env = os.environ.get("REID_MODEL")
+    if env:
+        return env
+    if DEFAULT_OSNET_PATH.is_file():
+        return str(DEFAULT_OSNET_PATH)
+    return None
 
 _IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _IMAGENET_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
@@ -102,11 +123,14 @@ class OsnetEmbedder:
 def make_embedder(model_path: str | None = None):
     """Build the best available embedder.
 
-    With `model_path`: OSNet via onnxruntime; if the file is missing or
+    Model resolution: explicit arg > REID_MODEL env > the conventional
+    ``data/osnet_x0_25_msmt17.onnx`` drop path (see resolve_model_path).
+    With a model path: OSNet via onnxruntime; if the file is missing or
     onnxruntime isn't installed, WARN LOUDLY and fall back to the histogram -
     a silently degraded re-ID would invalidate the returning-visitor feature
     without anyone noticing.
     """
+    model_path = resolve_model_path(model_path)
     if model_path:
         try:
             emb = OsnetEmbedder(model_path)

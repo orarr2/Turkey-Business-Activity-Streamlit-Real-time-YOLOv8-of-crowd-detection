@@ -1,20 +1,28 @@
 #!/usr/bin/env bash
 # One-shot OSNet re-ID model setup.
 #
+# NOTE: since 2026-07 the ready-to-run ONNX ships IN THE REPO at
+# data/osnet_x0_25_msmt17.onnx (907 KB, batch dim rewritten to dynamic so
+# batch-1 inference works). app.reid_embed auto-detects it, so a plain
+# `git pull` + `pip install onnxruntime` + service restart is the whole
+# upgrade. This script remains only as a re-download path if the file is
+# ever deleted.
+#
 # The default appearance embedder is an HSV histogram (color signature).
 # It's dependency-free but blind to lighting/pose changes and matches by
-# color rather than identity. OSNet is a small (~5 MB) purpose-built
-# re-ID CNN that keeps working across lighting shifts and different
-# angles - the piece the histogram fundamentally cannot do.
+# color rather than identity. OSNet is a small purpose-built re-ID CNN
+# that keeps working across lighting shifts and different angles - the
+# piece the histogram fundamentally cannot do.
 #
 # Usage (from the src/ directory):
 #     bash tools/setup_reid.sh
 # Then restart the collector + dashboard server. app.reid_embed picks
-# up the ONNX automatically when REID_MODEL points at it.
+# up the ONNX automatically (env REID_MODEL overrides the default path).
 #
-# The script tries a couple of well-known mirrors; if none work (proxy
-# blocks, no network), it falls back to printing the manual "produce
-# your own with torchreid" instructions and exits 1.
+# CAVEAT for the HuggingFace mirror below: that export carries a FIXED
+# batch dimension of 16. After a fresh download, rewrite dim 0 of the
+# graph input+output to dynamic (see the one-liner in the repo history /
+# the in-repo copy already has this applied) or batch-1 inference fails.
 
 set -eu
 
@@ -35,9 +43,10 @@ if [ -f "$OUT_PATH" ]; then
 fi
 
 # Public mirrors, in order of preference. Add / edit as needed.
+# (deepcam-cn went 401 and the yolo_tracking media path 404'd in 2026-07;
+#  anriha verified working then - remember the batch-dim caveat above.)
 URLS=(
-    "https://huggingface.co/deepcam-cn/reid-onnx/resolve/main/osnet_x0_25_msmt17.onnx"
-    "https://media.githubusercontent.com/media/mikel-brostrom/yolo_tracking/master/tracker/weights/osnet_x0_25_msmt17.onnx"
+    "https://huggingface.co/anriha/osnet_x0_25_msmt17/resolve/main/osnet_x0_25_msmt17.onnx"
 )
 
 TMP="$OUT_PATH.download.tmp"
@@ -45,9 +54,10 @@ for URL in "${URLS[@]}"; do
     echo "attempting: $URL"
     if command -v curl >/dev/null 2>&1; then
         if curl -sSL --fail --max-time 60 "$URL" -o "$TMP"; then
-            # Sanity check: min 1MB to guard against 404 HTML
+            # Sanity check: min 500KB to guard against 404 HTML pages
+            # (the anriha export is 907 KB - under the old 1MB gate)
             SIZE=$(stat -c%s "$TMP" 2>/dev/null || stat -f%z "$TMP")
-            if [ "$SIZE" -gt 1000000 ]; then
+            if [ "$SIZE" -gt 500000 ]; then
                 mv "$TMP" "$OUT_PATH"
                 echo ""
                 echo "OK: $OUT_PATH ($SIZE bytes)"
