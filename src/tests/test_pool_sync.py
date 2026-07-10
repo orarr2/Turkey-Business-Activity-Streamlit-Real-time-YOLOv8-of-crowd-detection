@@ -212,6 +212,20 @@ def test_pull_once_downloads_and_evicts(tmp_path, monkeypatch):
     assert local_only.exists()
 
 
+def test_pull_redownloads_locally_deleted_files(tmp_path, monkeypatch):
+    """clear-all in the dashboard deletes pulled files; the ledger must not
+    keep claiming them current or the pool stays empty forever."""
+    manifest = {"files": {"review_frames/camA/1.jpg":
+                          {"mtime": 1.0, "url": "https://s.example/review_frames/camA/1.jpg"}}}
+    monkeypatch.setattr(pool_sync, "_http_get",
+                        _fake_http(manifest, {"review_frames/camA/1.jpg": b"img"}))
+    assert pool_sync.pull_once(tmp_path, bucket="b")["downloaded"] == 1
+    target = tmp_path / "review_frames" / "camA" / "1.jpg"
+    target.unlink()                                   # user hits clear-all
+    assert pool_sync.pull_once(tmp_path, bucket="b")["downloaded"] == 1
+    assert target.read_bytes() == b"img"
+
+
 def test_pull_once_rejects_path_traversal(tmp_path, monkeypatch):
     manifest = {"files": {
         "../evil.jpg": {"mtime": 1.0, "url": "https://s.example/../evil.jpg"},

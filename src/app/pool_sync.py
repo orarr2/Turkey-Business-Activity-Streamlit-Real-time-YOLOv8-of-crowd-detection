@@ -319,7 +319,13 @@ def pull_once(snapshots_root: str | Path,
                 or parts[0] not in POOL_SUBDIRS):
             continue
         known = state.get(rel)
-        if known is not None and float(known.get("mtime", -1)) == float(meta.get("mtime", -2)):
+        # "Already pulled" only counts if the file still EXISTS locally: the
+        # dashboard's clear-all buttons delete pool files, and a ledger that
+        # keeps claiming them current would leave the pool empty until the
+        # remote mtime happened to change.
+        if (known is not None
+                and float(known.get("mtime", -1)) == float(meta.get("mtime", -2))
+                and (root / rel).is_file()):
             continue
         url = meta.get("url") or f"https://storage.googleapis.com/{bucket}/{PREFIX}/{rel}"
         try:
