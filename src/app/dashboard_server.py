@@ -165,6 +165,17 @@ class _VisualSearchState:
                     except Exception as e:
                         print(f"visual-search: review-frames bootstrap skipped "
                               f"({type(e).__name__}: {e})")
+                # Per-object extraction of the review-frames pool. Needs no
+                # YOLO (boxes ship in the frame metadata), so it runs even
+                # when the model failed to load above.
+                try:
+                    from app.frame_crops import refresh as _fc_refresh
+                    summary = _fc_refresh(self.embedder, SNAPSHOTS_DIR)
+                    if summary.get("frames_touched"):
+                        print(f"visual-search: review-crops refresh {summary}")
+                except Exception as e:
+                    print(f"visual-search: review-crops refresh failed "
+                          f"({type(e).__name__}: {e}) - continuing")
                 self._ready = True
             return self
 
@@ -325,6 +336,18 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         order     = q.get("order", ["time_desc"])[0]
         try:
             st = _VISUAL_SEARCH.get()
+            # Fold any review frames that arrived since the last search (the
+            # pool-sync puller drops new ones in every couple of minutes) into
+            # review_crops/ so they are searchable RIGHT NOW. No-op when the
+            # frames pool hasn't changed - one directory listing.
+            try:
+                from app.frame_crops import refresh as _fc_refresh
+                fc = _fc_refresh(st.embedder, SNAPSHOTS_DIR)
+                if fc.get("crops_added"):
+                    print(f"  * review-crops: +{fc['crops_added']} "
+                          f"({fc.get('crops_skipped_dup', 0)} dup-skipped)")
+            except Exception as ex:
+                print(f"  ! review-crops refresh skipped: {type(ex).__name__}: {ex}")
             if data:
                 from app.visual_search import search_image_bytes
                 result = search_image_bytes(

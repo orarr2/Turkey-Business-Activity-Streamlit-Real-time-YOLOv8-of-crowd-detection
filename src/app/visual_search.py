@@ -62,7 +62,12 @@ DEFAULT_DB     = _SRC_ROOT / "data" / "reid.db"
 # crop per LIVE_SAMPLE_EVERY_N bursts per camera, so the review UI has
 # fresh material even on cameras that never fire returning / events /
 # anomalies. See app.live_samples for the writer side.
-CROP_SUBDIRS = ("returning", "events", "anomalies_crops", "live_samples")
+# `review_crops/` is the per-object extraction of the review_frames pool
+# (see app.frame_crops) - the frames the collector captured in the past,
+# finally searchable. Its crops OUTLIVE the 100-frame LRU of the source
+# pool, so this subtree is where most of the searchable history lives.
+CROP_SUBDIRS = ("returning", "events", "anomalies_crops", "live_samples",
+                "review_crops")
 ANOMALY_CROPS_SUBDIR = "anomalies_crops"
 
 
@@ -234,11 +239,13 @@ class SnapshotIndex:
                 yield p
 
     def _manifest_cls(self) -> dict[str, str]:
-        """rel_path -> cls. Reads two manifest formats:
+        """rel_path -> cls. Reads three manifest formats:
         * ``manifest.json`` under ``returning/`` (list of items with
           crop_url + cls);
         * ``.anomaly_crops.json`` under ``anomalies_crops/`` written by
-          ``app.anomaly_crops`` (dict keyed by rel_crop_path)."""
+          ``app.anomaly_crops`` (dict keyed by rel_crop_path);
+        * ``.review_crops.json`` under ``review_crops/`` written by
+          ``app.frame_crops`` (same schema as the anomaly one)."""
         out: dict[str, str] = {}
         # returning/ format
         for manifest in self.root.rglob("manifest.json"):
@@ -251,16 +258,17 @@ class SnapshotIndex:
                 cls = it.get("cls")
                 if url.startswith("/snapshots/") and cls:
                     out[url[len("/snapshots/"):]] = cls
-        # anomaly-crops format
-        for manifest in self.root.rglob(".anomaly_crops.json"):
-            try:
-                data = json.loads(manifest.read_text())
-            except Exception:
-                continue
-            for rel, meta in (data.get("crops") or {}).items():
-                cls = meta.get("cls")
-                if cls:
-                    out[rel] = cls
+        # crops-map format (anomaly_crops + frame_crops share the schema)
+        for name in (".anomaly_crops.json", ".review_crops.json"):
+            for manifest in self.root.rglob(name):
+                try:
+                    data = json.loads(manifest.read_text())
+                except Exception:
+                    continue
+                for rel, meta in (data.get("crops") or {}).items():
+                    cls = meta.get("cls")
+                    if cls:
+                        out[rel] = cls
         return out
 
     @staticmethod
@@ -508,7 +516,14 @@ def search_image(image_bgr: np.ndarray, *, model=None, embedder=None,
     seen_snap: set[str] = set()
     seen_ent: set[int] = set()
     for q in queries:
+        # Rail queries relax the same-class rule: the street pools contain
+        # nearly zero `train` crops (no rail camera feeds them), so a metro
+        # photo matched same-class-only returned nothing BY CONSTRUCTION.
+        # Relaxed, it at least surfaces the bus/large-vehicle lookalikes the
+        # pool does hold - an honest "closest things the system has seen".
+        relax_cls = (q.cls == "train" and not classes)
         for m in idx.search(q, top_n=top_n, min_sim=min_sim,
+                            same_class_only=not relax_cls,
                             classes=classes,
                             time_from=time_from, time_to=time_to):
             if m.extra["path"] in seen_snap:
