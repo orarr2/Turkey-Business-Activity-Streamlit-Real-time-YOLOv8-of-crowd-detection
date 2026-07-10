@@ -781,7 +781,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         walks the in-memory review store and does arithmetic. Safe to poll
         every 10s from the browser."""
         try:
-            from app.model_metrics import compute, header_line
+            from app.model_metrics import compute, header_line, learning_curve
             metrics = compute(_review_store())
             try:
                 from app.confidence_boost import summary as _cb_summary
@@ -789,6 +789,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             except Exception:
                 boost = None
             metrics["header_line"] = header_line(metrics, boost)
+            # Batch-by-batch mistake trend - the "is it actually getting
+            # better?" chart the operator asked for.
+            metrics["curve"] = learning_curve(_review_store())
             self._send_json(200, metrics)
         except Exception as e:
             self._send_json(500, {"error": f"{type(e).__name__}: {e}"})

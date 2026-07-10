@@ -80,6 +80,33 @@ def test_entity_gallery_caps(tmp_path, monkeypatch):
     assert len(items) == 3 and items[0]["url"].startswith("/snapshots/entities/")
 
 
+def test_learning_curve_batches_and_trend(tmp_path):
+    from app.labels import ReviewStore
+    from app.model_metrics import learning_curve
+    store = ReviewStore(tmp_path / "reviews.json")
+    # 10 frames reviewed in order: first 5 are heavy-mistake, last 5 clean -
+    # the curve must show two points with a falling error rate.
+    for i in range(10):
+        early = i < 5
+        store.submit_frame(
+            f"review_frames/camA/{1000 + i}.jpg", "camA",
+            {"0": "wrong" if early else "correct",
+             "1": "relabel:truck" if early else "correct"},
+            [{"cls": "person", "box": [1, 1, 30, 60]}] if early else [])
+    pts = learning_curve(store, batch_size=5)
+    assert len(pts) == 2
+    assert pts[0]["frames"] == 5 and pts[1]["frames"] == 5
+    assert pts[0]["error_rate"] == 1.0          # 3 mistakes / 3 signals per frame
+    assert pts[1]["error_rate"] == 0.0
+    assert pts[0]["batch"] == 1 and pts[1]["batch"] == 2
+    # a frame with zero signals contributes nothing
+    store.submit_frame("review_frames/camA/2000.jpg", "camA", {}, [])
+    assert len(learning_curve(store, batch_size=5)) == 2
+    # empty store -> empty curve
+    empty = ReviewStore(tmp_path / "r2.json")
+    assert learning_curve(empty) == []
+
+
 def test_header_line_plain_language():
     m = {"tp": 3, "fp": 0, "fn": 21, "n_precision": 3, "n_recall": 24,
          "accuracy": 1.0, "recall": 0.125}

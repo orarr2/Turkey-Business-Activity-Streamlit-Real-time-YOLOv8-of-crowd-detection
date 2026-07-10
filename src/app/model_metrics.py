@@ -158,6 +158,61 @@ def compute(review_store) -> dict:
     }
 
 
+def learning_curve(review_store, batch_size: int = 5) -> list[dict]:
+    """Model mistake-rate per tagging batch, chronological - the operator's
+    "is it actually getting better?" chart.
+
+    Each reviewed frame contributes signals: per-box verdicts (wrong or
+    relabel = a model mistake, correct = a model win) plus every
+    operator-drawn miss (a mistake by definition). Frames are grouped into
+    batches of `batch_size` in review order - matching the paced queue, so
+    one chart point = one sitting's batch. A falling error_rate over
+    batches is the improvement the operator asked to SEE.
+
+    Honesty caveat carried to the UI: the rate also moves with how hard
+    the sampled frames are; the uncertainty-first queue deliberately
+    serves hard ones, so a plateau is not failure - a sustained rise is.
+    """
+    frs = sorted(getattr(review_store, "_frames_by_path", {}).values(),
+                 key=lambda fr: fr.reviewed_at or "")
+    points: list[dict] = []
+    batch = {"frames": 0, "signals": 0, "mistakes": 0, "last": ""}
+
+    def _flush() -> None:
+        if not batch["frames"]:
+            return
+        denom = batch["signals"]
+        points.append({
+            "batch":            len(points) + 1,
+            "frames":           batch["frames"],
+            "signals":          denom,
+            "mistakes":         batch["mistakes"],
+            "error_rate":       round(batch["mistakes"] / denom, 4) if denom else None,
+            "last_reviewed_at": batch["last"],
+        })
+
+    for fr in frs:
+        signals = mistakes = 0
+        for v in (fr.box_verdicts or {}).values():
+            signals += 1
+            if v == "wrong" or v.startswith("relabel:"):
+                mistakes += 1
+        miss = len(fr.missed_detections or ())
+        signals += miss
+        mistakes += miss
+        if signals == 0:
+            continue
+        batch["frames"] += 1
+        batch["signals"] += signals
+        batch["mistakes"] += mistakes
+        batch["last"] = fr.reviewed_at or ""
+        if batch["frames"] >= batch_size:
+            _flush()
+            batch = {"frames": 0, "signals": 0, "mistakes": 0, "last": ""}
+    _flush()
+    return points
+
+
 def header_line(metrics: dict, boost_summary: dict | None = None) -> str:
     """Human-readable one-line summary for the dashboard header.
 

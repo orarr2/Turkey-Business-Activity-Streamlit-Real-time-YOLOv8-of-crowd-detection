@@ -590,6 +590,21 @@
       <h2>Learning proof - how your reviews changed the model
         <span class="est-tag">per-camera, per-class confidence</span></h2>
       <div id="boost-table-wrap"></div>
+      <!-- The operator's "is it actually getting better?" chart: model
+           mistake-rate per tagging batch (5 frames each, chronological).
+           Data rides the /api/model-metrics poll below. -->
+      <div id="curve-wrap" hidden style="margin-top:14px">
+        <h3 style="font-size:13px;margin:0 0 6px">Is it getting better? -
+          model mistake rate per tagging batch</h3>
+        <div style="max-width:640px"><canvas id="learning-curve" height="130"></canvas></div>
+        <div class="footnote" style="margin-top:6px">
+          Each point = one batch of ~5 frames you reviewed: the share of
+          boxes you marked wrong/relabeled plus objects you added by hand.
+          A falling line means the model makes fewer mistakes on your
+          checks. Note: the queue deliberately serves the HARDEST frames,
+          so a plateau is normal - a sustained rise is the real warning.
+        </div>
+      </div>
     </div>
 
     <!-- Frame-based review UI. Canvas shows the whole frame with every
@@ -691,9 +706,9 @@
   <!-- firebase-config.js is gitignored per-clone; see docs/firebase_setup.md -->
   <!-- ?v=N is a cache-buster: bump it whenever any of the JS files changes,
        so the browser doesn't serve a stale ES-module from disk cache. -->
-  <script type="module" src="./firebase-config.js?v=38"></script>
-  <script type="module" src="./cameras.js?v=38"></script>
-  <script type="module" src="./app.js?v=38"></script>
+  <script type="module" src="./firebase-config.js?v=39"></script>
+  <script type="module" src="./cameras.js?v=39"></script>
+  <script type="module" src="./app.js?v=39"></script>
 
   <!-- Search UI. INLINE and NON-MODULE on purpose: it wires POST /api/search
        on this same server, has no Firebase dependency, and must keep working
@@ -1614,8 +1629,40 @@
     if (!el) return;
     // Bold the numbers we care about so they pop out of the muted grey.
     const highlight = (s) => String(s || "").replace(
-        /(\d+(?:\.\d+)?)\s*(%|reviews|classes)/g,
+        /(\d+(?:\.\d+)?)\s*(%|reviews|classes|boxes|objects|thresholds)/g,
         "<b>$1</b> $2");
+    // "Is it getting better?" line chart - mistake rate per tagging batch.
+    let curveChart = null;
+    function renderCurve(points) {
+      const wrap = document.getElementById("curve-wrap");
+      if (!wrap || typeof Chart === "undefined") return;
+      const pts = (points || []).filter((p) => p.error_rate != null);
+      // One point is not a trend; hide until a second batch exists.
+      wrap.hidden = pts.length < 2;
+      if (pts.length < 2) return;
+      const labels = pts.map((p) => `batch ${p.batch}`);
+      const data = pts.map((p) => Math.round(p.error_rate * 100));
+      if (curveChart) {
+        curveChart.data.labels = labels;
+        curveChart.data.datasets[0].data = data;
+        curveChart.update("none");
+        return;
+      }
+      curveChart = new Chart(document.getElementById("learning-curve"), {
+        type: "line",
+        data: { labels, datasets: [{
+          label: "model mistakes among your checks (%)",
+          data, borderColor: "#f0a35e", backgroundColor: "#f0a35e33",
+          fill: true, tension: 0.25, pointRadius: 4,
+        }]},
+        options: {
+          animation: false, responsive: true,
+          scales: { y: { min: 0, max: 100,
+                         ticks: { callback: (v) => v + "%" } } },
+          plugins: { legend: { display: false } },
+        },
+      });
+    }
     async function refresh() {
       try {
         const r = await fetch("/api/model-metrics", { cache: "no-store" });
@@ -1623,6 +1670,7 @@
         const data = await r.json();
         el.classList.remove("stale");
         el.innerHTML = highlight(data.header_line || "Model: -");
+        renderCurve(data.curve);
       } catch (_) {
         el.classList.add("stale");
       }
