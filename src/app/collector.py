@@ -61,11 +61,17 @@ from app.presence import PresenceTracker
 from app.reid import ReidStore
 
 # --- Write rate-limit guard (protects your Firestore write quota / billing) ---
-# Free tier: ~20k writes/day. Each slot per round = 3 writes (footfall + latest +
-# reid_stats). 4 slots @ 20s => ~52k writes/day. Blaze free tier covers it, but
-# we still enforce a floor to prevent typos like --interval 1.
+# Free tier: ~20k writes/day. Each slot per round = 2 writes (footfall +
+# latest); reid_stats adds a 3rd but only every REID_STATS_EVERY_ROUNDS
+# rounds - it is a slow-moving aggregate (total uniques/sightings) and
+# writing it every round was exactly what pushed 4 slots @ 40s to ~25.9k
+# writes/day, past the free quota. Throttled: 4x2x2160 + 4x2160/5 = ~19k/day,
+# UNDER the free tier at the same 40s cadence - the dashboard's re-ID table
+# now refreshes every ~3-4 min instead of every 40s, which nobody can tell.
+# We still enforce an interval floor to prevent typos like --interval 1.
 MIN_INTERVAL_S = 5
 FREE_TIER_WRITES_PER_DAY = 20_000
+REID_STATS_EVERY_ROUNDS = 5
 
 # --- Fallback picker knobs ----------------------------------------------------
 FALLBACK_MAX_FAILURES  = 3   # consecutive failures before advancing the chain
@@ -891,7 +897,8 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
                 returning_sim_min: float = RETURNING_MIN_SIMILARITY,
                 returning_min_prior: int  = RETURNING_MIN_PRIOR_SIGHTINGS,
                 returning_cooldown_sec: float = RETURNING_PER_ENTITY_COOLDOWN,
-                _returning_last_save: dict | None = None) -> bool:
+                _returning_last_save: dict | None = None,
+                write_reid_stats: bool = True) -> bool:
     """Sample the currently-active cam for a slot and write to Firestore.
 
     Detection runs on a short frame burst and keeps the median count (see
@@ -1135,7 +1142,7 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
 
     try:
         firebase.write(slot_id, record)
-        if reid is not None and ok:
+        if reid is not None and ok and write_reid_stats:
             firebase.write_reid_stats(slot_id, cam_id, reid.stats(cam_id))
     except Exception as e:
         print(f"[{ts}] {slot_id}: firebase write failed ({e})")
@@ -1483,13 +1490,18 @@ def main() -> None:
     print(f"fallback: {FALLBACK_MAX_FAILURES} misses to advance, "
           f"retry primary every {FALLBACK_RETRY_MINUTES} min.")
 
-    writes_per_round = len(GRID_SLOTS) * (3 if reid else 2)
+    writes_per_round = len(GRID_SLOTS) * 2
+    if reid:
+        writes_per_round += len(GRID_SLOTS) / REID_STATS_EVERY_ROUNDS
     projected = writes_per_round * (86400 / args.interval)
     print(f"~{projected:,.0f} Firestore writes/day projected "
           f"(free tier ~ {FREE_TIER_WRITES_PER_DAY:,}).")
     if projected > FREE_TIER_WRITES_PER_DAY:
-        print("  ! Above the Spark free tier - on Blaze this stays in the free tier "
-              "quotas; set a budget alert to be safe.")
+        print("  ! Above the free-tier write quota - the overage is billed on "
+              "Blaze. Raise --interval or REID_STATS_EVERY_ROUNDS to get back "
+              "under it.")
+    else:
+        print("  within the daily free-tier write quota - Firestore cost $0.")
     print("Ctrl+C to stop.\n")
 
     profile_save_s   = max(60.0, args.profile_save_min * 60)
@@ -1559,7 +1571,9 @@ def main() -> None:
                                  returning_gap_sec      = returning_gap_sec,
                                  returning_sim_min      = args.returning_min_similarity,
                                  returning_min_prior    = args.returning_min_prior,
-                                 returning_cooldown_sec = returning_cooldown_sec)
+                                 returning_cooldown_sec = returning_cooldown_sec,
+                                 write_reid_stats=(_round_counter
+                                                   % REID_STATS_EVERY_ROUNDS == 0))
                 changed = picker.record_result(ok)
                 if changed is not None:
                     print(f"  * {slot['slot_id']}: fallback -> {changed}")
