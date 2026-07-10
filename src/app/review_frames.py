@@ -43,11 +43,11 @@ from app.visual_search import SNAPSHOTS_ROOT
 FRAMES_SUBDIR = "review_frames"
 
 REVIEW_FRAME_EVERY_N = int(os.environ.get("REVIEW_FRAME_EVERY_N") or 5)
-# Raised 100 -> 500 (2026-07): the VM's 30 GB disk sat 97% empty while the
-# pool wrapped after ~3 hours of captures. 500 frames ~= a day and a half of
-# searchable, taggable history at ~100 MB - and five times the raw material
-# for the training-export pipeline. Storage/egress stay far inside the free
-# quotas (sync uploads are batched and the manifest is ~cheap either way).
+# 500-frame CLOUD bank (the VM's 30 GB disk is nearly empty and the operator
+# wants history accumulating there). The operator's PERSONAL machine never
+# mirrors all of it - pool_sync bounds the local mirror to a small working
+# set - and the review UI serves a paced, uncertainty-sampled queue, so the
+# bank's size is invisible to the person tagging.
 REVIEW_FRAME_MAX_FILES = int(os.environ.get("REVIEW_FRAME_MAX_FILES") or 500)
 
 # Bootstrap: seed the pool from shipped camera fixture frames the moment the

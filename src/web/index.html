@@ -605,9 +605,11 @@
         drag on the canvas to mark an object the model failed to see. Every
         verdict goes to <code>data/reviews.json</code>, hot-reloads the
         collector's per-camera confidence within ~7 minutes, and feeds the
-        training exporter (<code>tools/export_labels.py</code>). Click any
-        thumbnail below to re-open a frame - including ones you already
-        reviewed - and amend it.</div>
+        training exporter (<code>tools/export_labels.py</code>). The strip
+        below is a paced queue: the 5 frames the model is LEAST sure about,
+        then the next 5 when you finish, with a breather after 30 - the full
+        bank stays in the cloud, never dumped on you. Reviewed thumbnails
+        (✓) re-open for amending.</div>
       <div class="frame-strip" id="frame-strip" hidden></div>
       <div class="review-frame-body">
         <div class="canvas-wrap">
@@ -689,9 +691,9 @@
   <!-- firebase-config.js is gitignored per-clone; see docs/firebase_setup.md -->
   <!-- ?v=N is a cache-buster: bump it whenever any of the JS files changes,
        so the browser doesn't serve a stale ES-module from disk cache. -->
-  <script type="module" src="./firebase-config.js?v=36"></script>
-  <script type="module" src="./cameras.js?v=36"></script>
-  <script type="module" src="./app.js?v=36"></script>
+  <script type="module" src="./firebase-config.js?v=37"></script>
+  <script type="module" src="./cameras.js?v=37"></script>
+  <script type="module" src="./app.js?v=37"></script>
 
   <!-- Search UI. INLINE and NON-MODULE on purpose: it wires POST /api/search
        on this same server, has no Firebase dependency, and must keep working
@@ -1333,6 +1335,18 @@
       }
     }
 
+    // The cloud bank may hold hundreds of frames; showing them all made
+    // tagging feel endless. The strip is a PACED QUEUE instead: the next
+    // QUEUE_SIZE frames the model is least sure about (that is where a
+    // verdict teaches the most) + the last few reviewed for quick amends.
+    // Finish a batch and the next appears; SESSION_CAP verdicts per sitting,
+    // then a rest screen with an explicit "keep going" escape hatch.
+    const QUEUE_SIZE = 5;
+    const REVIEWED_TAIL = 5;
+    const SESSION_CAP = 30;
+    let sessionSaved = 0;
+    let restOverride = false;
+
     async function loadStrip() {
       if (!stripEl) return;
       try {
@@ -1340,14 +1354,24 @@
         if (!r.ok) return;
         const data = await r.json();
         const frames = data.frames || [];
-        stripEl.hidden = frames.length === 0;
+        const queue = frames.filter((f) => !f.reviewed)
+            .sort((a, b) => (b.uncertainty ?? 0) - (a.uncertainty ?? 0)
+                            || b.frame_path.localeCompare(a.frame_path))
+            .slice(0, QUEUE_SIZE);
+        const done = frames.filter((f) => f.reviewed)
+            .sort((a, b) => b.frame_path.localeCompare(a.frame_path))
+            .slice(0, REVIEWED_TAIL);
+        const show = [...queue, ...done];
+        stripEl.hidden = show.length === 0;
         stripEl.innerHTML = "";
-        for (const f of frames) {
+        for (const f of show) {
           const item = document.createElement("div");
           item.className = "fs-item";
           item.dataset.rel = f.frame_path;
-          item.title = `${f.cam_id} · ${f.n_boxes} boxes · ` +
-              (f.reviewed ? "reviewed - click to amend" : "not reviewed yet");
+          item.title = f.reviewed
+              ? `${f.cam_id} · reviewed - click to amend`
+              : `${f.cam_id} · model uncertainty ` +
+                `${Math.round((f.uncertainty ?? 0) * 100)}% - up next`;
           item.innerHTML =
               `<img loading="lazy" src="${f.url}" alt="">` +
               (f.reviewed ? '<span class="fs-done">✓</span>' : "") +
@@ -1357,6 +1381,23 @@
         }
         if (current) markStripCurrent(current.frame_path);
       } catch (_) { /* strip is a convenience - never block review on it */ }
+    }
+
+    function showRestScreen() {
+      canvas.hidden = true;
+      camEl.textContent = "-"; pathEl.textContent = "";
+      markStripCurrent(null);
+      emptyEl.innerHTML =
+          `you tagged <b>${sessionSaved}</b> frames this sitting - that is a ` +
+          `full session's worth of teaching.<br>` +
+          `<span style="font-size:11px">the pool keeps refilling from the ` +
+          `cameras; come back later, or </span>` +
+          `<button id="rest-continue" style="font-size:11px">keep going</button>`;
+      emptyEl.style.display = "";
+      document.getElementById("rest-continue").addEventListener("click", () => {
+        restOverride = true;
+        loadNext();
+      });
     }
 
     async function submit() {
@@ -1377,9 +1418,20 @@
         });
         const data = await r.json();
         if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+        sessionSaved++;
         await refreshStats();
         await loadStrip();
+        if (sessionSaved >= SESSION_CAP && !restOverride) {
+          showRestScreen();
+          return;
+        }
         await loadNext();
+        if (sessionSaved % QUEUE_SIZE === 0) {
+          statusEl.className = "review-status";
+          statusEl.textContent =
+              `batch of ${QUEUE_SIZE} done (${sessionSaved} this sitting) - ` +
+              `next ${QUEUE_SIZE} queued`;
+        }
       } catch (err) {
         statusEl.className = "review-status err";
         statusEl.textContent = `save failed: ${err.message}`;

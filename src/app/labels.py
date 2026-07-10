@@ -276,11 +276,41 @@ class ReviewStore:
         return out
 
 
+# Per-class confidence gates for the uncertainty score below. Mirrors
+# detect_core.DEFAULT_PER_CLASS_CONF without importing it (cv2-free module).
+_GATE_BY_CLS = {"person": 0.35, "bicycle": 0.22, "motorcycle": 0.22,
+                "car": 0.35, "bus": 0.35, "train": 0.25, "truck": 0.35}
+_GATE_SPAN = 0.25
+
+
+def frame_uncertainty(meta: dict) -> float:
+    """How much would a human verdict on this frame teach the system?
+
+    Score in [0, 1]: the max over boxes of how close each detection's
+    confidence sits to its class gate. A box at exactly its threshold
+    (conf == gate) scores 1.0 - the model was genuinely on the fence; a
+    box far above the gate scores ~0 - the model is sure and a "correct"
+    click confirms nothing new. This is what lets the review queue serve
+    ONLY frames worth the operator's time instead of a random pile.
+    """
+    best = 0.0
+    for b in meta.get("boxes") or []:
+        try:
+            conf = float(b.get("conf") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        gate = _GATE_BY_CLS.get(b.get("cls"), 0.35)
+        margin = 1.0 - min(1.0, abs(conf - gate) / _GATE_SPAN)
+        if margin > best:
+            best = margin
+    return round(best, 4)
+
+
 def sample_frame(store: ReviewStore,
                  snapshots_root: str | Path = SNAPSHOTS_ROOT,
                  seed: int | None = None) -> dict | None:
-    """Pick one un-reviewed frame from ``review_frames/`` and return its
-    metadata packaged for the canvas UI:
+    """Pick the un-reviewed frame the model is LEAST sure about and return
+    its metadata packaged for the canvas UI:
 
         {
           "frame_path":  "review_frames/cam/1000000.jpg",
@@ -289,26 +319,32 @@ def sample_frame(store: ReviewStore,
           "frame_w":     1280,
           "frame_h":     720,
           "boxes":       [{id, cls, conf, box:[x1,y1,x2,y2]}, ...],
+          "uncertainty": 0.83,
           "remaining":   17
         }
+
+    Selection is uncertainty-first (see frame_uncertainty), newest-first on
+    ties - the operator's clicks go where they teach the most. ``seed`` is
+    kept for API compatibility; selection is deterministic.
 
     Returns None when every stored frame has been reviewed.
     """
     from app.review_frames import list_all_frames, load_metadata
 
     rels = list_all_frames(snapshots_root)
-    pool: list[tuple[str, dict]] = []
+    pool: list[tuple[float, str, dict]] = []
     for rel in rels:
         if store.is_frame_reviewed(rel):
             continue
         meta = load_metadata(rel, snapshots_root)
         if not meta:
             continue
-        pool.append((rel, meta))
+        pool.append((frame_uncertainty(meta), rel, meta))
     if not pool:
         return None
-    rng = random.Random(seed) if seed is not None else random
-    rel, meta = rng.choice(pool)
+    pool.sort(key=lambda t: t[1], reverse=True)   # newest timestamp-name first
+    pool.sort(key=lambda t: -t[0])                # stable: most uncertain first
+    unc, rel, meta = pool[0]
     return {
         "frame_path": rel,
         "url":        f"/snapshots/{rel}",
@@ -316,6 +352,7 @@ def sample_frame(store: ReviewStore,
         "frame_w":    meta.get("frame_w"),
         "frame_h":    meta.get("frame_h"),
         "boxes":      meta.get("boxes", []),
+        "uncertainty": unc,
         "remaining":  len(pool),
     }
 
@@ -331,12 +368,13 @@ def list_frames(store: ReviewStore,
     for rel in list_all_frames(snapshots_root):
         meta = load_metadata(rel, snapshots_root) or {}
         out.append({
-            "frame_path": rel,
-            "url":        f"/snapshots/{rel}",
-            "cam_id":     meta.get("cam_id", "?"),
-            "saved_at":   meta.get("saved_at", ""),
-            "n_boxes":    len(meta.get("boxes") or []),
-            "reviewed":   store.is_frame_reviewed(rel),
+            "frame_path":  rel,
+            "url":         f"/snapshots/{rel}",
+            "cam_id":      meta.get("cam_id", "?"),
+            "saved_at":    meta.get("saved_at", ""),
+            "n_boxes":     len(meta.get("boxes") or []),
+            "uncertainty": frame_uncertainty(meta),
+            "reviewed":    store.is_frame_reviewed(rel),
         })
     out.sort(key=lambda f: f["frame_path"], reverse=True)
     return out

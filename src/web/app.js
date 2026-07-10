@@ -1043,9 +1043,11 @@ function renderReidTable(docs) {
       </tbody>
     </table>
     <div class="footnote" style="margin-top:8px">
-      Estimates from HSV color-histogram matching (rolling 48h registry) - good
-      for trends in daylight, not an identity system. Two people in similar
-      clothing can merge; the same person can split after a lighting change.
+      Estimates from the OSNet appearance embedder (rolling 48h registry) -
+      robust to lighting and viewpoint changes, still an estimate rather than
+      a biometric identity system. Counts reset once on 2026-07-10 when the
+      embedder was upgraded from color histograms; entities age out after 48h
+      of absence, newest-in oldest-out - there is no daily wipe.
     </div>`;
 }
 

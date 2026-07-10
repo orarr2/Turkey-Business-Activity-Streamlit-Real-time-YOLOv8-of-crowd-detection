@@ -58,6 +58,13 @@ PULL_STATE_NAME = ".sync_pull_state.json"
 
 PULL_INTERVAL_S = int(os.environ.get("POOL_SYNC_PULL_INTERVAL_S") or 120)
 REID_PUSH_EVERY_S = int(os.environ.get("REID_PUSH_EVERY_S") or 1800)
+# Local-mirror bounds. The CLOUD holds the full bank (500 frames / 1000
+# crops); the operator's personal disk only mirrors the NEWEST slice - a
+# working set for the review queue and recent-history search. Older bank
+# content stays cloud-only. Frames count jpg files (json siblings ride
+# along); crops count jpg files.
+LOCAL_MIRROR_FRAMES = int(os.environ.get("POOL_SYNC_LOCAL_FRAMES") or 60)
+LOCAL_MIRROR_CROPS = int(os.environ.get("POOL_SYNC_LOCAL_CROPS") or 200)
 # Hard per-file ceiling: nothing in these pools is legitimately bigger.
 MAX_FILE_BYTES = 20 * 1024 * 1024
 # Upload budget per sync pass. The FIRST sync on a long-running VM faces the
@@ -324,9 +331,30 @@ def pull_once(snapshots_root: str | Path,
         return {"error": f"manifest fetch failed: {type(e).__name__}"}
 
     files = manifest.get("files") or {}
+
+    # Bound the mirror to the newest slice per pool. Selection is on jpg
+    # entries by manifest mtime; a frame's .json sibling is kept with it.
+    def _stem(rel: str) -> str:
+        return rel.rsplit(".", 1)[0]
+    frame_jpgs = sorted((r for r in files
+                         if r.startswith("review_frames/") and r.endswith(".jpg")),
+                        key=lambda r: float(files[r].get("mtime", 0)), reverse=True)
+    crop_jpgs = sorted((r for r in files
+                        if r.startswith("live_samples/") and r.endswith(".jpg")),
+                       key=lambda r: float(files[r].get("mtime", 0)), reverse=True)
+    keep_stems = {_stem(r) for r in frame_jpgs[:LOCAL_MIRROR_FRAMES]}
+    keep: set[str] = {r for r in crop_jpgs[:LOCAL_MIRROR_CROPS]}
+    keep.update(r for r in files
+                if r.startswith("review_frames/") and _stem(r) in keep_stems)
+    # anything in other pools (future additions) mirrors as-is
+    keep.update(r for r in files
+                if not r.startswith(("review_frames/", "live_samples/")))
+
     downloaded = removed = 0
     errors = 0
     for rel, meta in files.items():
+        if rel not in keep:
+            continue
         # Path hardening: rel comes from the network; keep it inside the pools.
         parts = rel.split("/")
         if (".." in parts or rel.startswith("/") or "\\" in rel
@@ -361,9 +389,10 @@ def pull_once(snapshots_root: str | Path,
         state[rel] = {"mtime": meta.get("mtime")}
         downloaded += 1
 
-    # Files WE pulled earlier that the manifest no longer lists were LRU
-    # -evicted on the VM - mirror the eviction. Never touches local-only files.
-    for rel in [r for r in state if r not in files and r != "_reid_db"]:
+    # Files WE pulled earlier that are no longer wanted locally - either the
+    # VM evicted them from the bank, or they aged past the local-mirror
+    # window. Never touches local-only files (bootstrap fixtures etc).
+    for rel in [r for r in state if r not in keep and r != "_reid_db"]:
         p = root / rel
         try:
             if p.is_file():
