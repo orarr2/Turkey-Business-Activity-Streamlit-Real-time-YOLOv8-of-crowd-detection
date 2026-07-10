@@ -60,6 +60,14 @@ PULL_INTERVAL_S = int(os.environ.get("POOL_SYNC_PULL_INTERVAL_S") or 120)
 REID_PUSH_EVERY_S = int(os.environ.get("REID_PUSH_EVERY_S") or 1800)
 # Hard per-file ceiling: nothing in these pools is legitimately bigger.
 MAX_FILE_BYTES = 20 * 1024 * 1024
+# Upload budget per sync pass. The FIRST sync on a long-running VM faces the
+# whole accumulated pool (~300 files); uploading them in one post-round
+# burst held the collector in a minutes-long network window whose SSL/HTTP
+# buffers pushed a 1 GB host into the KERNEL oom-killer (observed live:
+# round done 20:28:42, oom-kill 20:31:07, peak 696M - under the cgroup cap,
+# over the machine). A bounded batch keeps each pass to a few seconds; the
+# backlog drains over the next rounds and the manifest grows with it.
+MAX_UPLOADS_PER_PASS = int(os.environ.get("POOL_SYNC_MAX_UPLOADS") or 40)
 
 _CONTENT_TYPES = {".jpg": "image/jpeg", ".json": "application/json",
                   ".db": "application/octet-stream"}
@@ -118,32 +126,39 @@ def sync_up(firebase, snapshots_root: str | Path,
     state = _read_state(sp)
     current = _pool_files(root)
 
-    uploaded = deleted = 0
+    uploaded = deleted = pending = 0
     manifest_files: dict[str, dict] = {}
     changed = False
     bucket = firebase.storage
     try:
         for rel, mtime in sorted(current.items()):
             entry = state.get(rel)
-            blob = None
             if entry is None or float(entry.get("mtime", -1)) != mtime:
-                p = root / rel
-                try:
-                    data = p.read_bytes()
-                except OSError:
-                    continue
-                if len(data) > MAX_FILE_BYTES:
-                    continue
-                blob = bucket.blob(f"{PREFIX}/{rel}")
-                blob.upload_from_string(
-                    data, content_type=_CONTENT_TYPES.get(p.suffix,
-                                                          "application/octet-stream"))
-                blob.make_public()
-                entry = {"mtime": mtime, "url": blob.public_url,
-                         "size": len(data)}
-                state[rel] = entry
-                uploaded += 1
-                changed = True
+                if uploaded >= MAX_UPLOADS_PER_PASS:
+                    # Budget spent - the backlog drains next round. A file
+                    # with an older uploaded version keeps serving that
+                    # version via the manifest until its turn comes.
+                    pending += 1
+                    if entry is None:
+                        continue
+                else:
+                    p = root / rel
+                    try:
+                        data = p.read_bytes()
+                    except OSError:
+                        continue
+                    if len(data) > MAX_FILE_BYTES:
+                        continue
+                    blob = bucket.blob(f"{PREFIX}/{rel}")
+                    blob.upload_from_string(
+                        data, content_type=_CONTENT_TYPES.get(
+                            p.suffix, "application/octet-stream"))
+                    blob.make_public()
+                    entry = {"mtime": mtime, "url": blob.public_url,
+                             "size": len(data)}
+                    state[rel] = entry
+                    uploaded += 1
+                    changed = True
             manifest_files[rel] = {"mtime": entry["mtime"],
                                    "url": entry["url"],
                                    "size": entry.get("size", 0)}
@@ -201,8 +216,9 @@ def sync_up(firebase, snapshots_root: str | Path,
             _write_state(sp, state)
     except Exception as e:
         print(f"pool_sync: sync_up failed ({type(e).__name__}: {e})")
-        return {"uploaded": uploaded, "deleted": deleted, "error": str(e)}
-    return {"uploaded": uploaded, "deleted": deleted}
+        return {"uploaded": uploaded, "deleted": deleted, "pending": pending,
+                "error": str(e)}
+    return {"uploaded": uploaded, "deleted": deleted, "pending": pending}
 
 
 # ---- local side ----------------------------------------------------------------

@@ -105,6 +105,35 @@ def test_sync_up_without_storage_is_none(tmp_path):
     assert pool_sync.sync_up(None, tmp_path) is None
 
 
+def test_sync_up_batches_large_backlog(tmp_path, monkeypatch):
+    """First sync against a big accumulated pool must NOT upload everything
+    in one pass (that burst oom-killed the 1 GB VM); it drains over rounds
+    and the manifest only ever lists what is actually uploaded."""
+    monkeypatch.setattr(pool_sync, "MAX_UPLOADS_PER_PASS", 5)
+    d = tmp_path / "live_samples" / "camA"
+    d.mkdir(parents=True)
+    for i in range(12):
+        (d / f"{i:04d}_car_50.jpg").write_bytes(b"x" * 10)
+    fb = FakeFirebase()
+
+    s1 = pool_sync.sync_up(fb, tmp_path)
+    assert s1["uploaded"] == 5 and s1["pending"] == 7
+    manifest = json.loads(
+        fb.storage.blobs[f"{pool_sync.PREFIX}/{pool_sync.MANIFEST_NAME}"])
+    assert len(manifest["files"]) == 5      # only uploaded files listed
+
+    s2 = pool_sync.sync_up(fb, tmp_path)
+    assert s2["uploaded"] == 5 and s2["pending"] == 2
+    s3 = pool_sync.sync_up(fb, tmp_path)
+    assert s3["uploaded"] == 2 and s3["pending"] == 0
+    manifest = json.loads(
+        fb.storage.blobs[f"{pool_sync.PREFIX}/{pool_sync.MANIFEST_NAME}"])
+    assert len(manifest["files"]) == 12     # backlog fully drained
+
+    s4 = pool_sync.sync_up(fb, tmp_path)
+    assert s4 == {"uploaded": 0, "deleted": 0, "pending": 0}
+
+
 # ---- local side ----------------------------------------------------------------
 
 def _fake_http(manifest: dict, files: dict[str, bytes]):

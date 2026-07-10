@@ -1578,9 +1578,11 @@ def main() -> None:
                 from app.visual_search import SNAPSHOTS_ROOT as _snap_root
                 from app.visual_search import DEFAULT_DB as _reid_db
                 stats = _pool_sync_up(firebase, _snap_root, reid_db_path=_reid_db)
-                if stats and stats.get("uploaded"):
+                if stats and (stats.get("uploaded") or stats.get("pending")):
                     print(f"  * pool sync: +{stats['uploaded']} "
-                          f"-{stats.get('deleted', 0)} file(s)")
+                          f"-{stats.get('deleted', 0)} file(s)"
+                          + (f", {stats['pending']} queued for next rounds"
+                             if stats.get("pending") else ""))
             except Exception as e:
                 print(f"  ! pool sync failed: {e}")
             if profile is not None and time.time() - last_profile_save >= profile_save_s:

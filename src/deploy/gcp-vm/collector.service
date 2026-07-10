@@ -10,6 +10,10 @@ Environment=PYTHONUNBUFFERED=1
 # Two OpenMP threads matches the e2-micro's 2 shared vCPUs; torch's default
 # oversubscribes and the context-switch thrash slows every YOLO pass down.
 Environment=OMP_NUM_THREADS=2
+# glibc grows one malloc arena per thread by default; on a threaded python
+# process that quietly costs 50-150 MB of RSS - real money on a 1 GB host
+# that was observed being taken down by the KERNEL oom-killer at 696M peak.
+Environment=MALLOC_ARENA_MAX=2
 Environment=FIREBASE_CREDENTIALS=__SA_PATH__
 Environment=FIREBASE_STORAGE_BUCKET=__STORAGE_BUCKET__
 # OSNet re-identification embedder. When the ONNX file is present the
