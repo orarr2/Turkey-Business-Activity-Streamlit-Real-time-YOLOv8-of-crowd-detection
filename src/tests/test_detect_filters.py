@@ -76,11 +76,14 @@ def test_legacy_single_conf_unchanged():
 
 
 def test_per_class_conf_lets_small_person_through():
-    """A person at 0.25 makes it in under person=0.22 but not under legacy 0.35."""
+    """A person at 0.25 makes it in under an explicit person=0.22 gate but
+    not under legacy single-conf 0.35. Uses an explicit per-class map (not
+    DEFAULT_PER_CLASS_CONF) so re-tuning the shipped production thresholds
+    cannot silently break the mechanism this test covers."""
     m = MockYOLO([(PERSON, 0.25, TALL_PERSON)])
     _, legacy = detect_with_boxes(m, np.zeros((720, 1280, 3)), conf=0.35)
     _, new    = detect_with_boxes(m, np.zeros((720, 1280, 3)), conf=0.35,
-                                  per_class_conf=DEFAULT_PER_CLASS_CONF)
+                                  per_class_conf={"person": 0.22})
     assert legacy == []                             # OLD: 0.25 < 0.35, dropped
     assert len(new) == 1 and new[0]["cls"] == "person"
 
@@ -107,10 +110,14 @@ def test_stroller_shape_rejected_from_person():
 
 
 def test_stroller_filter_disabled_by_none():
-    """person_min_aspect=None keeps every person box regardless of shape."""
+    """person_min_aspect=None keeps every person box regardless of shape.
+    The min-height gate (added later) must be disabled too - this test is
+    about the ASPECT filter specifically, and the faux box is only 20px
+    tall so the height gate would otherwise mask the behavior under test."""
     m = MockYOLO([(PERSON, 0.60, WIDE_FAUX_PERSON)])
     counts, _ = detect_with_boxes(m, np.zeros((720, 1280, 3)), conf=0.35,
-                                  person_min_aspect=None)
+                                  person_min_aspect=None,
+                                  person_min_height_px=None)
     assert counts["person"] == 1
 
 

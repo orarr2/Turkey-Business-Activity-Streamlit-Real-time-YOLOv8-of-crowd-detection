@@ -415,6 +415,11 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json(400, {"error": "invalid crop_path"})
             return
         try:
+            # A re-submission overwrites the stored review (keyed by path) but
+            # must NOT nudge confidence a second time - otherwise clicking
+            # through the same crop twice counts as two learning events and
+            # the boost ledger drifts away from the review store.
+            was_reviewed = _review_store().is_reviewed(crop_path)
             r = _review_store().submit(
                 crop_path,
                 verdict,
@@ -436,13 +441,14 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             # it (false positives). Value is persisted so the collector
             # picks it up on its next hot-reload without a restart.
             try:
-                from app.confidence_boost import apply_review
-                from app.auto_blacklist import _cam_id_from_crop
-                cam_id_from_crop = _cam_id_from_crop(crop_path)
-                if cam_id_from_crop:
-                    apply_review(cam_id_from_crop,
-                                 str(payload.get("original_cls", "?")),
-                                 verdict)
+                if not was_reviewed:
+                    from app.confidence_boost import apply_review
+                    from app.auto_blacklist import _cam_id_from_crop
+                    cam_id_from_crop = _cam_id_from_crop(crop_path)
+                    if cam_id_from_crop:
+                        apply_review(cam_id_from_crop,
+                                     str(payload.get("original_cls", "?")),
+                                     verdict)
             except Exception as ex:
                 print(f"  ! confidence_boost skipped: {type(ex).__name__}: {ex}")
             self._send_json(200, {"ok": True, "review": r.to_public(),
@@ -560,6 +566,11 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json(400, {"error": "invalid frame_path"})
             return
         try:
+            # Same re-submission rule as the crop path: editing an already
+            # -reviewed frame updates the stored verdicts but fires NO second
+            # round of confidence nudges (the first submission already spent
+            # this frame's learning signal; re-counting it double-boosts).
+            was_reviewed = _review_store().is_frame_reviewed(frame_path)
             r = _review_store().submit_frame(
                 frame_path=frame_path, cam_id=cam_id,
                 box_verdicts=payload.get("box_verdicts") or {},
@@ -567,29 +578,31 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 note=payload.get("note") or None)
             # Confidence boost per-box: each correct verdict lowers the
             # per-cam per-cls conf; each wrong verdict raises it. Same
-            # nudges as the crop-level submit path.
-            try:
-                from app.confidence_boost import apply_review
-                # Metadata (class per box_id) sits next to the frame - reload it.
-                from app.review_frames import load_metadata
-                meta = load_metadata(frame_path, SNAPSHOTS_DIR) or {}
-                cls_by_id = {str(b["id"]): b.get("cls", "?")
-                             for b in (meta.get("boxes") or [])}
-                for box_id, verdict in (r.box_verdicts or {}).items():
-                    cls = cls_by_id.get(str(box_id))
-                    if not cls: continue
-                    v = "correct" if verdict == "correct" else "wrong_label"
-                    apply_review(cam_id, cls, v)
-                # Missed detections signal: the model needs to be LESS strict
-                # for the missed class in this camera. Treat each miss like a
-                # user-confirmed "correct" verdict for its class - it lowers
-                # conf so the next burst catches similar objects.
-                for miss in (r.missed_detections or []):
-                    cls = miss.get("cls")
-                    if cls:
-                        apply_review(cam_id, cls, "correct")
-            except Exception as ex:
-                print(f"  ! frame confidence_boost skipped: {type(ex).__name__}: {ex}")
+            # nudges as the crop-level submit path. Skipped entirely on a
+            # re-submission - the frame's learning signal was already spent.
+            if not was_reviewed:
+                try:
+                    from app.confidence_boost import apply_review
+                    # Metadata (class per box_id) sits next to the frame - reload it.
+                    from app.review_frames import load_metadata
+                    meta = load_metadata(frame_path, SNAPSHOTS_DIR) or {}
+                    cls_by_id = {str(b["id"]): b.get("cls", "?")
+                                 for b in (meta.get("boxes") or [])}
+                    for box_id, verdict in (r.box_verdicts or {}).items():
+                        cls = cls_by_id.get(str(box_id))
+                        if not cls: continue
+                        v = "correct" if verdict == "correct" else "wrong_label"
+                        apply_review(cam_id, cls, v)
+                    # Missed detections signal: the model needs to be LESS strict
+                    # for the missed class in this camera. Treat each miss like a
+                    # user-confirmed "correct" verdict for its class - it lowers
+                    # conf so the next burst catches similar objects.
+                    for miss in (r.missed_detections or []):
+                        cls = miss.get("cls")
+                        if cls:
+                            apply_review(cam_id, cls, "correct")
+                except Exception as ex:
+                    print(f"  ! frame confidence_boost skipped: {type(ex).__name__}: {ex}")
             self._send_json(200, {"ok": True, "frame_review": r.to_public(),
                                   "summary": _review_store().summary()})
         except Exception as e:
