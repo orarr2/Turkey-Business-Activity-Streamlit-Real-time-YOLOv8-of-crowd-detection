@@ -63,7 +63,7 @@ def test_sync_up_uploads_pools_and_manifest(tmp_path):
     _seed_pool(tmp_path)
     fb = FakeFirebase()
     stats = pool_sync.sync_up(fb, tmp_path)
-    assert stats == {"uploaded": 3, "deleted": 0}
+    assert stats == {"uploaded": 3, "deleted": 0, "pending": 0}
     names = set(fb.storage.blobs)
     assert f"{pool_sync.PREFIX}/review_frames/camA/1000.jpg" in names
     assert f"{pool_sync.PREFIX}/review_frames/camA/1000.json" in names
@@ -81,7 +81,7 @@ def test_sync_up_second_call_is_noop(tmp_path):
     fb = FakeFirebase()
     pool_sync.sync_up(fb, tmp_path)
     stats = pool_sync.sync_up(fb, tmp_path)
-    assert stats == {"uploaded": 0, "deleted": 0}
+    assert stats == {"uploaded": 0, "deleted": 0, "pending": 0}
 
 
 def test_sync_up_mirrors_lru_eviction(tmp_path):
