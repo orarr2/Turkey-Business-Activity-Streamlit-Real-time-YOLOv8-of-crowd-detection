@@ -43,7 +43,12 @@ from app.visual_search import SNAPSHOTS_ROOT
 FRAMES_SUBDIR = "review_frames"
 
 REVIEW_FRAME_EVERY_N = int(os.environ.get("REVIEW_FRAME_EVERY_N") or 5)
-REVIEW_FRAME_MAX_FILES = int(os.environ.get("REVIEW_FRAME_MAX_FILES") or 100)
+# Raised 100 -> 500 (2026-07): the VM's 30 GB disk sat 97% empty while the
+# pool wrapped after ~3 hours of captures. 500 frames ~= a day and a half of
+# searchable, taggable history at ~100 MB - and five times the raw material
+# for the training-export pipeline. Storage/egress stay far inside the free
+# quotas (sync uploads are batched and the manifest is ~cheap either way).
+REVIEW_FRAME_MAX_FILES = int(os.environ.get("REVIEW_FRAME_MAX_FILES") or 500)
 
 # Bootstrap: seed the pool from shipped camera fixture frames the moment the
 # dashboard server starts, so the review UI never opens on an empty pool

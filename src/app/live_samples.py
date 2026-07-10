@@ -37,9 +37,10 @@ LIVE_SAMPLES_SUBDIR = "live_samples"
 LIVE_SAMPLE_EVERY_N = int(os.environ.get("LIVE_SAMPLE_EVERY_N") or 5)
 
 # Hard cap on the total file count in the pool. Oldest files get evicted
-# first once the pool grows past this. At ~50 KB per crop this is ~10 MB
-# on disk for the default 200 files.
-LIVE_SAMPLE_MAX_FILES = int(os.environ.get("LIVE_SAMPLE_MAX_FILES") or 200)
+# first once the pool grows past this. Raised 200 -> 1000 (2026-07) along
+# with the review-frames cap: ~50 MB on a 97%-empty 30 GB disk buys days of
+# per-object search history instead of hours.
+LIVE_SAMPLE_MAX_FILES = int(os.environ.get("LIVE_SAMPLE_MAX_FILES") or 1000)
 
 MIN_CROP_SIDE = 24     # matches anomaly_crops - anything smaller is noise
 
