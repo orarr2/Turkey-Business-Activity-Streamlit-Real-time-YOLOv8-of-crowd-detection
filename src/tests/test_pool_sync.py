@@ -163,12 +163,14 @@ def test_sync_up_batches_large_backlog(tmp_path, monkeypatch):
 # ---- local side ----------------------------------------------------------------
 
 def _fake_http(manifest: dict, files: dict[str, bytes]):
-    """Return an _http_get replacement serving the manifest + file bodies."""
+    """Return an _http_get replacement serving the manifest + file bodies.
+    Strips the cache-buster query the real reader appends to mutable URLs."""
     def get(url, timeout=30):
-        if url.endswith("/" + pool_sync.MANIFEST_NAME):
+        path = url.split("?")[0]
+        if path.endswith("/" + pool_sync.MANIFEST_NAME):
             return json.dumps(manifest).encode()
         for rel, body in files.items():
-            if url.endswith(rel):
+            if path.endswith(rel):
                 return body
         raise OSError(f"404 {url}")
     return get

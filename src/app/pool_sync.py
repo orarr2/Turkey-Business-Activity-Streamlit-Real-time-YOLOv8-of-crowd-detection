@@ -230,6 +230,9 @@ def sync_up(firebase, snapshots_root: str | Path,
                     data = _compact_sqlite_copy(rp)
                     if data is not None and len(data) <= MAX_FILE_BYTES:
                         blob = bucket.blob(f"{PREFIX}/reid.db")
+                        # mutable name, same cache poisoning risk as the
+                        # manifest - see the no-store rationale there
+                        blob.cache_control = "no-store"
                         blob.upload_from_string(
                             data, content_type="application/octet-stream")
                         blob.make_public()
@@ -253,6 +256,12 @@ def sync_up(firebase, snapshots_root: str | Path,
                                        "url": reid_entry["url"],
                                        "size": reid_entry.get("size", 0)}
             mblob = bucket.blob(f"{PREFIX}/{MANIFEST_NAME}")
+            # The manifest is the one MUTABLE object in the scheme; without
+            # this, storage.googleapis.com serves it with max-age=3600 and
+            # every reader sees an up-to-hour-old copy (observed live: two
+            # reads a minute apart returned generations 29 minutes apart).
+            # Pool files keep default caching - their names are immutable.
+            mblob.cache_control = "no-store"
             mblob.upload_from_string(json.dumps(manifest),
                                      content_type="application/json")
             mblob.make_public()
@@ -303,7 +312,12 @@ def pull_once(snapshots_root: str | Path,
     sp = Path(state_path) if state_path else root / PULL_STATE_NAME
     state = _read_state(sp)
 
-    manifest_url = f"https://storage.googleapis.com/{bucket}/{PREFIX}/{MANIFEST_NAME}"
+    # Query-string cache-buster: GCS edge caches key on the full URL, and
+    # older manifests were uploaded without no-store - a bare URL can return
+    # an up-to-hour-old generation. Harmless once no-store manifests roll in;
+    # load-bearing until then, and belt-and-suspenders after.
+    manifest_url = (f"https://storage.googleapis.com/{bucket}/{PREFIX}/"
+                    f"{MANIFEST_NAME}?t={int(time.time())}")
     try:
         manifest = json.loads(_http_get(manifest_url).decode("utf-8"))
     except Exception as e:
@@ -366,7 +380,8 @@ def pull_once(snapshots_root: str | Path,
         known = state.get("_reid_db") or {}
         if float(known.get("mtime", -1)) != float(rd.get("mtime", -2)):
             try:
-                data = _http_get(rd["url"])
+                sep = "&" if "?" in rd["url"] else "?"
+                data = _http_get(f"{rd['url']}{sep}t={int(time.time())}")
                 if len(data) <= MAX_FILE_BYTES:
                     dbp = Path(__file__).resolve().parent.parent / "data" / "reid.db"
                     dbp.parent.mkdir(parents=True, exist_ok=True)
