@@ -45,7 +45,7 @@ import urllib.request
 from pathlib import Path
 
 PREFIX = "review_sync"
-POOL_SUBDIRS = ("review_frames", "live_samples")
+POOL_SUBDIRS = ("review_frames", "live_samples", "entities")
 MANIFEST_NAME = "manifest.json"
 
 # VM-side ledger of what we already uploaded (rel -> mtime). Lives next to
@@ -65,6 +65,7 @@ REID_PUSH_EVERY_S = int(os.environ.get("REID_PUSH_EVERY_S") or 1800)
 # along); crops count jpg files.
 LOCAL_MIRROR_FRAMES = int(os.environ.get("POOL_SYNC_LOCAL_FRAMES") or 60)
 LOCAL_MIRROR_CROPS = int(os.environ.get("POOL_SYNC_LOCAL_CROPS") or 200)
+LOCAL_MIRROR_ENTITIES = int(os.environ.get("POOL_SYNC_LOCAL_ENTITIES") or 400)
 # Hard per-file ceiling: nothing in these pools is legitimately bigger.
 MAX_FILE_BYTES = 20 * 1024 * 1024
 # Upload budget per sync pass. The FIRST sync on a long-running VM faces the
@@ -342,13 +343,19 @@ def pull_once(snapshots_root: str | Path,
     crop_jpgs = sorted((r for r in files
                         if r.startswith("live_samples/") and r.endswith(".jpg")),
                        key=lambda r: float(files[r].get("mtime", 0)), reverse=True)
+    gallery_jpgs = sorted((r for r in files
+                           if r.startswith("entities/") and r.endswith(".jpg")),
+                          key=lambda r: float(files[r].get("mtime", 0)),
+                          reverse=True)
     keep_stems = {_stem(r) for r in frame_jpgs[:LOCAL_MIRROR_FRAMES]}
     keep: set[str] = {r for r in crop_jpgs[:LOCAL_MIRROR_CROPS]}
+    keep.update(gallery_jpgs[:LOCAL_MIRROR_ENTITIES])
     keep.update(r for r in files
                 if r.startswith("review_frames/") and _stem(r) in keep_stems)
     # anything in other pools (future additions) mirrors as-is
     keep.update(r for r in files
-                if not r.startswith(("review_frames/", "live_samples/")))
+                if not r.startswith(("review_frames/", "live_samples/",
+                                     "entities/")))
 
     downloaded = removed = 0
     errors = 0

@@ -184,38 +184,38 @@ def header_line(metrics: dict, boost_summary: dict | None = None) -> str:
     n_rec = (tp + fn) if n_rec is None else n_rec
 
     if n_prec + fn == 0:
-        return "Model: no reviews yet - use the panel below to teach the system"
+        return "Model: no feedback yet - review a few frames below to teach it"
 
-    # ASCII only: this string is printed to Windows consoles (cp125x) by
-    # log paths that would crash on checkmark glyphs.
-    parts = [f"{tp} correct · {fp_n} wrong · {fn} missed"]
-
+    # Plain words, operator-first (2026-07 redesign): the old line
+    # ("precision pending (3/20 verdicts) · recall 12%") answered none of
+    # the operator's real questions - is it right? how often? is it
+    # learning? Full statistical detail stays in the JSON for tooling.
+    # ASCII only: the string is printed to Windows consoles (cp125x).
+    parts = []
+    right = f"right on {tp} of {n_prec} boxes you checked"
     acc = metrics.get("accuracy")
     if acc is not None and n_prec >= MIN_REVIEWS_FOR_METRIC:
-        parts.append(f"precision {int(round(acc * 100))}%")
-        fp_rate = metrics.get("fp_rate")
-        if fp_rate is not None:
-            parts.append(f"FP {int(round(fp_rate * 100))}%")
-    else:
-        parts.append(f"precision pending ({n_prec}/{MIN_REVIEWS_FOR_METRIC} verdicts)")
-
-    recall = metrics.get("recall")
-    if recall is not None and n_rec >= MIN_REVIEWS_FOR_METRIC:
-        parts.append(f"recall {int(round(recall * 100))}%")
-    elif fn > 0:
-        parts.append(f"recall pending ({n_rec}/{MIN_REVIEWS_FOR_METRIC} samples)")
-
-    f1 = metrics.get("f1")
-    if (f1 is not None and n_prec >= MIN_REVIEWS_FOR_METRIC
-            and n_rec >= MIN_REVIEWS_FOR_METRIC):
-        parts.append(f"F1 {int(round(f1 * 100))}%")
-
-    per_cls = sorted((metrics.get("per_class") or []),
-                     key=lambda c: c.get("n", 0), reverse=True)[:2]
-    for c in per_cls:
-        if c.get("precision") is not None and c.get("n", 0) >= MIN_REVIEWS_FOR_PER_CLASS:
-            parts.append(f"P({c['cls']}) {int(round(c['precision'] * 100))}%")
-
+        right += f" ({int(round(acc * 100))}% accurate)"
+    elif n_prec:
+        right += f" (a % appears after {MIN_REVIEWS_FOR_METRIC} checks)"
+    parts.append(right)
+    if fn:
+        parts.append(f"{fn} objects it missed are marked and queued for training")
     if boost_summary and boost_summary.get("adjusted_cls"):
-        parts.append(f"tuned {boost_summary['adjusted_cls']} classes")
+        learn = (f"learning is ON - it self-adjusted "
+                 f"{boost_summary['adjusted_cls']} detection thresholds "
+                 f"from your feedback")
+        upd = boost_summary.get("updated_at") or ""
+        try:
+            import calendar
+            import time as _t
+            mins = max(0, int((_t.time() - calendar.timegm(
+                _t.strptime(upd, "%Y-%m-%dT%H:%M:%SZ"))) / 60))
+            learn += (f" (last {mins} min ago)" if mins < 120
+                      else f" (last {mins // 60} h ago)")
+        except (ValueError, TypeError):
+            pass
+        parts.append(learn)
+    else:
+        parts.append("learning is ON - waiting for your first verdicts")
     return "Model: " + " · ".join(parts)

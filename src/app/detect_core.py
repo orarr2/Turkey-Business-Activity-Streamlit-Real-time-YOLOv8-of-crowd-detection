@@ -623,6 +623,21 @@ def count_line_crossings(tracks: list[list[dict]], frame_shape,
     return res
 
 
+# Night-time gate bump. Sodium/LED point-lights after dark make storefronts
+# read as `bus` and shrubbery as `motorcycle` (both observed on operator
+# screenshots), while the review-driven boosts are tuned on daylight scenes
+# and sit too low at night. When the frame reads as night (see the
+# collector's NIGHT_MEAN_GRAY), every class gate rises by this much.
+NIGHT_CONF_BUMP = 0.08
+
+
+def night_adjusted_conf(per_class_conf: dict,
+                        bump: float = NIGHT_CONF_BUMP) -> dict:
+    """Return a copy of a per-class gate map with the night bump applied,
+    clamped to 0.8 so a class can never become undetectable."""
+    return {c: min(0.8, float(v) + bump) for c, v in per_class_conf.items()}
+
+
 # Per-class confidence gate applied AFTER the model's own conf filter.
 # `person`, `car`, `bus`, `truck` at 0.35 keep the model honest on the classes
 # it's usually confident about. `train` sits at 0.25 because a partial-view

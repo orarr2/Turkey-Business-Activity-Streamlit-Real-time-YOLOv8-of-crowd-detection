@@ -563,7 +563,7 @@
 
     <!-- Anomaly events: the collector's verdicts, where + when + why -->
     <div class="anomaly-wrap" id="anomaly-section" hidden>
-      <h2>Anomaly events - last 24h (spikes ▲ and drops ▼ vs each location's norm)</h2>
+      <h2>Anomalies - last 24h (extreme crowding, blocked camera, view gone dark)</h2>
       <div id="anomaly-table-wrap"></div>
     </div>
 
@@ -691,9 +691,9 @@
   <!-- firebase-config.js is gitignored per-clone; see docs/firebase_setup.md -->
   <!-- ?v=N is a cache-buster: bump it whenever any of the JS files changes,
        so the browser doesn't serve a stale ES-module from disk cache. -->
-  <script type="module" src="./firebase-config.js?v=37"></script>
-  <script type="module" src="./cameras.js?v=37"></script>
-  <script type="module" src="./app.js?v=37"></script>
+  <script type="module" src="./firebase-config.js?v=38"></script>
+  <script type="module" src="./cameras.js?v=38"></script>
+  <script type="module" src="./app.js?v=38"></script>
 
   <!-- Search UI. INLINE and NON-MODULE on purpose: it wires POST /api/search
        on this same server, has no Firebase dependency, and must keep working

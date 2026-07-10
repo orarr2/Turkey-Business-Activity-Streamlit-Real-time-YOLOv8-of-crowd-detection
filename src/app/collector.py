@@ -50,11 +50,13 @@ from app.alerts import AlertSink
 from app.detect_core import (
     CLASSES_OF_INTEREST,
     DEFAULT_IMGSZ,
+    DEFAULT_PER_CLASS_CONF,
     box_iou,
     detect_burst,
     draw_boxes,
     grab_burst,
     load_model,
+    night_adjusted_conf,
     resolve_stream,
 )
 from app.presence import PresenceTracker
@@ -125,6 +127,84 @@ ANOMALY_BUDGET_PER_DAY = 8
 # Mean-gray threshold under which a frame is tagged `is_night` (the Konya cams
 # switch to sodium lighting; day/night baselines differ a lot).
 NIGHT_MEAN_GRAY = 60.0
+
+# ---- Scene anomalies (operator definition, 2026-07) ---------------------------
+# Statistical spike/drop verdicts are NOT anomalies to the operator - "more
+# traffic than Friday 13:00 usually has" is weather, not an event. An anomaly
+# is something you would walk over to the screen for:
+#   * extreme_load        - the place is genuinely packed (top activity band);
+#   * camera_obstructed   - one object fills most of the view (something
+#                           parked against / held up to the lens);
+#   * camera_dark         - the view went dark while the previous sample was
+#                           bright (covered lens, power cut, tampering).
+# Returning visitors and prolonged presence remain events (they already are).
+EXTREME_PERSON = 50           # matches the web activity scale's 9-10/10 band
+EXTREME_VEH_LOAD = 38.0       # weighted vehicles, same 9-10/10 band
+_VEH_LOAD_W = {"car": 1.0, "truck": 2.5, "bus": 2.5,
+               "motorcycle": 0.5, "bicycle": 0.3, "train": 3.0}
+OBSTRUCTION_AREA_FRAC = 0.5   # one box covering half the frame
+DARK_FROM_LUMA = 90.0         # was clearly daylight...
+DARK_TO_LUMA = 25.0           # ...and is now near-black
+SCENE_ANOMALY_COOLDOWN_S = 1800.0
+_SCENE_ANOMALY_LAST: dict[tuple[str, str], float] = {}
+_LAST_LUMA: dict[str, float] = {}
+
+
+def weighted_vehicle_load(counts: dict) -> float:
+    """Street presence of the vehicle mix (bus/truck weigh ~2.5 cars) -
+    mirrors the dashboard's VEHICLE_LOAD_WEIGHTS so both sides agree on
+    what 'packed' means."""
+    return sum(w * (counts.get(cls) or 0) for cls, w in _VEH_LOAD_W.items())
+
+
+def check_scene_anomalies(cam_id: str, counts: dict, boxes: list[dict],
+                          frame_shape, luma: float | None,
+                          now: float | None = None) -> list[dict]:
+    """Evaluate the operator-defined anomaly kinds for one sample.
+
+    Returns verdict dicts shaped like the old statistical ones (kind /
+    metric / observed / expected) so the dashboard schema is unchanged.
+    Each (cam, kind) pair has its own cooldown.
+    """
+    now = time.time() if now is None else now
+    out: list[dict] = []
+
+    def _fire(kind: str, metric: str, observed, expected) -> None:
+        key = (cam_id, kind)
+        # -inf default: "never fired" must always pass the cooldown check,
+        # regardless of how small the clock is (tests use tiny epochs).
+        if (now - _SCENE_ANOMALY_LAST.get(key, float("-inf"))
+                < SCENE_ANOMALY_COOLDOWN_S):
+            return
+        _SCENE_ANOMALY_LAST[key] = now
+        out.append({"kind": kind, "metric": metric, "window": "scene",
+                    "observed": observed, "expected": expected})
+
+    person = counts.get("person") or 0
+    load = weighted_vehicle_load(counts)
+    if person >= EXTREME_PERSON:
+        _fire("extreme_load", "person", person, f"<{EXTREME_PERSON}")
+    elif load >= EXTREME_VEH_LOAD:
+        _fire("extreme_load", "vehicles", round(load, 1),
+              f"<{EXTREME_VEH_LOAD:g}")
+
+    if frame_shape is not None and boxes:
+        H, W = frame_shape[:2]
+        area = float(H * W) or 1.0
+        for b in boxes:
+            frac = max(0.0, (b["x2"] - b["x1"])) * max(0.0, (b["y2"] - b["y1"])) / area
+            if frac >= OBSTRUCTION_AREA_FRAC:
+                _fire("camera_obstructed", b.get("cls", "?"),
+                      f"{frac:.0%} of view", f"<{OBSTRUCTION_AREA_FRAC:.0%}")
+                break
+
+    if luma is not None:
+        prev = _LAST_LUMA.get(cam_id)
+        _LAST_LUMA[cam_id] = luma
+        if prev is not None and prev >= DARK_FROM_LUMA and luma <= DARK_TO_LUMA:
+            _fire("camera_dark", "brightness", round(luma, 1),
+                  f">{DARK_TO_LUMA:g} (was {prev:.0f})")
+    return out
 
 TURKEY_TZ = dt.timezone(dt.timedelta(hours=3))  # permanent UTC+3, no DST
 _DOW = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
@@ -938,15 +1018,31 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
     if _returning_last_save is None:
         _returning_last_save = _RETURNING_LAST_SAVE.setdefault(slot_id, {})
 
+    luma = None
+    night = False
     try:
         frames = grab_burst(resolve_stream(cam), n=burst, stride=burst_stride)
         if not frames:
             raise RuntimeError("empty frame")
+        # Day/night decided BEFORE detection so the gates can react to it.
+        luma = float(np.mean(cv2.cvtColor(frames[-1], cv2.COLOR_BGR2GRAY)))
+        night = luma < NIGHT_MEAN_GRAY
+        # Effective per-class gates. This is ALSO the fix for a silent bug:
+        # cameras.py merges the review-driven confidence boosts into
+        # cam["per_class_conf"], but the value was never handed to
+        # detect_burst - the learning ledger updated while detection kept
+        # running on the shipped defaults. At night every gate additionally
+        # rises (see night_adjusted_conf): point-lit storefronts and shrubs
+        # were firing as bus/motorcycle on the operator's screenshots.
+        gates = dict(cam.get("per_class_conf") or DEFAULT_PER_CLASS_CONF)
+        if night:
+            gates = night_adjusted_conf(gates)
         counts, boxes, frame, burst_dbg = detect_burst(
             model, frames, conf=cam_conf, imgsz=imgsz,
             roi=cam.get("roi"), roi_exclude=cam.get("roi_exclude"),
             roi_exclude_class=cam.get("roi_exclude_class"),
-            line=cam.get("line"), burst_stride=burst_stride)
+            line=cam.get("line"), per_class_conf=gates,
+            burst_stride=burst_stride)
         ok = 1
         # Live-sample pool: save one random detection per LIVE_SAMPLE_EVERY_N
         # bursts so the review UI has fresh material even on cameras that
@@ -1021,6 +1117,16 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
                         _handle_loiter(firebase, alerts, slot, cam_id, ts,
                                        frame, box, loiter,
                                        save_snapshots=save_snapshots)
+                # Sighting gallery: once an entity is established (3+
+                # sightings) every further look at it banks a small crop,
+                # so a "returning visitor" event can show ALL appearances
+                # side by side instead of a single snapshot.
+                if save_snapshots and box is not None and r.sightings >= 3:
+                    try:
+                        from app.entity_gallery import save_sighting
+                        save_sighting(cam_id, r.entity_id, frame, box)
+                    except Exception as _eg_err:
+                        print(f"  ! entity gallery skipped: {_eg_err}")
                 if box is not None:
                     _ENTITY_LAST_BOX[(cam_id, r.entity_id)] = (box, time.time())
             if len(_ENTITY_LAST_BOX) > _ENTITY_BOX_CAP:
@@ -1049,8 +1155,8 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
         record["burst"] = burst_dbg
         # Day/night tag: lets the dashboard and any offline analysis split
         # baselines - the same street has very different "normal" after dark.
-        record["is_night"] = bool(
-            float(np.mean(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))) < NIGHT_MEAN_GRAY)
+        # Decided pre-detection (it also drove the night gates above).
+        record["is_night"] = night
         # Sampled line-crossing flow (only present when the cam has a "line").
         if "crossings" in burst_dbg:
             record["crossings"] = burst_dbg["crossings"]
@@ -1070,36 +1176,26 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
     # cam_id so the learned week-shape belongs to the camera, and two slots
     # that fall back onto the same cam share one baseline + cooldown (no
     # duplicate alerts for the same scene).
+    # The statistical layers (rolling z + hour-of-week profile) keep LEARNING
+    # here - their windows, baselines and self-rebase stay warm - but their
+    # spike/drop verdicts no longer flag anything: the operator ruled that
+    # "busier than this hour usually is" is weather, not an anomaly. What
+    # counts as an anomaly is decided by check_scene_anomalies (extreme
+    # load / camera obstructed / camera gone dark); returning visitors and
+    # prolonged presence continue to flow through the events feed.
     if trackers is not None and ok:
         wkey = _window_key(slot_id, cam_id)
-        verdicts: list[dict] = []
         for metric, tracker in trackers.items():
             value = counts.get(metric)
-            flagged, dbg = tracker.push_and_check(wkey, value)
-            if flagged:
-                verdicts.append({"kind": dbg["kind"], "metric": metric,
-                                 "window": "rolling", "z": dbg.get("z"),
-                                 "observed": value, "expected": dbg.get("expected")})
+            flagged, _dbg = tracker.push_and_check(wkey, value)
             if profile is not None:
                 gates = ANOMALY_METRICS.get(metric, ANOMALY_METRICS["person"])
-                ctx_flagged, ctx_dbg = profile.check(
-                    cam_id, metric, now_utc, value,
-                    min_delta=gates["min_delta"],
-                    drop_min_baseline=gates["drop_min_baseline"])
-                if ctx_flagged:
-                    verdicts.append({"kind": ctx_dbg["kind"], "metric": metric,
-                                     "window": "hourly", "z": ctx_dbg.get("z"),
-                                     "observed": value,
-                                     "expected": ctx_dbg.get("expected"),
-                                     "bucket": ctx_dbg.get("bucket")})
-                # Feed the bucket unless the rolling layer CONFIRMED an event
-                # this very sample. Mature buckets are clip-protected anyway;
-                # the exclusion mainly shields IMMATURE buckets (n<30) from
-                # ingesting a confirmed event raw during their first days.
-                # Cooldown-suppressed and pending samples still flow in, so a
-                # genuine regime change converges (rolling adapts within ~30
-                # samples and stops flagging) - no exclude-forever loop.
-                # The wall-clock dedup stops two slots that fell back onto the
+                profile.check(cam_id, metric, now_utc, value,
+                              min_delta=gates["min_delta"],
+                              drop_min_baseline=gates["drop_min_baseline"])
+                # Feed the bucket unless the rolling layer confirmed an
+                # outlier this very sample (shields immature buckets); the
+                # wall-clock dedup stops two slots that fell back onto the
                 # same cam from double-feeding the bucket each round.
                 feed_key = (cam_id, metric)
                 now_wall = time.time()
@@ -1107,15 +1203,17 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
                         >= PROFILE_FEED_MIN_GAP_S):
                     _PROFILE_LAST_FEED[feed_key] = now_wall
                     profile.update(cam_id, metric, now_utc, value)
-        record["is_anomaly"] = bool(verdicts)
-        if verdicts:
-            # Rolling verdicts outrank hourly ones for the headline fields;
-            # everything else lands under "also".
-            verdicts.sort(key=lambda v: 0 if v["window"] == "rolling" else 1)
-            primary = dict(verdicts[0])
-            if len(verdicts) > 1:
-                primary["also"] = [{k: v.get(k) for k in ("kind", "metric", "z")}
-                                   for v in verdicts[1:]]
+
+    if ok:
+        scene = check_scene_anomalies(cam_id, counts, boxes,
+                                      frame.shape if frame is not None else None,
+                                      luma)
+        record["is_anomaly"] = bool(scene)
+        if scene:
+            primary = dict(scene[0])
+            if len(scene) > 1:
+                primary["also"] = [{k: v.get(k) for k in ("kind", "metric")}
+                                   for v in scene[1:]]
             record["anomaly"] = primary
             annotated_jpeg = None
             if save_snapshots and frame is not None:
@@ -1125,9 +1223,9 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
                     annotated_jpeg = snap.pop("_annotated_jpeg", None)
                     record.update(snap)
                     print(f"  ! {primary['kind']} @ {slot_id}/{cam_id} "
-                          f"[{primary['metric']}] z={primary.get('z')}, "
-                          f"observed={primary.get('observed')} vs "
-                          f"~{primary.get('expected')} expected - snapshot saved")
+                          f"[{primary['metric']}] observed="
+                          f"{primary.get('observed')} (expected "
+                          f"{primary.get('expected')}) - snapshot saved")
                 except Exception as e:
                     print(f"  ! anomaly snapshot save failed for {slot_id}: {e}")
             if alerts is not None:
@@ -1136,8 +1234,7 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
                                    f"{slot['display_area']}"),
                             body=(f"{primary['metric']}: observed "
                                   f"{primary.get('observed')} vs "
-                                  f"~{primary.get('expected')} expected "
-                                  f"(z={primary.get('z')})"),
+                                  f"{primary.get('expected')} expected"),
                             image_jpeg=annotated_jpeg)
 
     try:

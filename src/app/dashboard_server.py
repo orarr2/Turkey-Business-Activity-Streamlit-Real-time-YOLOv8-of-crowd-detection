@@ -250,6 +250,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/review-frames-list":
             self._review_frames_list()
             return
+        if path == "/api/entity-gallery":
+            self._entity_gallery()
+            return
         if path == "/api/review-frames-stats":
             self._review_frames_stats()
             return
@@ -670,6 +673,27 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                                   "summary": _review_store().summary()})
         except Exception as e:
             print(f"  ! review-frame-submit failed: {type(e).__name__}: {e}")
+            self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
+
+    def _entity_gallery(self) -> None:
+        """GET /api/entity-gallery?cam_id=<>&entity_id=<int> -> every stored
+        sighting crop of one tracked entity, newest first. Powers the
+        appearance comparison inside the events accordion."""
+        try:
+            from urllib.parse import parse_qs, urlparse
+            import re as _re
+            q = parse_qs(urlparse(self.path).query)
+            cam_id = (q.get("cam_id") or [""])[0].strip()
+            eid_raw = (q.get("entity_id") or [""])[0].strip()
+            if not _re.match(r"^[A-Za-z0-9_.-]{1,64}$", cam_id) \
+                    or not eid_raw.isdigit():
+                self._send_json(400, {"error": "cam_id and numeric entity_id required"})
+                return
+            from app.entity_gallery import list_sightings
+            items = list_sightings(cam_id, int(eid_raw), SNAPSHOTS_DIR)
+            self._send_json(200, {"cam_id": cam_id, "entity_id": int(eid_raw),
+                                  "sightings": items})
+        except Exception as e:
             self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
 
     def _review_frames_stats(self) -> None:

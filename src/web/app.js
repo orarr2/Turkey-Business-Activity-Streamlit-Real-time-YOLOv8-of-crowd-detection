@@ -600,7 +600,7 @@ function updateAggregates(slotId, rows) {
   setAgg("avg",  avg.toFixed(1));
   setAgg("peak", peak);
 
-  const anomalies = rows.filter((r) => r.is_anomaly);
+  const anomalies = rows.filter(isShownAnomaly);
   if (anomalies.length) {
     const last = anomalies[anomalies.length - 1];
     const d = describeAnomaly(last);
@@ -720,7 +720,7 @@ function renderTileChart(slotId, rows) {
   const vehicles = view.map((r) => r.vehicles);
   // Anomalous samples render as enlarged red points on the metric that fired.
   const anomOn = (metric) => (r) =>
-      r.is_anomaly && ((r.anomaly?.metric ?? "person") === metric);
+      isShownAnomaly(r) && ((r.anomaly?.metric ?? "person") === metric);
   const pplPointBg = view.map((r) => anomOn("person")(r)   ? "#ef4444" : "#4f8cff");
   const vehPointBg = view.map((r) => anomOn("vehicles")(r) ? "#ef4444" : "#f0a35e");
   const pplPointR  = view.map((r) => anomOn("person")(r)   ? 5 : 2);
@@ -813,7 +813,7 @@ function renderCombinedChart() {
   for (const slot of GRID_SLOTS) {
     const set = new Set();
     for (const r of tileState[slot.slot_id].history) {
-      if (!r.is_anomaly) continue;
+      if (!isShownAnomaly(r)) continue;
       if ((r.anomaly?.metric || "person") !== "person") continue;
       const t = new Date(r.ts).getTime();
       if (!Number.isFinite(t)) continue;
@@ -872,7 +872,7 @@ function renderAnomalyEvents() {
   const events = [];
   for (const slot of GRID_SLOTS) {
     for (const r of tileState[slot.slot_id].history) {
-      if (r.is_anomaly) events.push({ area: slot.display_area, r });
+      if (isShownAnomaly(r)) events.push({ area: slot.display_area, r });
     }
   }
   toggleSection("anomaly-section", events.length > 0);
@@ -979,11 +979,37 @@ function toggleEventAccordion(idx, toggleEl) {
       .filter((e) => e.entity_id === target.entity_id && e.slot === target.slot)
       .sort((a, b) => (a.ts || "").localeCompare(b.ts || ""));
   const cell = row.querySelector("td");
+  // The per-entity gallery holds a crop from EVERY sighting (not just the
+  // ones that fired a returning-event), served by the local API from the
+  // synced entities/ pool. Appended async under the event cards.
+  const appendGallery = () => {
+    if (!target.cam_id) return;
+    fetch(`/api/entity-gallery?cam_id=${encodeURIComponent(target.cam_id)}` +
+          `&entity_id=${encodeURIComponent(target.entity_id)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((g) => {
+        if (!g || !(g.sightings || []).length || row.hidden) return;
+        const thumbs = g.sightings.map((s, i) => `
+          <a href="${s.url}" target="_blank" rel="noopener" class="ev-card">
+            <img src="${s.url}" loading="lazy" alt="appearance ${i + 1}"/>
+            <div class="ev-ts">${s.ts ? fmtTime(s.ts) : ""}</div>
+          </a>`).join("");
+        const div = document.createElement("div");
+        div.className = "ev-strip";
+        div.innerHTML = `<div class="ev-note">Every stored appearance of
+            #${target.entity_id} (${g.sightings.length} crops, newest first)
+            - the full gallery, not only event moments.</div>
+          <div class="ev-cards">${thumbs}</div>`;
+        cell.appendChild(div);
+      })
+      .catch(() => {});
+  };
   if (related.length <= 1) {
     cell.innerHTML = `<div class="ev-empty">
-      Only this sighting is in the last 24h window.
-      Earlier appearances of #${target.entity_id} rolled off with the TTL.
+      Only this sighting fired an event in the last 24h window -
+      the appearance gallery below shows every stored look at it.
     </div>`;
+    appendGallery();
   } else {
     const cards = related.map((e, k) => {
       const url = e.snapshot_url || e.fullframe_url;
@@ -1007,6 +1033,7 @@ function toggleEventAccordion(idx, toggleEl) {
         in the last 24h - compare side by side.</div>
       <div class="ev-cards">${cards}</div>
     </div>`;
+    appendGallery();
   }
   row.hidden = false;
   toggleEl.textContent = "▾";
@@ -1056,16 +1083,32 @@ function renderReidTable(docs) {
 // Normalize a flagged doc's `anomaly` map into display strings. Docs written
 // before the anomaly map existed only have the boolean — treated as a people
 // spike with no expectation attached.
+// Anomaly kinds the dashboard SHOWS. Statistical spike/drop verdicts were
+// dropped by operator decision (2026-07): "busier than this hour usually
+// is" is weather, not an event worth an alert. Legacy docs inside the 24h
+// TTL window may still carry the old kinds - the filter hides them.
+const ANOMALY_KINDS = new Set(["extreme_load", "camera_obstructed",
+                               "camera_dark"]);
+function isShownAnomaly(r) {
+  return !!(r.is_anomaly && ANOMALY_KINDS.has(r.anomaly?.kind));
+}
+
+const _ANOMALY_KIND_LABELS = {
+  extreme_load:     { arrow: "▲", dir: "spike", label: "extreme crowd/traffic" },
+  camera_obstructed:{ arrow: "⛔", dir: "spike", label: "camera blocked - object at lens" },
+  camera_dark:      { arrow: "⛔", dir: "drop",  label: "view went dark" },
+};
+
 function describeAnomaly(r) {
   const a = r.anomaly || {};
-  const kind = a.kind || "spike";
-  const isDrop = kind.includes("drop");
-  const hourly = a.window === "hourly" || kind.startsWith("contextual");
-  const metric = a.metric === "vehicles" ? "vehicles" : "people";
+  const k = _ANOMALY_KIND_LABELS[a.kind]
+        || { arrow: "▲", dir: "spike", label: a.kind || "anomaly" };
+  const metric = a.metric === "vehicles" ? "vehicles"
+               : a.metric === "person" ? "people" : (a.metric || "");
   return {
-    arrow:       isDrop ? "▼" : "▲",
-    dir:         isDrop ? "drop" : "spike",
-    kindLabel:   (hourly ? "hourly " : "") + (isDrop ? "drop" : "spike"),
+    arrow:       k.arrow,
+    dir:         k.dir,
+    kindLabel:   k.label,
     metricLabel: metric,
     observed:    a.observed ?? (metric === "vehicles" ? r.vehicles : r.person),
     expected:    a.expected,
