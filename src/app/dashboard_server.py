@@ -787,9 +787,19 @@ def bind(port: int, directory: Path | None = None) -> http.server.ThreadingHTTPS
     Also fires an async warmup that loads YOLO in the background and
     bootstraps the review pool from fixture frames, so the first user to
     open the dashboard finds material to review already sitting there.
+    Starts the pool-sync puller too: it mirrors the VM collector's
+    review_frames / live_samples / reid.db down to this machine, so search
+    and review operate on what the cameras actually captured instead of on
+    the shipped fixtures. Without a reachable bucket it degrades silently
+    to the local-only behavior.
     """
     http.server.ThreadingHTTPServer.allow_reuse_address = True
     http.server.ThreadingHTTPServer.daemon_threads = True
     server = http.server.ThreadingHTTPServer(("", port), make_handler_factory(directory))
     _warm_visual_search_async()
+    try:
+        from app.pool_sync import start_pull_thread
+        start_pull_thread(SNAPSHOTS_DIR)
+    except Exception as e:
+        print(f"  ! pool-sync puller not started: {type(e).__name__}: {e}")
     return server

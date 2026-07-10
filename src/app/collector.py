@@ -1515,6 +1515,20 @@ def main() -> None:
                         firebase.write_grid_config(slots_meta)
                     except Exception as e:
                         print(f"  ! grid config write failed: {e}")
+            # Mirror the review pools (frames/crops just saved this round) up
+            # to Storage so the operator's local dashboard can search and
+            # review what the cameras actually captured. No-op without a
+            # bucket; cheap no-change rounds cost one dict compare.
+            try:
+                from app.pool_sync import sync_up as _pool_sync_up
+                from app.visual_search import SNAPSHOTS_ROOT as _snap_root
+                from app.visual_search import DEFAULT_DB as _reid_db
+                stats = _pool_sync_up(firebase, _snap_root, reid_db_path=_reid_db)
+                if stats and stats.get("uploaded"):
+                    print(f"  * pool sync: +{stats['uploaded']} "
+                          f"-{stats.get('deleted', 0)} file(s)")
+            except Exception as e:
+                print(f"  ! pool sync failed: {e}")
             if profile is not None and time.time() - last_profile_save >= profile_save_s:
                 _persist_profiles()
                 last_profile_save = time.time()
