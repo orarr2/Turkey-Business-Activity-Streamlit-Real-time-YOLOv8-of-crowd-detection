@@ -427,6 +427,22 @@ class HourlyProfile:
     regime over days while a short spike still can't drag it.
     """
 
+    # Self-healing rebase: when the DETECTOR itself changes regime (a
+    # confidence threshold tuned looser by reviews, a higher imgsz, a better
+    # model), every count jumps and every hour bucket's old mean is simply
+    # wrong - the profile then cries "spike" on ordinary traffic for the
+    # weeks the clipped updates need to converge. That exact failure was
+    # observed live: 13+ "hourly spike vehicles observed 8-15 expected ~2-3"
+    # events per day. When a (cam, metric) pair accumulates REBASE_AFTER
+    # spike verdicts (including cooldown-suppressed ones) inside
+    # REBASE_WINDOW_SEC, the pair's buckets get their effective sample count
+    # cut to REBASE_N: new samples then land ~4x harder and the baseline
+    # re-converges within a day instead of weeks. A real once-a-day spike
+    # can't trigger this; sustained systematic disagreement does.
+    REBASE_WINDOW_SEC = 24 * 3600
+    REBASE_AFTER = 8
+    REBASE_N = 30
+
     def __init__(self, min_samples: int = 30, z_spike: float = 3.5,
                  z_drop: float = 3.0, std_floor: float = 1.0,
                  cooldown_sec: float = 1800, clip_z: float = 3.0,
@@ -448,6 +464,9 @@ class HourlyProfile:
         # key (cam_id) -> metric -> "dow_hour" -> [n, mean, m2]  (Welford)
         self._slots: dict[str, dict[str, dict[str, list[float]]]] = {}
         self._last_flagged: dict[tuple[str, str], float] = {}
+        # (key, metric) -> recent spike-verdict epochs / last rebase epoch
+        self._spike_times: dict[tuple[str, str], list[float]] = {}
+        self._last_rebase: dict[tuple[str, str], float] = {}
 
     def _spread(self, mean: float, std: float) -> float:
         """One spread definition for BOTH scoring and clip bounds - if these
@@ -500,12 +519,42 @@ class HourlyProfile:
             return False, {**debug, "reason": "within_norm"}
         now  = time.time()
         cool_key = (key, metric)
+        # Feed the rebase detector on EVERY spike verdict - suppressed ones
+        # included, because during a detector regime change the cooldown
+        # hides most of the evidence that the baseline is systematically off.
+        if kind == "contextual_spike":
+            times = self._spike_times.setdefault(cool_key, [])
+            times.append(now)
+            cutoff = now - self.REBASE_WINDOW_SEC
+            self._spike_times[cool_key] = times = [t for t in times if t >= cutoff]
+            if (len(times) >= self.REBASE_AFTER
+                    and now - self._last_rebase.get(cool_key, float("-inf"))
+                        >= self.REBASE_WINDOW_SEC):
+                self._rebase(key, metric)
+                self._last_rebase[cool_key] = now
+                self._spike_times[cool_key] = []
+                debug["rebased"] = True
+                print(f"  * profile rebase: {key}/{metric} - "
+                      f"{self.REBASE_AFTER}+ spikes in 24h means the baseline "
+                      f"is stale (detector regime change); bucket weights cut "
+                      f"to {self.REBASE_N} for fast re-convergence")
         last = self._last_flagged.get(cool_key, 0.0)
         if now - last < self.cooldown_sec:
             return False, {**debug, "reason": "cooldown", "suppressed_kind": kind}
         self._last_flagged[cool_key] = now
         return True, {**debug, "reason": "anomaly", "kind": kind,
                       "expected": round(mean, 1)}
+
+    def _rebase(self, key: str, metric: str) -> None:
+        """Cut every bucket's effective sample count to REBASE_N so incoming
+        samples carry ~4x their previous weight. m2 is scaled by the same
+        factor (m2 is a SUM of squared deviations, proportional to n) so the
+        bucket's std - and therefore its clip envelope - is preserved."""
+        for cell in self._slots.get(key, {}).get(metric, {}).values():
+            n = cell[0]
+            if n > self.REBASE_N:
+                cell[2] *= self.REBASE_N / n
+                cell[0] = self.REBASE_N
 
     def update(self, key: str, metric: str, ts_utc: dt.datetime,
                value: float | None) -> None:
