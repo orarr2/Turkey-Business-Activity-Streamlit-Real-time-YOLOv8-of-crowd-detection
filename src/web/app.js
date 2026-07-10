@@ -59,6 +59,27 @@ const ACTIVITY_BANDS = [
   { max: 50,  idx: 9  }, // crowded
   { max: 1e9, idx: 10 }, // packed
 ];
+// Vehicle side of the activity index. "Business activity" on these cameras
+// is foot traffic AND vehicle traffic (the collector's own definition), but
+// the index used to read `person` only - a junction moving 9 buses scored
+// 0/10 "Quiet". Vehicles get their own weighted load (a bus occupies far
+// more street than a bicycle) and their own bands; the final index is the
+// busier of the two sides, so pedestrian plazas keep their old behavior.
+const VEHICLE_LOAD_WEIGHTS = {
+  car: 1.0, truck: 2.5, bus: 2.5, motorcycle: 0.5, bicycle: 0.3, train: 3.0,
+};
+const VEHICLE_BANDS = [
+  { max: 0,   idx: 0  }, // no traffic
+  { max: 1,   idx: 1  }, // one vehicle
+  { max: 3,   idx: 2  }, // sparse
+  { max: 5,   idx: 3  }, // a handful passing
+  { max: 8,   idx: 5  }, // steady flow
+  { max: 12,  idx: 6  }, // lively junction
+  { max: 18,  idx: 7  }, // busy
+  { max: 26,  idx: 8  }, // heavy traffic
+  { max: 38,  idx: 9  }, // jammed
+  { max: 1e9, idx: 10 }, // gridlock
+];
 const COMBINED_BIN_MIN = 5;
 
 // Anomalies: the collector is the single source of truth. Every footfall doc
@@ -600,20 +621,49 @@ function updateAggregates(slotId, rows) {
 // "business activity" means for a downtown street camera - no history, no
 // p90, no fabricated crowds on empty scenes. Table lives at module top for
 // TDZ safety (see ACTIVITY_BANDS declaration near the file header).
-function _bandIndex(n) {
-  for (const b of ACTIVITY_BANDS) if (n <= b.max) return b.idx;
+function _bandIndex(n, bands = ACTIVITY_BANDS) {
+  for (const b of bands) if (n <= b.max) return b.idx;
   return 10;
 }
+// Weighted vehicle load for one footfall row. Prefers the per-class
+// `counts` map every collector record carries; falls back to the flat
+// `vehicles` field (all treated as cars) for legacy docs.
+function _vehicleLoad(r) {
+  const c = r.counts;
+  if (c && typeof c === "object") {
+    let load = 0, seen = false;
+    for (const [cls, w] of Object.entries(VEHICLE_LOAD_WEIGHTS)) {
+      const n = c[cls];
+      if (typeof n === "number" && n > 0) { load += w * n; }
+      if (n != null) seen = true;
+    }
+    if (seen) return load;
+  }
+  return (r.vehicles ?? 0) * 1.0;
+}
+function _median(xs) {
+  const s = [...xs].sort((a, b) => a - b);
+  return s.length ? s[Math.floor(s.length / 2)] : 0;
+}
 function computeActivity(rows) {
-  const ppl = rows.map((r) => r.person ?? 0).filter((x) => x >= 0);
-  if (ppl.length < 1) return null;
-  const now = ppl[ppl.length - 1];
-  const idx = _bandIndex(now);
+  if (!rows.length) return null;
+  // Median of the last 3 samples (~2 min of wall time): one glitchy burst
+  // can no longer swing the badge, while "now" still means "right now".
+  const tail   = rows.slice(-3);
+  const people = Math.round(_median(tail.map((r) => Math.max(0, r.person ?? 0))));
+  const load   = _median(tail.map(_vehicleLoad));
+  const pIdx   = _bandIndex(people, ACTIVITY_BANDS);
+  const vIdx   = _bandIndex(load, VEHICLE_BANDS);
+  const idx    = Math.max(pIdx, vIdx);
   const label = idx <= 3 ? "Quiet"
               : idx <= 6 ? "Moderate"
               : idx <= 8 ? "Busy"
               : "Crowded";
-  return { idx, label, now };
+  const last = rows[rows.length - 1];
+  return { idx, label, pIdx, vIdx,
+           now: last.person ?? 0,
+           veh: last.vehicles ?? 0,
+           load: Math.round(load * 10) / 10 };
 }
 
 function setActivityBadge(st, act) {
@@ -628,7 +678,10 @@ function setActivityBadge(st, act) {
   const cls = act.label.toLowerCase();
   badge.className = `activity-badge act-${cls}`;
   text.textContent = `${act.idx}/10`;
-  badge.title = `activity ${act.idx}/10 - ${act.label} (now ${act.now} people; absolute scale)`;
+  badge.title = `activity ${act.idx}/10 - ${act.label} · ` +
+      `people ${act.now} (${act.pIdx}/10) · ` +
+      `vehicle load ${act.load} (${act.vIdx}/10, bus/truck weigh more) · ` +
+      `index = busier of the two, median of last 3 samples`;
 }
 
 const TILE_CHART_LAST_N = 30;
