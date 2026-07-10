@@ -600,11 +600,15 @@
     <div class="review-wrap" id="review-section">
       <h2>Review detections - teach the system what it got wrong</h2>
       <div class="sub">Full frame with all detections overlaid. Click a
-        box to cycle its verdict (grey → green correct → red wrong → grey).
-        Click "Add missing" and drag on the canvas to mark an object the
-        model failed to see. Every verdict goes to
-        <code>data/reviews.json</code> and hot-reloads the collector's
-        per-camera confidence within ~7 minutes.</div>
+        box to cycle its verdict (grey → green correct → red wrong → grey),
+        or use <b>relabel</b> to fix a wrong class. Click "Add missing" and
+        drag on the canvas to mark an object the model failed to see. Every
+        verdict goes to <code>data/reviews.json</code>, hot-reloads the
+        collector's per-camera confidence within ~7 minutes, and feeds the
+        training exporter (<code>tools/export_labels.py</code>). Click any
+        thumbnail below to re-open a frame - including ones you already
+        reviewed - and amend it.</div>
+      <div class="frame-strip" id="frame-strip" hidden></div>
       <div class="review-frame-body">
         <div class="canvas-wrap">
           <div class="canvas-empty" id="canvas-empty">loading…</div>
@@ -623,6 +627,8 @@
               <b id="fbs-correct">0</b> correct</span>
             <span class="fbs-box"><span class="dot" style="background:#ef4444"></span>
               <b id="fbs-wrong">0</b> wrong</span>
+            <span class="fbs-box"><span class="dot" style="background:#f0a35e"></span>
+              <b id="fbs-relabel">0</b> relabeled</span>
             <span class="fbs-box"><span class="dot" style="background:#4f8cff"></span>
               <b id="fbs-missed">0</b> missed</span>
           </div>
@@ -631,6 +637,8 @@
             <button id="mode-add" class="mode-btn">+ add missing</button>
             <button id="mode-block" class="mode-btn"
                     title="drag a box on the canvas to permanently blacklist this area for the class picked below - useful when the model keeps mis-firing on a static feature like a building corner or lamppost">+ block area</button>
+            <button id="mode-relabel" class="mode-btn"
+                    title="click a box to change its class to the one picked below - records 'real object, wrong label' so the training export emits the corrected class">relabel</button>
             <select id="add-cls">
               <option value="person">person</option>
               <option value="car">car</option>
@@ -681,9 +689,9 @@
   <!-- firebase-config.js is gitignored per-clone; see docs/firebase_setup.md -->
   <!-- ?v=N is a cache-buster: bump it whenever any of the JS files changes,
        so the browser doesn't serve a stale ES-module from disk cache. -->
-  <script type="module" src="./firebase-config.js?v=32"></script>
-  <script type="module" src="./cameras.js?v=32"></script>
-  <script type="module" src="./app.js?v=32"></script>
+  <script type="module" src="./firebase-config.js?v=33"></script>
+  <script type="module" src="./cameras.js?v=33"></script>
+  <script type="module" src="./app.js?v=33"></script>
 
   <!-- Search UI. INLINE and NON-MODULE on purpose: it wires POST /api/search
        on this same server, has no Firebase dependency, and must keep working
@@ -941,13 +949,34 @@
   })();
   </script>
 
+  <style>
+    /* Frame strip: every stored frame, clickable, reviewed ones badged.
+       This is what lets the user RE-OPEN a past review and amend it. */
+    .frame-strip { display:flex; gap:6px; overflow-x:auto; padding:4px 0 10px; }
+    .frame-strip .fs-item { position:relative; flex:0 0 auto; width:88px;
+      cursor:pointer; border:2px solid #2a2e39; border-radius:6px;
+      overflow:hidden; background:#12151c; }
+    .frame-strip .fs-item:hover { border-color:#4f8cff88; }
+    .frame-strip .fs-item.current { border-color:#4f8cff; }
+    .frame-strip .fs-item img { width:100%; height:48px; object-fit:cover;
+      display:block; }
+    .frame-strip .fs-cam { font-size:9px; color:#8b909a; padding:1px 4px;
+      display:block; white-space:nowrap; overflow:hidden;
+      text-overflow:ellipsis; }
+    .frame-strip .fs-done { position:absolute; top:2px; right:2px;
+      background:#36d399; color:#0c0e13; border-radius:50%; width:14px;
+      height:14px; font-size:10px; line-height:14px; text-align:center;
+      font-weight:700; }
+  </style>
   <!-- Frame-based review UI. Canvas renders the whole frame with every
-       detection overlaid; user clicks each box to cycle its verdict, or
-       switches into "add missing" mode to drag out a new box for an
-       object the model didn't detect. Submitting a frame writes:
-           box_verdicts:       {box_id: "correct" | "wrong"}
+       detection overlaid; user clicks each box to cycle its verdict,
+       relabels it to a different class, or switches into "add missing"
+       mode to drag out a new box for an object the model didn't detect.
+       Submitting a frame writes:
+           box_verdicts:       {box_id: "correct" | "wrong" | "relabel:<cls>"}
            missed_detections:  [{cls, box: [x1,y1,x2,y2]}]
-       to /api/review-frame-submit, which yields real TP/FP/FN counts. -->
+       to /api/review-frame-submit, which yields real TP/FP/FN counts and
+       corrected labels for the training exporter. -->
   <script>
   (function initFrameReview() {
     const $ = (id) => document.getElementById(id);
@@ -971,7 +1000,9 @@
           liveEvery = $("live-every"), liveBar = $("live-bar"),
           liveClearBtn = $("live-clear");
     const fbsU = $("fbs-untouched"), fbsC = $("fbs-correct"),
-          fbsW = $("fbs-wrong"), fbsM = $("fbs-missed");
+          fbsW = $("fbs-wrong"), fbsM = $("fbs-missed"),
+          fbsR = $("fbs-relabel");
+    const stripEl = $("frame-strip");
     if (!canvas) return;
 
     const ctx = canvas.getContext("2d");
@@ -979,9 +1010,9 @@
     // ---- state ---------------------------------------------------------
     let current = null;             // {frame_path, url, cam_id, boxes[], ...}
     let img = null;
-    let boxVerdicts = {};            // box_id -> "correct" | "wrong"
+    let boxVerdicts = {};            // box_id -> "correct" | "wrong" | "relabel:<cls>"
     let missedBoxes = [];            // {cls, box:[x1,y1,x2,y2]}
-    let mode = "verdict";            // "verdict" | "add" | "block"
+    let mode = "verdict";            // "verdict" | "add" | "block" | "relabel"
     let drag = null;                 // {x0,y0,x1,y1} while dragging in add-mode
     // scale factor from image-space to canvas-space
     let scale = 1;
@@ -993,22 +1024,28 @@
     };
 
     const modeBlockBtn = $("mode-block");
+    const modeRelabelBtn = $("mode-relabel");
     function setMode(m) {
       mode = m;
       modeVerdictBtn.classList.toggle("on", m === "verdict");
       modeAddBtn.classList.toggle("on", m === "add");
       if (modeBlockBtn) modeBlockBtn.classList.toggle("on", m === "block");
+      if (modeRelabelBtn) modeRelabelBtn.classList.toggle("on", m === "relabel");
       hintEl.textContent =
           m === "verdict" ? "click a box: grey → correct → wrong → grey"
         : m === "add"     ? "drag on the canvas to draw a box around the missed object"
+        : m === "relabel" ? "click a box to set its class to the one picked in the dropdown (click again to undo)"
         :                   "drag a box over a spot where the model keeps mis-firing this class - it becomes a permanent blacklist polygon";
-      canvas.style.cursor = m === "verdict" ? "pointer" : "crosshair";
+      canvas.style.cursor = (m === "verdict" || m === "relabel")
+          ? "pointer" : "crosshair";
     }
     modeVerdictBtn.addEventListener("click", () => setMode("verdict"));
     modeAddBtn.addEventListener("click", () => setMode("add"));
     if (modeBlockBtn) modeBlockBtn.addEventListener("click", () => setMode("block"));
+    if (modeRelabelBtn) modeRelabelBtn.addEventListener("click", () => setMode("relabel"));
 
     function verdictColor(v) {
+      if (v && v.startsWith("relabel:")) return "#f0a35e";
       return v === "correct" ? "#36d399" : v === "wrong" ? "#ef4444" : "#8b909a";
     }
 
@@ -1016,15 +1053,17 @@
       if (!current) { fbsU.textContent = fbsC.textContent =
           fbsW.textContent = fbsM.textContent = "0"; return; }
       const boxes = current.boxes || [];
-      let c = 0, w = 0;
+      let c = 0, w = 0, rl = 0;
       for (const b of boxes) {
         const v = boxVerdicts[String(b.id)];
         if (v === "correct") c++;
         else if (v === "wrong") w++;
+        else if (v && v.startsWith("relabel:")) rl++;
       }
       fbsC.textContent = c;
       fbsW.textContent = w;
-      fbsU.textContent = boxes.length - c - w;
+      if (fbsR) fbsR.textContent = rl;
+      fbsU.textContent = boxes.length - c - w - rl;
       fbsM.textContent = missedBoxes.length;
     }
 
@@ -1047,7 +1086,10 @@
         ctx.strokeStyle = col;
         ctx.strokeRect(x1 * scale, y1 * scale,
                        (x2 - x1) * scale, (y2 - y1) * scale);
-        const label = `${b.cls} ${(b.conf * 100).toFixed(0)}%${v ? ` [${v}]` : ""}`;
+        const tag = !v ? ""
+                  : v.startsWith("relabel:") ? ` [→ ${v.split(":")[1]}]`
+                  : ` [${v}]`;
+        const label = `${b.cls} ${(b.conf * 100).toFixed(0)}%${tag}`;
         ctx.font = "12px system-ui, sans-serif";
         const tm = ctx.measureText(label);
         const lx = x1 * scale, ly = Math.max(14, y1 * scale - 2);
@@ -1115,16 +1157,25 @@
     }
 
     canvas.addEventListener("click", (e) => {
-      if (mode !== "verdict" || !current) return;
+      if ((mode !== "verdict" && mode !== "relabel") || !current) return;
       const { x, y } = eventCoords(e);
       const b = findBoxAt(x, y);
       if (!b) return;
-      const cur = boxVerdicts[String(b.id)];
-      // cycle: undef → correct → wrong → undef
-      const next = cur === undefined ? "correct"
+      const key = String(b.id);
+      const cur = boxVerdicts[key];
+      if (mode === "relabel") {
+        const target = `relabel:${addClsSel.value}`;
+        // clicking again with the same class undoes the relabel
+        if (cur === target) delete boxVerdicts[key];
+        else boxVerdicts[key] = target;
+        draw();
+        return;
+      }
+      // verdict mode - cycle: undef/relabel → correct → wrong → undef
+      const next = (cur === undefined || cur.startsWith("relabel:")) ? "correct"
                  : cur === "correct" ? "wrong" : undefined;
-      if (next) boxVerdicts[String(b.id)] = next;
-      else delete boxVerdicts[String(b.id)];
+      if (next) boxVerdicts[key] = next;
+      else delete boxVerdicts[key];
       draw();
     });
 
@@ -1187,19 +1238,52 @@
     canvas.addEventListener("mouseleave", () => { drag = null; draw(); });
 
     // ---- loading + submit ---------------------------------------------
-    async function loadNext() {
+    function _resetEditor() {
       statusEl.className = "review-status"; statusEl.textContent = "";
       canvas.hidden = true;
       emptyEl.textContent = "loading…"; emptyEl.style.display = "";
       current = null; img = null;
       boxVerdicts = {}; missedBoxes = []; drag = null;
       noteEl.value = "";
+    }
+
+    function _showFrame(data) {
+      current = data;
+      camEl.textContent = data.cam_id || "-";
+      pathEl.textContent = data.frame_path;
+      // Prefill a previously-reviewed frame so the user can AMEND it
+      // instead of starting over (re-labeling past mistakes).
+      if (data.existing) {
+        boxVerdicts = { ...(data.existing.box_verdicts || {}) };
+        missedBoxes = (data.existing.missed_detections || []).map(
+            (m) => ({ cls: m.cls, box: m.box.slice() }));
+        noteEl.value = data.existing.note || "";
+        statusEl.className = "review-status";
+        statusEl.textContent = "editing a previously-reviewed frame - " +
+            "saving overwrites the old verdicts (no double learning)";
+      }
+      markStripCurrent(data.frame_path);
+      img = new Image();
+      img.onload = () => {
+        emptyEl.style.display = "none";
+        canvas.hidden = false;
+        draw();
+      };
+      img.onerror = () => {
+        emptyEl.textContent = "frame image failed to load";
+      };
+      img.src = data.url;
+    }
+
+    async function loadNext() {
+      _resetEditor();
       try {
         const r = await fetch("/api/review-frame", { cache: "no-store" });
         const data = await r.json();
         if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
         if (data.done) {
           camEl.textContent = "-"; pathEl.textContent = "";
+          markStripCurrent(null);
           try {
             const rr = await fetch("/api/review-frames-stats");
             const s = rr.ok ? await rr.json() : null;
@@ -1208,31 +1292,71 @@
                   "<span style=\"font-size:11px\">the collector saves one " +
                   "frame every " + (s.every_n || 5) + " bursts to " +
                   "<code>review_frames/</code></span>"
-                : "every stored frame has been reviewed.";
+                : "every stored frame has been reviewed.<br>" +
+                  "<span style=\"font-size:11px\">click a thumbnail above " +
+                  "to re-open one and amend its verdicts</span>";
           } catch (_) {
             emptyEl.textContent = "no frames available.";
           }
           renderSummary();
           return;
         }
-        current = data;
-        camEl.textContent = data.cam_id || "-";
-        pathEl.textContent = data.frame_path;
-        img = new Image();
-        img.onload = () => {
-          emptyEl.style.display = "none";
-          canvas.hidden = false;
-          draw();
-        };
-        img.onerror = () => {
-          emptyEl.textContent = "frame image failed to load";
-        };
-        img.src = data.url;
+        _showFrame(data);
       } catch (err) {
         statusEl.className = "review-status err";
         statusEl.textContent = `frame load failed: ${err.message}`;
         emptyEl.textContent = "load failed";
       }
+    }
+
+    async function loadSpecific(rel) {
+      _resetEditor();
+      try {
+        const r = await fetch(
+            `/api/review-frame?path=${encodeURIComponent(rel)}`,
+            { cache: "no-store" });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+        _showFrame(data);
+      } catch (err) {
+        statusEl.className = "review-status err";
+        statusEl.textContent = `frame load failed: ${err.message}`;
+        emptyEl.textContent = "load failed";
+      }
+    }
+
+    // ---- frame strip: every stored frame, reviewed ones badged ----------
+    function markStripCurrent(rel) {
+      if (!stripEl) return;
+      for (const el of stripEl.querySelectorAll(".fs-item")) {
+        el.classList.toggle("current", rel !== null && el.dataset.rel === rel);
+      }
+    }
+
+    async function loadStrip() {
+      if (!stripEl) return;
+      try {
+        const r = await fetch("/api/review-frames-list", { cache: "no-store" });
+        if (!r.ok) return;
+        const data = await r.json();
+        const frames = data.frames || [];
+        stripEl.hidden = frames.length === 0;
+        stripEl.innerHTML = "";
+        for (const f of frames) {
+          const item = document.createElement("div");
+          item.className = "fs-item";
+          item.dataset.rel = f.frame_path;
+          item.title = `${f.cam_id} · ${f.n_boxes} boxes · ` +
+              (f.reviewed ? "reviewed - click to amend" : "not reviewed yet");
+          item.innerHTML =
+              `<img loading="lazy" src="${f.url}" alt="">` +
+              (f.reviewed ? '<span class="fs-done">✓</span>' : "") +
+              `<span class="fs-cam">${f.cam_id}</span>`;
+          item.addEventListener("click", () => loadSpecific(f.frame_path));
+          stripEl.appendChild(item);
+        }
+        if (current) markStripCurrent(current.frame_path);
+      } catch (_) { /* strip is a convenience - never block review on it */ }
     }
 
     async function submit() {
@@ -1254,6 +1378,7 @@
         const data = await r.json();
         if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
         await refreshStats();
+        await loadStrip();
         await loadNext();
       } catch (err) {
         statusEl.className = "review-status err";
@@ -1342,7 +1467,7 @@
       if (!confirm("Delete every saved review frame?")) return;
       try { await fetch("/api/review-frames-clear", { method: "POST" }); }
       catch (_) {}
-      await refreshDisk(); await loadNext();
+      await refreshDisk(); await loadStrip(); await loadNext();
     });
     diskClearBtn.addEventListener("click", async () => {
       if (!confirm("Delete every extracted anomaly crop?")) return;
@@ -1360,8 +1485,12 @@
     setMode("verdict");
     refreshStats();
     refreshDisk();
+    loadStrip();
     loadNext();
     setInterval(refreshDisk, 60000);
+    // The pool-sync puller drops new frames in every ~2 min; keep the strip
+    // (and its reviewed badges) in step without a manual reload.
+    setInterval(loadStrip, 120000);
     // Redraw on resize so the canvas keeps its aspect
     window.addEventListener("resize", () => { if (img && current) draw(); });
   })();

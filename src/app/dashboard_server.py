@@ -247,6 +247,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/review-frame":
             self._review_frame_get()
             return
+        if path == "/api/review-frames-list":
+            self._review_frames_list()
+            return
         if path == "/api/review-frames-stats":
             self._review_frames_stats()
             return
@@ -553,7 +556,25 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
     # gives a verdict per BOX, plus optional "missed" boxes drawn on the
     # canvas. That last piece is what finally gives us FN → recall → F1.
     def _review_frame_get(self) -> None:
+        """GET /api/review-frame            -> next un-reviewed frame (sampler)
+           GET /api/review-frame?path=<rel> -> that SPECIFIC frame, reviewed or
+        not, with any prior verdicts under ``existing`` so the UI can prefill
+        and let the user amend a past review."""
         try:
+            from urllib.parse import parse_qs, urlparse
+            q = parse_qs(urlparse(self.path).query)
+            rel = (q.get("path") or [""])[0].strip()
+            if rel:
+                if ".." in rel.split("/") or rel.startswith("/") or "\\" in rel:
+                    self._send_json(400, {"error": "invalid path"})
+                    return
+                from app.labels import load_frame
+                s = load_frame(_review_store(), rel, SNAPSHOTS_DIR)
+                if s is None:
+                    self._send_json(404, {"error": "frame not found"})
+                    return
+                self._send_json(200, s)
+                return
             from app.labels import sample_frame
             s = sample_frame(_review_store(), SNAPSHOTS_DIR)
             if s is None:
@@ -563,6 +584,17 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json(200, s)
         except Exception as e:
             print(f"  ! review-frame failed: {type(e).__name__}: {e}")
+            self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
+
+    def _review_frames_list(self) -> None:
+        """GET /api/review-frames-list -> every stored frame + review status,
+        newest first. Powers the strip that re-opens reviewed frames."""
+        try:
+            from app.labels import list_frames
+            self._send_json(200, {"frames": list_frames(_review_store(),
+                                                        SNAPSHOTS_DIR)})
+        except Exception as e:
+            print(f"  ! review-frames-list failed: {type(e).__name__}: {e}")
             self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
 
     def _review_frame_submit(self) -> None:
@@ -614,6 +646,14 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                     for box_id, verdict in (r.box_verdicts or {}).items():
                         cls = cls_by_id.get(str(box_id))
                         if not cls: continue
+                        if verdict.startswith("relabel:"):
+                            # The object is real but the class was wrong:
+                            # stricter on the class the model claimed, looser
+                            # on the class the user says is actually there.
+                            apply_review(cam_id, cls, "wrong_label")
+                            new_cls = verdict.split(":", 1)[1]
+                            apply_review(cam_id, new_cls, "correct")
+                            continue
                         v = "correct" if verdict == "correct" else "wrong_label"
                         apply_review(cam_id, cls, v)
                     # Missed detections signal: the model needs to be LESS strict

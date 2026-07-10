@@ -100,7 +100,9 @@ def compute(review_store) -> dict:
             rec = per_cls.setdefault(cls, {"tp": 0, "fp": 0, "fn": 0})
             if verdict == "correct":
                 correct += 1; rec["tp"] += 1
-            elif verdict == "wrong":
+            elif verdict == "wrong" or verdict.startswith("relabel:"):
+                # relabel = real object, wrong class: a precision miss for
+                # the class the model CLAIMED (which is what per_cls keys on).
                 wrong += 1; rec["fp"] += 1
         for miss in (fr.missed_detections or ()):
             cls = miss.get("cls") or "?"

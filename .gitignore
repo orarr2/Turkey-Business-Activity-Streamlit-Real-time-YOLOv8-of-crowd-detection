@@ -47,3 +47,4 @@ firebase-service-account.json
 # + backup-collector code that only the maintainer should run).
 admin.ipynb
 **/admin.ipynb
+src/data/labels_export/

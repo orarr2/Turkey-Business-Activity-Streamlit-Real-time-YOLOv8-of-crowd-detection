@@ -42,7 +42,27 @@ VERDICTS = ("correct", "wrong_label", "not_an_object")
 
 # Frame-level box verdicts: same semantic space as the crop-level VERDICTS
 # but the wire values coming from the canvas UI are more compact.
+# "relabel:<cls>" is the third form: the box IS a real object, the model
+# just called it the wrong class - the payload carries the user's fix, so
+# the training exporter can emit a corrected label instead of dropping the
+# box the way a plain "wrong" does.
 BOX_VERDICTS = ("correct", "wrong")
+
+# Classes a relabel verdict may target. Mirrors detect_core's
+# CLASSES_OF_INTEREST without importing it here: labels.py must stay
+# importable in minimal test environments where cv2/ultralytics aren't
+# installed, and detect_core pulls cv2 at module import.
+RELABEL_CLASSES = ("person", "bicycle", "car", "motorcycle", "bus",
+                   "train", "truck")
+
+
+def valid_box_verdict(v: str) -> bool:
+    """True for 'correct', 'wrong', or 'relabel:<known class>'."""
+    if v in BOX_VERDICTS:
+        return True
+    if isinstance(v, str) and v.startswith("relabel:"):
+        return v.split(":", 1)[1] in RELABEL_CLASSES
+    return False
 
 
 @dataclass
@@ -139,7 +159,7 @@ class ReviewStore:
                     frame_path=str(row["frame_path"]),
                     cam_id=str(row.get("cam_id", "?")),
                     box_verdicts={str(k): str(v) for k, v in bv.items()
-                                  if v in BOX_VERDICTS},
+                                  if valid_box_verdict(str(v))},
                     missed_detections=[m for m in miss
                                        if isinstance(m, dict)
                                        and m.get("cls") and m.get("box")],
@@ -195,8 +215,8 @@ class ReviewStore:
                      note: str | None = None) -> FrameReview:
         clean_bv: dict[str, str] = {}
         for k, v in (box_verdicts or {}).items():
-            if v in BOX_VERDICTS:
-                clean_bv[str(k)] = v
+            if valid_box_verdict(str(v)):
+                clean_bv[str(k)] = str(v)
         clean_missed: list[dict] = []
         for m in (missed_detections or []):
             cls = m.get("cls") if isinstance(m, dict) else None
@@ -227,11 +247,13 @@ class ReviewStore:
         for r in self._by_path.values():
             counts[r.verdict] = counts.get(r.verdict, 0) + 1
         # Frame-level aggregates: TP, FP, FN counts across every submitted frame.
+        # A relabel is a precision miss for the class the model gave (the box
+        # was real but the label wrong), so it lands in the FP bucket here.
         tp = fp = fn = 0
         for fr in self._frames_by_path.values():
             for v in fr.box_verdicts.values():
                 if v == "correct": tp += 1
-                elif v == "wrong": fp += 1
+                elif v == "wrong" or v.startswith("relabel:"): fp += 1
             fn += len(fr.missed_detections or ())
         return {
             "total_reviewed":    len(self._by_path),
@@ -296,6 +318,62 @@ def sample_frame(store: ReviewStore,
         "boxes":      meta.get("boxes", []),
         "remaining":  len(pool),
     }
+
+
+def list_frames(store: ReviewStore,
+                snapshots_root: str | Path = SNAPSHOTS_ROOT) -> list[dict]:
+    """Every stored frame, newest first, with its review status - powers the
+    frame strip that lets the user RE-OPEN a reviewed frame instead of being
+    locked out by the un-reviewed-only sampler."""
+    from app.review_frames import list_all_frames, load_metadata
+
+    out: list[dict] = []
+    for rel in list_all_frames(snapshots_root):
+        meta = load_metadata(rel, snapshots_root) or {}
+        out.append({
+            "frame_path": rel,
+            "url":        f"/snapshots/{rel}",
+            "cam_id":     meta.get("cam_id", "?"),
+            "saved_at":   meta.get("saved_at", ""),
+            "n_boxes":    len(meta.get("boxes") or []),
+            "reviewed":   store.is_frame_reviewed(rel),
+        })
+    out.sort(key=lambda f: f["frame_path"], reverse=True)
+    return out
+
+
+def load_frame(store: ReviewStore, frame_path: str,
+               snapshots_root: str | Path = SNAPSHOTS_ROOT) -> dict | None:
+    """Package ONE specific frame for the canvas UI - reviewed or not.
+
+    Same shape as sample_frame() plus an ``existing`` block carrying the
+    prior verdicts when the frame was already reviewed, so the UI can
+    prefill the boxes and let the user fix past mistakes (re-labeling).
+    Returns None when the frame or its metadata are gone.
+    """
+    from app.review_frames import load_metadata
+
+    meta = load_metadata(frame_path, snapshots_root)
+    if not meta:
+        return None
+    out = {
+        "frame_path": frame_path,
+        "url":        f"/snapshots/{frame_path}",
+        "cam_id":     meta.get("cam_id", "?"),
+        "frame_w":    meta.get("frame_w"),
+        "frame_h":    meta.get("frame_h"),
+        "boxes":      meta.get("boxes", []),
+        "remaining":  None,
+    }
+    prior = store._frames_by_path.get(frame_path)  # noqa: SLF001 - same module family
+    if prior is not None:
+        out["existing"] = {
+            "box_verdicts":      dict(prior.box_verdicts),
+            "missed_detections": list(prior.missed_detections or []),
+            "note":              prior.note,
+            "reviewed_at":       prior.reviewed_at,
+        }
+    return out
 
 
 def sample_crop(store: ReviewStore,
