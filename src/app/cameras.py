@@ -189,6 +189,22 @@ CAMERAS = {
         "embed": "https://player.tvkur.com/l/c77i9cfbb2nj4i0fr82g",
         "type": "hospital junction / vehicular",
     },
+    # --- Konya Ince Minareli Medrese (webcamera24 8033). The city's TRAM line
+    # runs on dedicated tracks along the left of the frame (Alaaddin loop),
+    # with a pedestrian plaza and a road in view - the first camera in the
+    # grid that can actually produce `train`-class detections. Added after
+    # the operator reported metro/tram traffic was invisible to the system
+    # (no rail-view camera existed). tvkur id resolved 2026-07:
+    # c77ib8vbb2nj4i0fr8bg, frame 1920x1080, reachable from any country. ---
+    "konya_ince_minareli": {
+        "name": "Konya - Ince Minareli Medrese (tram line)",
+        "city": "Konya",
+        "kind": "hls",
+        "url": "https://content.tvkur.com/l/c77ib8vbb2nj4i0fr8bg/master.m3u8",
+        "page": "https://webcamera24.com/camera/turkey/8033-ince-minareli-medrese/",
+        "embed": "https://player.tvkur.com/l/c77ib8vbb2nj4i0fr8bg",
+        "type": "tram line / plaza",
+    },
     # --- Kept for runs from a Turkey-routed IP, where these unblock. Not in the grid. ---
     "giresun_gazi": {
         "name": "Giresun - Gazi Caddesi",
@@ -243,6 +259,12 @@ GRID_SLOTS = [
         "display_area": "Konya - Millet Caddesi",
         "primary":      "konya_millet_caddesi",
         "fallbacks":    ["konya_kulturpark", "otogar_kavsagi", "konya_hukumet"],
+    },
+    {
+        "slot_id":      "slot_ince_minareli",
+        "display_area": "Konya - Ince Minareli (tram)",
+        "primary":      "konya_ince_minareli",
+        "fallbacks":    ["konya_hukumet", "konya_kulturpark", "otogar_kavsagi"],
     },
 ]
 

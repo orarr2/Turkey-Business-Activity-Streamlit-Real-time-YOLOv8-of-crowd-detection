@@ -822,7 +822,7 @@ function renderCombinedChart() {
     anomBinsBySlot[slot.slot_id] = set;
   }
 
-  const palette = ["#4f8cff", "#36d399", "#f0a35e", "#a78bfa"];
+  const palette = ["#4f8cff", "#36d399", "#f0a35e", "#a78bfa", "#ff6b9d"];
   const datasets = GRID_SLOTS.map((slot, i) => {
     const bins = binsBySlot[slot.slot_id];
     const anom = anomBinsBySlot[slot.slot_id];

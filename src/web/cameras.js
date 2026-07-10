@@ -50,6 +50,15 @@ export const GRID_SLOTS = [
     placeholder_hls:  tvkurHls("c77i9cfbb2nj4i0fr82g"),
     placeholder_page: "https://webcamera24.com/camera/turkey/8046-millet-caddesi/",
   },
+  {
+    // The tram-line view: Konya's Alaaddin-loop tracks run along the left of
+    // the frame, so this is the slot where `train` detections actually appear.
+    slot_id:          "slot_ince_minareli",
+    display_area:     "Konya - İnce Minareli (tram)",
+    placeholder_name: "Konya - İnce Minareli Medrese",
+    placeholder_hls:  tvkurHls("c77ib8vbb2nj4i0fr8bg"),
+    placeholder_page: "https://webcamera24.com/camera/turkey/8033-ince-minareli-medrese/",
+  },
 ];
 
 // Given an active_cam field from Firestore, return the correct HLS/embed URL.
