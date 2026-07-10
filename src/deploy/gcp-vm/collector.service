@@ -7,6 +7,9 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=__INSTALL_DIR__/src
 Environment=PYTHONUNBUFFERED=1
+# Two OpenMP threads matches the e2-micro's 2 shared vCPUs; torch's default
+# oversubscribes and the context-switch thrash slows every YOLO pass down.
+Environment=OMP_NUM_THREADS=2
 Environment=FIREBASE_CREDENTIALS=__SA_PATH__
 Environment=FIREBASE_STORAGE_BUCKET=__STORAGE_BUCKET__
 # OSNet re-identification embedder. When the ONNX file is present the
@@ -16,33 +19,33 @@ Environment=FIREBASE_STORAGE_BUCKET=__STORAGE_BUCKET__
 # the model - it's a one-shot ~5 MB download and safe to skip if you're
 # happy with the color-signature baseline.
 Environment=REID_MODEL=__INSTALL_DIR__/src/data/osnet_x0_25_msmt17.onnx
-ExecStart=__INSTALL_DIR__/src/.venv/bin/python -m app.collector --interval 40 --imgsz 640
-# --interval 40s means 4 slots x 3 writes/round x 2160 rounds/day = ~25,920
-# Firestore writes/day - just above the 20K/day free tier, ~$0.85/month on Blaze.
-# At interval=20 it would be ~52K/day (~$1.70/month). Trade-off: half the writes,
-# half the temporal resolution. The dashboard's per-tile mini chart still fills
-# up cleanly and the anomaly z-score window (30 samples) covers ~20 min now.
+ExecStart=__INSTALL_DIR__/src/.venv/bin/python -m app.collector --interval 40 --imgsz 512 --burst 2 --burst-stride 13
+# --interval 40s: 5 slots x 3 writes/round - the effective cadence is bounded
+# by the ROUND time on this host, not by the flag.
 #
-# --imgsz 640 is a memory trade-off, not a personal preference:
-#   * app.collector's default weights are now yolov8s (~11.2M params),
-#     which recovers the small/static/edge objects yolov8n was losing;
-#   * yolov8s at imgsz 960 pushes RSS past ~1 GB - it blows past both the
-#     MemoryMax below AND the e2-micro's own 1 GB of physical memory;
-#   * yolov8s at imgsz 640 stays near ~700-800 MB peak, which fits both
-#     this unit's caps and the Always Free host.
-# On a host with more RAM (e2-small = 2 GB and up), drop `--imgsz 640` to
-# recover the last ~10-15% of distant-object recall.
+# --imgsz 512 --burst 2 --burst-stride 13 (2026-07, the 5-camera + OSNet era):
+#   * measured on the live VM: 640/burst-3 with 5 cams + the OSNet embedder
+#     pushed RSS past MemoryMax and the service entered a 4-minute oom-kill
+#     loop (boot -> RSS climb -> SIGKILL -> RestartSec, repeat) while rounds
+#     stretched past 7 minutes;
+#   * 512 cuts YOLO FLOPs ~36% vs 640 and shrinks peak activations;
+#   * burst 2 @ stride 13 keeps two frames ~0.5s apart - the median still
+#     kills single-frame flicker and the speed estimator still gets its
+#     two points - while dropping a third of the model passes and ~2/3 of
+#     the H.264 decode work (detect_core also now picks the ~720p rendition
+#     of the master playlist instead of decoding 1080p for a 512px input).
+# On a host with more RAM (e2-small = 2 GB and up), restore
+# `--imgsz 640 --burst 3 --burst-stride 25` for the last bit of recall.
 Restart=always
 RestartSec=15
 # Memory sizing for the e2-micro (1 GB, Always Free) this project runs on.
-# Caps unchanged from the yolov8n era because the ExecStart flag above pulls
-# yolov8s's peak into the same envelope. If the journal ever shows reclaim
-# throttling or oom-kill restarts (rounds taking minutes, dashboard numbers
-# frozen between updates), first check that --imgsz 640 is actually still on
-# the ExecStart line; if it is and the caps still fail, either drop back to
-# `--weights yolov8n.pt` or move to e2-small.
-MemoryHigh=700M
-MemoryMax=850M
+# High/Max raised from 700/850 after the oom-kill loop above: the OSNet
+# session + fifth camera legitimately need the headroom, and the flag
+# changes on ExecStart pull peak RSS back down at the same time. If the
+# journal shows oom-kills again, drop back to `--weights yolov8n.pt` or
+# move to e2-small.
+MemoryHigh=760M
+MemoryMax=900M
 StandardOutput=journal
 StandardError=journal
 

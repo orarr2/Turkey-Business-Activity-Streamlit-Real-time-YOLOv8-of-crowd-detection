@@ -157,13 +157,56 @@ def _http_get(url: str, extra_headers: dict | None = None) -> bytes:
     with urllib.request.urlopen(req, timeout=15, context=_SSL_CTX) as r:
         return r.read()
 
+
+_STREAM_INF_RES_RE = re.compile(r"RESOLUTION=(\d+)x(\d+)")
+_STREAM_INF_BW_RE  = re.compile(r"BANDWIDTH=(\d+)")
+
+
+def _pick_variant(pl: str, min_height: int = 640) -> str | None:
+    """Choose which rendition of a master playlist to decode.
+
+    The old behavior took the FIRST variant, which CDNs list as the highest
+    bitrate - so the collector was downloading and H.264-decoding 1080p
+    only to letterbox it down to a 512-640px YOLO input. On the e2-micro's
+    shared cores that decode dominates the whole sampling round.
+
+    Detection quality is set by the model's imgsz, not the source pixels,
+    as long as the source is at least ~as tall as the input: pick the
+    SMALLEST rendition whose height still covers `min_height`, breaking
+    ties by bandwidth. When nothing is tall enough (or the playlist lists
+    no RESOLUTION), fall back to the tallest thing offered.
+    """
+    cands: list[tuple[int, int, str]] = []   # (height, bandwidth, uri)
+    lines = pl.splitlines()
+    for i, l in enumerate(lines):
+        if not l.startswith("#EXT-X-STREAM-INF"):
+            continue
+        uri = next((x.strip() for x in lines[i + 1:]
+                    if x.strip() and not x.startswith("#")), None)
+        if not uri:
+            continue
+        m = _STREAM_INF_RES_RE.search(l)
+        h = int(m.group(2)) if m else 0
+        b = _STREAM_INF_BW_RE.search(l)
+        bw = int(b.group(1)) if b else 0
+        cands.append((h, bw, uri))
+    if not cands:
+        return None
+    tall = [c for c in cands if c[0] >= min_height]
+    if tall:
+        tall.sort(key=lambda c: (c[0], c[1]))
+        return tall[0][2]
+    cands.sort(key=lambda c: (-c[0], c[1]))
+    return cands[0][2]
+
 def _grab_via_segment(stream_url: str, headers: dict) -> np.ndarray | None:
     """Download the most recent .ts segment with the right headers and decode it."""
     base = stream_url.rsplit("/", 1)[0] + "/"
     pl = _http_get(stream_url, headers).decode("utf-8", "replace")
     if "#EXT-X-STREAM-INF" in pl:
-        variant = next((l.strip() for l in pl.splitlines()
-                        if l.strip() and not l.startswith("#")), None)
+        variant = _pick_variant(pl) or next(
+            (l.strip() for l in pl.splitlines()
+             if l.strip() and not l.startswith("#")), None)
         if not variant:
             return None
         variant_url = variant if variant.startswith("http") else base + variant
@@ -231,8 +274,9 @@ def iter_frames(stream_url: str, max_frames: int):
         except Exception:
             return
         if "#EXT-X-STREAM-INF" in pl:
-            variant = next((l.strip() for l in pl.splitlines()
-                            if l.strip() and not l.startswith("#")), None)
+            variant = _pick_variant(pl) or next(
+                (l.strip() for l in pl.splitlines()
+                 if l.strip() and not l.startswith("#")), None)
             if not variant:
                 return
             variant_url = variant if variant.startswith("http") else base + variant
