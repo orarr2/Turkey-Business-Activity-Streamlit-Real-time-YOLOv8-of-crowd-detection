@@ -249,18 +249,26 @@ def grab_frame(stream_url: str):
         cap.release()
 
 
-def iter_frames(stream_url: str, max_frames: int):
-    """Yield up to `max_frames` consecutive frames from a live HLS stream.
+def iter_frames(stream_url: str, max_frames: int, stride: int = 1):
+    """Yield up to `max_frames` frames from a live HLS stream, `stride`
+    source-frames apart (stride=1 keeps the old consecutive behavior).
 
     For header-required hosts (content.tvkur.com, livestream.ibb.gov.tr, skylinewebcams.com)
     cv2.VideoCapture(url) can't pass Referer/Origin on Windows, so we download the latest
     few .ts segments with the right headers and decode them locally - yielding frames in
     arrival order. For normal HLS we open the URL directly with cv2 and read.
 
-    Used by the dwell-time / tracking section of the notebook so ByteTrack can see the
-    consecutive frames it needs.
+    Skipped frames use cap.grab() rather than cap.read(): H.264 still has to
+    decode them (P-frames reference their predecessors) but grab() skips the
+    BGR conversion + copy, which is a solid slice of the per-frame cost on
+    the collector's shared vCPUs. At burst stride 13 that's 12 cheap grabs
+    per kept frame.
+
+    Used with stride=1 by the dwell-time / tracking section of the notebook
+    so ByteTrack can see the consecutive frames it needs.
     """
-    # header-required host: fetch enough segments to cover max_frames at ~25-30 fps
+    stride = max(1, int(stride))
+    # header-required host: fetch enough segments to cover the strided span
     matching_headers = None
     for host, headers in HEADER_HOSTS.items():
         if host in stream_url:
@@ -289,10 +297,13 @@ def iter_frames(stream_url: str, max_frames: int):
         segs = [l.strip() for l in pl.splitlines() if l.strip() and not l.startswith("#")]
         if not segs:
             return
-        # tail segments give the freshest live view; pull ~enough to cover the request
+        # tail segments give the freshest live view; pull ~enough to cover
+        # the whole strided span ((max_frames-1)*stride + 1 source frames)
         approx_frames_per_seg = 60   # 2 s @ 30 fps is a typical segment
-        n_segs = max(1, min(len(segs), -(-max_frames // approx_frames_per_seg)))
+        span = (max_frames - 1) * stride + 1
+        n_segs = max(1, min(len(segs), -(-span // approx_frames_per_seg)))
         yielded = 0
+        idx = 0
         for seg in segs[-n_segs:]:
             if yielded >= max_frames:
                 break
@@ -306,11 +317,17 @@ def iter_frames(stream_url: str, max_frames: int):
             try:
                 cap = cv2.VideoCapture(tmp)
                 while yielded < max_frames:
-                    ok, fr = cap.read()
-                    if not ok:
-                        break
-                    yielded += 1
-                    yield fr
+                    if idx % stride == 0:
+                        ok, fr = cap.read()
+                        if not ok:
+                            break
+                        yielded += 1
+                        idx += 1
+                        yield fr
+                    else:
+                        if not cap.grab():
+                            break
+                        idx += 1
                 cap.release()
             finally:
                 try: os.unlink(tmp)
@@ -320,13 +337,20 @@ def iter_frames(stream_url: str, max_frames: int):
     # normal HLS / RTSP: stream directly
     cap = cv2.VideoCapture(stream_url)
     yielded = 0
+    idx = 0
     try:
         while yielded < max_frames:
-            ok, fr = cap.read()
-            if not ok:
-                break
-            yielded += 1
-            yield fr
+            if idx % stride == 0:
+                ok, fr = cap.read()
+                if not ok:
+                    break
+                yielded += 1
+                idx += 1
+                yield fr
+            else:
+                if not cap.grab():
+                    break
+                idx += 1
     finally:
         cap.release()
 
@@ -858,11 +882,12 @@ def grab_burst(stream_url: str, n: int = 3, stride: int = 25) -> list[np.ndarray
         return [] if f is None else [f]
     frames: list[np.ndarray] = []
     try:
-        for i, fr in enumerate(iter_frames(stream_url, max_frames=n * stride)):
-            if i % stride == 0:
-                frames.append(fr)
-                if len(frames) >= n:
-                    break
+        # Striding happens INSIDE iter_frames now: skipped frames only pay
+        # cap.grab() (decode without the BGR convert+copy), not a full read.
+        for fr in iter_frames(stream_url, max_frames=n, stride=stride):
+            frames.append(fr)
+            if len(frames) >= n:
+                break
     except Exception:
         pass
     if not frames:

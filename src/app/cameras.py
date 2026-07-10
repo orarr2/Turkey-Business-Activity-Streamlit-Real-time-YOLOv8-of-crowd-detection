@@ -260,12 +260,11 @@ GRID_SLOTS = [
         "primary":      "konya_millet_caddesi",
         "fallbacks":    ["konya_kulturpark", "otogar_kavsagi", "konya_hukumet"],
     },
-    {
-        "slot_id":      "slot_ince_minareli",
-        "display_area": "Konya - Ince Minareli (tram)",
-        "primary":      "konya_ince_minareli",
-        "fallbacks":    ["konya_hukumet", "konya_kulturpark", "otogar_kavsagi"],
-    },
+    # konya_ince_minareli (tram-line view) stays in CAMERAS above as a
+    # catalog option but is NOT in the grid: a fifth slot costs ~20% round
+    # time and RAM on the e2-micro, and the operator prefers the 4-camera
+    # cadence. Swap it in for one of the four if rail coverage ever
+    # outranks refresh speed.
 ]
 
 # Backward compat for the viewer notebook / smoke tests: the four primary cams.

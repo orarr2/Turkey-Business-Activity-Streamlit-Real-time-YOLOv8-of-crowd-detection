@@ -8,7 +8,7 @@
   <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
-  <title>Turkey Business Activity - Live (5 cameras)</title>
+  <title>Turkey Business Activity - Live (4 cameras)</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
   <style>
@@ -452,7 +452,7 @@
   <header>
     <div>
       <h1>Turkey Business Activity - Live Footfall</h1>
-      <div class="sub">5 cameras · people + vehicle counts (burst-median YOLO) ·
+      <div class="sub">4 cameras · people + vehicle counts (burst-median YOLO) ·
         anomalies vs each location's hour-of-week norm · streamed from Firestore</div>
       <!-- Model quality scoreboard - computed on the server from the review
            store, refreshed every 10 s so an active review sitting shifts
@@ -689,9 +689,9 @@
   <!-- firebase-config.js is gitignored per-clone; see docs/firebase_setup.md -->
   <!-- ?v=N is a cache-buster: bump it whenever any of the JS files changes,
        so the browser doesn't serve a stale ES-module from disk cache. -->
-  <script type="module" src="./firebase-config.js?v=35"></script>
-  <script type="module" src="./cameras.js?v=35"></script>
-  <script type="module" src="./app.js?v=35"></script>
+  <script type="module" src="./firebase-config.js?v=36"></script>
+  <script type="module" src="./cameras.js?v=36"></script>
+  <script type="module" src="./app.js?v=36"></script>
 
   <!-- Search UI. INLINE and NON-MODULE on purpose: it wires POST /api/search
        on this same server, has no Firebase dependency, and must keep working
