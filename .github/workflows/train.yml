@@ -1,0 +1,110 @@
+# Automated active-learning trainer (plan WS3).
+#
+# What one run does, end to end, with no machine of the operator's involved:
+#   1. pull verdicts + reviewed frames the dashboard uploaded to Storage
+#   2. export them as a YOLO dataset (chronological 90/10 split)
+#   3. fine-tune ONLY the Detect head of yolov8s (backbone frozen)
+#   4. validate base vs candidate on the same val split; promote only if
+#      mAP50 gains >= +0.5pp with no class regressions (person/car: none)
+#   5. publish the promoted head to Storage - the VM collector hot-loads it
+#      within ~20 minutes, no restart
+#
+# Trigger: manual (Run workflow button) while the loop earns trust.
+# After 2-3 clean runs, uncomment the schedule block for nightly training.
+#
+# One-time setup: repo Settings -> Secrets and variables -> Actions ->
+# New repository secret, name FIREBASE_SA, value = the full content of the
+# Firebase Admin SDK service-account json.
+
+name: train-head
+
+on:
+  workflow_dispatch:
+    inputs:
+      epochs:
+        description: "training epochs (clamped to 10)"
+        default: "10"
+      imgsz:
+        description: "train/val image size"
+        default: "512"
+  # schedule:
+  #   - cron: "20 1 * * *"   # 01:20 UTC = 04:20 Turkey - streets quiet, data fresh
+
+permissions:
+  contents: read
+
+concurrency:
+  group: train-head
+  cancel-in-progress: false
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: src/requirements-train.txt
+
+      - name: Install dependencies (CPU torch)
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements-train.txt
+
+      - name: Write service-account key
+        env:
+          FIREBASE_SA: ${{ secrets.FIREBASE_SA }}
+        run: |
+          if [ -z "$FIREBASE_SA" ]; then
+            echo "::error::FIREBASE_SA secret is not set (repo Settings -> Secrets -> Actions)"
+            exit 1
+          fi
+          printf '%s' "$FIREBASE_SA" > "$RUNNER_TEMP/sa.json"
+
+      - name: Fetch training data from Storage
+        env:
+          FIREBASE_CREDENTIALS: ${{ runner.temp }}/sa.json
+        run: python -m tools.fetch_training_data --dest data/training_pull
+
+      - name: Export YOLO dataset
+        run: >
+          python -m tools.export_labels
+          --reviews data/training_pull/reviews.json
+          --snapshots data/training_pull/snapshots
+          --out data/labels_export
+
+      - name: Train Detect head (backbone frozen)
+        run: >
+          python -m tools.train_head
+          --data data/labels_export/dataset.yaml
+          --epochs "${{ github.event.inputs.epochs || '10' }}"
+          --imgsz "${{ github.event.inputs.imgsz || '512' }}"
+          --out-file "data/adapters/head_run${{ github.run_number }}.pt"
+
+      - name: Gate against baseline, publish on promotion
+        env:
+          FIREBASE_CREDENTIALS: ${{ runner.temp }}/sa.json
+        run: >
+          python -m tools.promote_adapter
+          --candidate "data/adapters/head_run${{ github.run_number }}.pt"
+          --data data/labels_export/dataset.yaml
+          --imgsz "${{ github.event.inputs.imgsz || '512' }}"
+          --publish
+
+      - name: Keep run artifacts (head + gate history)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: adapter-run-${{ github.run_number }}
+          path: |
+            src/data/adapters/
+            src/data/labels_export/dataset.yaml
+          retention-days: 90

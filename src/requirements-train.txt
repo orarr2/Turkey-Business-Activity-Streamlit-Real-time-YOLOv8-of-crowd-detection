@@ -1,0 +1,6 @@
+# Cloud-trainer dependencies (.github/workflows/train.yml).
+# torch/torchvision are installed separately from the CPU wheel index in the
+# workflow - keeping them out of here stops pip resolving the 2.5 GB CUDA
+# builds on a CPU-only runner.
+ultralytics>=8.2
+firebase-admin>=6.5

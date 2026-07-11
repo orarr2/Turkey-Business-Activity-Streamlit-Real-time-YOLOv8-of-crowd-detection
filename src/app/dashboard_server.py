@@ -480,6 +480,13 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                                      verdict)
             except Exception as ex:
                 print(f"  ! confidence_boost skipped: {type(ex).__name__}: {ex}")
+            # Ship the fresh verdicts to cloud Storage so the nightly
+            # trainer sees them with the operator's PC off. Fire-and-forget.
+            try:
+                from app.training_sync import push_async
+                push_async()
+            except Exception as ex:
+                print(f"  ! training_sync skipped: {type(ex).__name__}: {ex}")
             self._send_json(200, {"ok": True, "review": r.to_public(),
                                   "summary": _review_store().summary()})
         except ValueError as e:
@@ -669,6 +676,13 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                             apply_review(cam_id, cls, "correct")
                 except Exception as ex:
                     print(f"  ! frame confidence_boost skipped: {type(ex).__name__}: {ex}")
+            # Verdicts + this frame's jpg/json go to Storage training/ in a
+            # background thread - the nightly cloud trainer's input.
+            try:
+                from app.training_sync import push_async
+                push_async()
+            except Exception as ex:
+                print(f"  ! training_sync skipped: {type(ex).__name__}: {ex}")
             self._send_json(200, {"ok": True, "frame_review": r.to_public(),
                                   "summary": _review_store().summary()})
         except Exception as e:

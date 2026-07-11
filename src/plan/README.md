@@ -20,6 +20,31 @@ free write quota.
 | Per-(cam,cls) threshold nudging + auto/manual blacklist | `confidence_boost`, `auto_blacklist` | yes |
 | Anomaly-profile self-rebase | `collector.HourlyProfile` | yes |
 
+## Status update (2026-07-11, WS3 shipped)
+
+WS3 is BUILT and wired, with the operator's kickoff decisions applied
+(trainer host = GitHub Actions; first runs manual via workflow_dispatch,
+nightly cron ships commented until 2-3 clean runs; adapter retention =
+full history):
+
+* `app/adapters.py` - head extract/save/load(weights_only)/overlay,
+  pointer + append-only history + one-step rollback, promotion gate math,
+  Storage publish/refresh. `tools/train_head.py` (freeze=<head idx>,
+  mosaic/mixup off, epochs<=10), `tools/promote_adapter.py` (baseline vs
+  candidate val, gate per plan, --publish, --rollback),
+  `tools/fetch_training_data.py` (rebuilds the exporter layout + restores
+  cumulative trainer state so CI runners append instead of forking).
+* Transport differs from the original sketch ON PURPOSE: the training
+  data (verdicts + reviewed frames) lives on the OPERATOR's machine, not
+  the VM - so `app/training_sync.py` uploads it to `training/` at tag
+  time (dashboard submit hook, background thread, ledger-diffed), and the
+  VM only ever DOWNLOADS the promoted head: collector polls the pointer
+  every 30 rounds and hot-swaps Detect tensors in place, no restart.
+  `.github/workflows/train.yml` runs the whole loop on free public-repo
+  runners. One-time operator setup: FIREBASE_SA repo secret.
+* Remaining for WS3 DoD: the first 2 real runs (one promoted, one
+  rejected) + a rollback drill - operator-triggered from the Actions tab.
+
 ## Status update (2026-07-11, after the operator-redefinition batch)
 
 Parts of WS1/WS2 landed EARLY, out of the planned order, driven by the

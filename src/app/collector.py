@@ -1651,6 +1651,11 @@ def main() -> None:
     # Position-persistence pass runs less often (expensive walk over
     # review_frames/*.json). Every ~1h at 40 s/round.
     _STATIC_LEARN_EVERY_ROUNDS = 90
+    # Promoted-adapter poll: one tiny pointer read from Storage every ~20
+    # min; a download (~5 MB) happens only when the trainer actually
+    # promoted a new head. The swap is load_state_dict on the LIVE Detect
+    # module - no model reload, no restart, no RAM spike on the 1 GB host.
+    _ADAPTER_CHECK_EVERY_ROUNDS = 30
     _round_counter = 0
     try:
         while True:
@@ -1662,6 +1667,17 @@ def main() -> None:
                     reload_review_overrides()
                 except Exception as e:
                     print(f"  ! review overrides reload failed: {e}")
+            if _round_counter % _ADAPTER_CHECK_EVERY_ROUNDS == 0:
+                try:
+                    from app import adapters
+                    fetched = adapters.refresh_from_storage(
+                        getattr(firebase, "storage", None) if firebase else None)
+                    if fetched:
+                        n = adapters.apply_current(model)
+                        print(f"  * adapter: hot-loaded {fetched} "
+                              f"({n} head tensors, no restart)")
+                except Exception as e:
+                    print(f"  ! adapter refresh failed: {e}")
             if _round_counter % _STATIC_LEARN_EVERY_ROUNDS == 0:
                 # Positions where the model consistently fires on the same
                 # background feature (buildings, lampposts, road furniture)

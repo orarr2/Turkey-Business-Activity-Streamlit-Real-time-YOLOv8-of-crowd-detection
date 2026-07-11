@@ -53,10 +53,20 @@ def load_model(weights: str = "yolov8s.pt"):
     car at the frame edge as `bicycle`. Small is the smallest tier where those
     three failure modes back off to acceptable levels. CPU cost is ~3x nano
     per burst - still a fraction of the collector's sampling interval.
+
+    If the active-learning loop has promoted a trained Detect head
+    (data/adapters/current.json), it is overlaid here; no adapter file
+    means the base weights run untouched, bit-identical (plan D6).
     """
     from ultralytics import YOLO
 
-    return YOLO(weights)
+    model = YOLO(weights)
+    try:
+        from app import adapters
+        adapters.apply_current(model)
+    except Exception as e:
+        print(f"load_model: adapter overlay skipped ({type(e).__name__}: {e})")
+    return model
 
 
 def resolve_youtube(url: str) -> str:
