@@ -1,0 +1,15 @@
+[Unit]
+Description=Turkey Business Activity - situation report email
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=__INSTALL_DIR__/src
+Environment=PYTHONUNBUFFERED=1
+Environment=FIREBASE_CREDENTIALS=__SA_PATH__
+Environment=FIREBASE_STORAGE_BUCKET=__STORAGE_BUCKET__
+# GMAIL_USER / GMAIL_APP_PASSWORD / DIGEST_TO live in a root-only env file,
+# NOT in this unit - the unit is world-readable in /etc/systemd/system.
+EnvironmentFile=/etc/turkey-footfall/digest.env
+ExecStart=__INSTALL_DIR__/src/.venv/bin/python -m tools.daily_digest

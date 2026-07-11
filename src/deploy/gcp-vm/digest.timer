@@ -1,0 +1,14 @@
+[Unit]
+Description=Situation report at 12:00 and 20:00 Israel time
+
+[Timer]
+# Israel local time by name - DST handled by the tzdata on the VM, no
+# season-dependent UTC offsets to maintain.
+OnCalendar=*-*-* 12:00:00 Asia/Jerusalem
+OnCalendar=*-*-* 20:00:00 Asia/Jerusalem
+# A report slot missed because the VM was rebooting fires on boot instead
+# of silently skipping the day.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
