@@ -65,8 +65,17 @@ def test_pull_never_evicts_reviewed_frames(tmp_path, monkeypatch):
             files[rel] = {"mtime": mtime, "url": f"https://s.example/{rel}"}
             bodies[rel] = f"{ts}".encode()
 
+    def fake_get(url, timeout=30):
+        path = url.split("?")[0]
+        if path.endswith("/" + pool_sync.MANIFEST_NAME):
+            return json.dumps({"files": files}).encode()
+        for rel, body in bodies.items():
+            if path.endswith(rel):
+                return body
+        raise OSError(f"404 {url}")
+
     add_frame(1000, 1.0)
-    monkeypatch.setattr(pool_sync, "_http_get", _fake_http({"files": files}, bodies))
+    monkeypatch.setattr(pool_sync, "_http_get", fake_get)
     assert pool_sync.pull_once(snap, bucket="b")["downloaded"] == 2
 
     # the operator reviews the (currently newest) frame
@@ -80,14 +89,11 @@ def test_pull_never_evicts_reviewed_frames(tmp_path, monkeypatch):
     # two newer frames arrive; window=1 would normally evict 1000
     add_frame(2000, 2.0)
     add_frame(3000, 3.0)
-    monkeypatch.setattr(pool_sync, "_http_get", _fake_http({"files": files}, bodies))
-    stats = pool_sync.pull_once(snap, bucket="b")
+    pool_sync.pull_once(snap, bucket="b")
     assert (snap / "review_frames/camA/3000.jpg").is_file()      # newest mirrored
     assert not (snap / "review_frames/camA/2000.jpg").exists()   # outside window
     assert (snap / "review_frames/camA/1000.jpg").is_file()      # REVIEWED: kept
     assert (snap / "review_frames/camA/1000.json").is_file()
-    assert stats["removed"] == 0 or not any(
-        "1000" in r for r in [])  # eviction never touched the reviewed pair
 
 
 def test_pull_mirrors_only_newest_slice(tmp_path, monkeypatch):
