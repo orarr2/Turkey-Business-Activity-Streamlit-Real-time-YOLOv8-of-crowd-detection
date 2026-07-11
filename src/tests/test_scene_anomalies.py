@@ -64,13 +64,29 @@ def test_vehicle_load_extreme():
 
 
 def test_obstruction_giant_box():
-    big = [{"x1": 0, "y1": 0, "x2": 1000, "y2": 500, "cls": "bus"}]  # 54% of frame
+    big = [{"x1": 0, "y1": 0, "x2": 1000, "y2": 500, "cls": "bus",
+            "conf": 0.8}]                                    # 54% of frame
     v = check_scene_anomalies("camC", {"person": 0}, big, (720, 1280), 120.0,
                               now=7.0)
     assert v and v[0]["kind"] == "camera_obstructed"
-    small = [{"x1": 0, "y1": 0, "x2": 100, "y2": 100, "cls": "car"}]
+    small = [{"x1": 0, "y1": 0, "x2": 100, "y2": 100, "cls": "car",
+              "conf": 0.9}]
     assert check_scene_anomalies("camD", {"person": 0}, small, (720, 1280),
                                  120.0, now=9.0) == []
+
+
+def test_obstruction_needs_confidence():
+    """The 0.25-gate `train` class hallucinated half-frame boxes five times
+    in one morning - a giant box only counts as blockage when the model is
+    actually sure of it."""
+    flaky = [{"x1": 0, "y1": 0, "x2": 1000, "y2": 600, "cls": "train",
+              "conf": 0.27}]
+    assert check_scene_anomalies("camF", {}, flaky, (720, 1280), 120.0,
+                                 now=11.0) == []
+    sure = [{"x1": 0, "y1": 0, "x2": 1000, "y2": 600, "cls": "train",
+             "conf": 0.55}]
+    v = check_scene_anomalies("camF", {}, sure, (720, 1280), 120.0, now=12.0)
+    assert v and v[0]["kind"] == "camera_obstructed"
 
 
 def test_camera_dark_transition_only():
@@ -130,6 +146,7 @@ def test_header_line_plain_language():
          "accuracy": 1.0, "recall": 0.125}
     line = header_line(m, {"adjusted_cls": 6, "updated_at": ""})
     assert "right on 3 of 3 boxes you checked" in line
+    assert "100% so far - small sample" in line     # number ALWAYS shown
     assert "21 objects it missed" in line
     assert "learning is ON" in line and "6 detection thresholds" in line
     assert "precision pending" not in line and "recall" not in line

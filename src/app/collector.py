@@ -159,6 +159,11 @@ EXTREME_VEH_LOAD = 38.0       # weighted vehicles, same 9-10/10 band
 _VEH_LOAD_W = {"car": 1.0, "truck": 2.5, "bus": 2.5,
                "motorcycle": 0.5, "bicycle": 0.3, "train": 3.0}
 OBSTRUCTION_AREA_FRAC = 0.5   # one box covering half the frame
+# A giant box must also be CONFIDENT to count as obstruction: observed live,
+# the barely-above-gate `train` class (gate 0.25) hallucinated half-frame
+# boxes at the bus terminal five times in one morning and drowned the
+# anomaly table. Real lens blockage produces a high-confidence object.
+OBSTRUCTION_MIN_CONF = 0.45
 DARK_FROM_LUMA = 90.0         # was clearly daylight...
 DARK_TO_LUMA = 25.0           # ...and is now near-black
 SCENE_ANOMALY_COOLDOWN_S = 1800.0
@@ -209,7 +214,8 @@ def check_scene_anomalies(cam_id: str, counts: dict, boxes: list[dict],
         area = float(H * W) or 1.0
         for b in boxes:
             frac = max(0.0, (b["x2"] - b["x1"])) * max(0.0, (b["y2"] - b["y1"])) / area
-            if frac >= OBSTRUCTION_AREA_FRAC:
+            if (frac >= OBSTRUCTION_AREA_FRAC
+                    and float(b.get("conf") or 0.0) >= OBSTRUCTION_MIN_CONF):
                 _fire("camera_obstructed", b.get("cls", "?"),
                       f"{frac:.0%} of view", f"<{OBSTRUCTION_AREA_FRAC:.0%}")
                 break

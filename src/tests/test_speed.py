@@ -53,6 +53,19 @@ def test_bus_uses_its_own_length():
     assert abs(out[0]["kmh"] - 24.3 * (12.0 / 4.5)) < 1.5
 
 
+def test_iou_fallback_catches_budget_broken_match():
+    """A vehicle whose centroid jump exceeds the track budget (small frame)
+    but whose boxes still overlap gets its speed via the IoU fallback -
+    coverage toward 'every matched vehicle carries a speed'."""
+    shape = (200, 200, 3)   # diag ~283 -> centroid budget ~85px
+    a = {"x1": 0.0, "y1": 0.0, "x2": 300.0, "y2": 80.0, "cls": "car", "conf": 0.8}
+    b = {"x1": 100.0, "y1": 0.0, "x2": 400.0, "y2": 80.0, "cls": "car", "conf": 0.8}
+    out = estimate_speeds([[a], [b]], shape, stride=25, fps=25.0)
+    assert len(out) == 1
+    # 100px over a 300px~=4.5m ruler in 1s -> 1.5 m/s = 5.4 km/h
+    assert abs(out[0]["kmh"] - 5.4) < 0.3
+
+
 def test_summary_medians_over_moving_only():
     speeds = [{"cls": "car", "kmh": 30.0, "points": 3, "box": {}},
               {"cls": "car", "kmh": 0.0, "points": 3, "box": {}},   # parked

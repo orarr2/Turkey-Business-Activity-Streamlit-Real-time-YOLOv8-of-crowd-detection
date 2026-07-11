@@ -32,6 +32,23 @@
     #status .down { color: #ef4444; }
     main { padding: 20px; max-width: 1400px; margin: 0 auto; }
 
+    /* Workspace tabs. Hiding is CSS-only so every section keeps living
+       (Firestore subscriptions, charts, HLS players) while off-screen. */
+    .tabbar { display: flex; gap: 6px; max-width: 1400px;
+              margin: 0 auto; padding: 12px 20px 0; }
+    .tabbar button { padding: 9px 22px; font-size: 13px; cursor: pointer;
+              background: #14171e; color: #8b909a;
+              border: 1px solid #232733; border-bottom: none;
+              border-radius: 10px 10px 0 0; }
+    .tabbar button.on { background: #1d2129; color: #e7e9ee;
+              border-color: #2e3442; font-weight: 600; }
+    .tabbar button:hover { color: #e7e9ee; }
+    main[data-active-tab="analysis"] > [data-tab]:not([data-tab="analysis"]),
+    main[data-active-tab="search"]   > [data-tab]:not([data-tab="search"]),
+    main[data-active-tab="rl"]       > [data-tab]:not([data-tab="rl"]) {
+      display: none !important;
+    }
+
     .grid { display: grid; gap: 8px;
             grid-template-columns: repeat(2, minmax(0, 1fr)); }
     @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
@@ -464,7 +481,16 @@
     <div id="status" class="sub">connecting…</div>
   </header>
 
-  <main>
+  <!-- Tab bar: the dashboard grew past one scroll, so it splits into three
+       workspaces. Sections stay in the DOM (charts / video / Firestore
+       subscriptions keep running); tabs only control visibility. -->
+  <nav class="tabbar" id="tabbar">
+    <button data-tab-btn="analysis" class="on">Analysis</button>
+    <button data-tab-btn="search">Search</button>
+    <button data-tab-btn="rl">Reinforcement learning</button>
+  </nav>
+
+  <main data-active-tab="analysis">
     <div id="config-warning" class="config-warning" style="display:none">
       <strong>Firebase not configured.</strong>
       Create <code>web/firebase-config.js</code> exporting a
@@ -474,11 +500,11 @@
     </div>
 
     <!-- 2x2 grid of camera tiles (LIVE VIDEO + counts only). Cells filled by app.js. -->
-    <div class="grid" id="tiles"></div>
+    <div class="grid" id="tiles" data-tab="analysis"></div>
 
     <!-- Search: image-similarity OR class/time browse, in one persistent
          panel. Backed by POST /api/search (dashboard_server.py). -->
-    <div class="search-wrap">
+    <div class="search-wrap" data-tab="search">
       <h2>Search - what has the system seen?</h2>
       <div class="sub">Search by image, by object class, by time - or any
         combination. Leave the photo out to browse recent detections.</div>
@@ -501,8 +527,14 @@
             <button class="strict-btn on" data-strict="0.55">Balanced</button>
             <button class="strict-btn" data-strict="0.80">Strict</button>
           </div>
-          <div class="strict-hint">match strictness - only used when a photo
-            is provided</div>
+          <div class="strict-hint" style="line-height:1.5">
+            match strictness - only used when a photo is provided:<br>
+            <b>Loose</b> - casts the widest net: more results, expect
+            lookalike noise mixed in.<br>
+            <b>Balanced</b> - solid visual matches only; the sensible
+            default.<br>
+            <b>Strict</b> - near-identical appearance only: fewest results,
+            highest confidence it is the same object.</div>
         </fieldset>
         <fieldset>
           <legend>Filters</legend>
@@ -546,7 +578,7 @@
          Skeletons built up-front so all four cells are visible immediately
          (a slot whose Firestore doc arrives late used to leave its cell
          "waiting" forever, reading as "the first camera doesn't work"). -->
-    <div class="model-section">
+    <div class="model-section" data-tab="search">
       <h2>Model view - live (what the counts came from)</h2>
       <div class="model-strip" id="model-strip"></div>
     </div>
@@ -556,13 +588,37 @@
          is revealed by app.js the moment its data source produces content -
          empty "waiting for X…" placeholders were taking up the whole viewport
          while the collector was silent. -->
-    <div class="big-chart-wrap" id="chart-section" hidden>
+    <div class="big-chart-wrap" id="chart-section" data-tab="analysis" hidden>
       <h2>Footfall - last 24h, all cameras (5-minute averages, anomalies in red)</h2>
       <canvas id="chart-all"></canvas>
     </div>
 
     <!-- Anomaly events: the collector's verdicts, where + when + why -->
-    <div class="anomaly-wrap" id="anomaly-section" hidden>
+    <!-- Plain-text explainer the operator asked for: EXACTLY which logics
+         raise a suspicion, before the table that lists their firings. -->
+    <div class="anomaly-wrap" id="logic-section" data-tab="analysis">
+      <h2>How the system decides something is suspicious</h2>
+      <div class="sub" style="line-height:1.7">
+        <b>1. Extreme crowding</b> - 50+ people in one view, or a weighted
+        vehicle jam (bus/truck count ×2.5; threshold 38) - the top band of
+        the 0-10 activity scale.<br>
+        <b>2. Camera blocked</b> - a single confident object (≥45%
+        certainty) covering at least half the view: something parked
+        against, or held up to, the lens.<br>
+        <b>3. View gone dark</b> - the image collapses from clearly lit to
+        near-black between two samples: covered lens, power cut, tampering.<br>
+        <b>4. Returning visitor</b> (events feed) - the same person/vehicle
+        appearance seen again after ≥5 minutes away, at ≥96% visual
+        similarity; buses and trains are not counted.<br>
+        <b>5. Prolonged presence</b> (events feed) - a person staying ≥5
+        minutes or a vehicle ≥15 minutes in place in front of the camera.<br>
+        Each alert type has a 30-minute per-camera cooldown so one stuck
+        condition cannot flood the log. Routine ups and downs of traffic
+        against the hourly norm are deliberately NOT alerts.
+      </div>
+    </div>
+
+    <div class="anomaly-wrap" id="anomaly-section" data-tab="analysis" hidden>
       <h2>Anomalies - last 24h (extreme crowding, blocked camera, view gone dark)</h2>
       <div id="anomaly-table-wrap"></div>
     </div>
@@ -571,13 +627,13 @@
          regulars). Sits between the count-driven sections (Footfall +
          Anomaly events) and the entity-driven ones (Operational events +
          Review). -->
-    <div class="reid-wrap" id="reid-section" hidden>
+    <div class="reid-wrap" id="reid-section" data-tab="analysis" hidden>
       <h2>Re-identification - returning entities per camera <span class="est-tag">appearance-based estimate</span></h2>
       <div id="reid-table-wrap"></div>
     </div>
 
     <!-- Operational events: loitering / parked-too-long / returning visitors -->
-    <div class="anomaly-wrap" id="events-section" hidden>
+    <div class="anomaly-wrap" id="events-section" data-tab="analysis" hidden>
       <h2>Operational events - last 24h (prolonged presence, returning visitors)</h2>
       <div id="events-table-wrap"></div>
     </div>
@@ -586,7 +642,7 @@
          show the baseline confidence, the direction it moved, and the current
          value the collector is using right now. Section hides itself when the
          review store is empty so a fresh install has zero visual noise. -->
-    <div class="anomaly-wrap" id="boost-section" hidden>
+    <div class="anomaly-wrap" id="boost-section" data-tab="rl" hidden>
       <h2>Learning proof - how your reviews changed the model
         <span class="est-tag">per-camera, per-class confidence</span></h2>
       <div id="boost-table-wrap"></div>
@@ -612,7 +668,7 @@
          draw NEW boxes for objects the model missed (the FN signal that
          finally lets us compute recall). See app/review_frames.py +
          app/labels.py::sample_frame. -->
-    <div class="review-wrap" id="review-section">
+    <div class="review-wrap" id="review-section" data-tab="rl">
       <h2>Review detections - teach the system what it got wrong</h2>
       <div class="sub">Full frame with all detections overlaid. Click a
         box to cycle its verdict (grey → green correct → red wrong → grey),
@@ -706,9 +762,9 @@
   <!-- firebase-config.js is gitignored per-clone; see docs/firebase_setup.md -->
   <!-- ?v=N is a cache-buster: bump it whenever any of the JS files changes,
        so the browser doesn't serve a stale ES-module from disk cache. -->
-  <script type="module" src="./firebase-config.js?v=39"></script>
-  <script type="module" src="./cameras.js?v=39"></script>
-  <script type="module" src="./app.js?v=39"></script>
+  <script type="module" src="./firebase-config.js?v=40"></script>
+  <script type="module" src="./cameras.js?v=40"></script>
+  <script type="module" src="./app.js?v=40"></script>
 
   <!-- Search UI. INLINE and NON-MODULE on purpose: it wires POST /api/search
        on this same server, has no Firebase dependency, and must keep working
@@ -1607,10 +1663,15 @@
         </tr></thead>
         <tbody>${body}</tbody></table>
         <div class="footnote" style="margin-top:8px">
-          Every "correct" verdict drops the class's confidence bar by
-          ${fmt(data.step || 0.015)}, letting similar-looking objects pass
-          next round. Every "wrong" raises it, so lookalikes stop firing.
-          Values clamped to [${fmt(data.min_conf || 0.20)},
+          <b>Direction, in plain words:</b>
+          <b>▼ looser</b> = the confidence bar DROPPED because you confirmed
+          real objects the model was hesitating on - it now catches more
+          like them (fixes misses).
+          <b>▲ stricter</b> = the bar ROSE because you rejected false
+          detections - lookalikes stop firing (fixes noise).<br>
+          Every "correct" verdict moves the bar down by
+          ${fmt(data.step || 0.015)}; every "wrong" moves it up. Values
+          clamped to [${fmt(data.min_conf || 0.20)},
           ${fmt(data.max_conf || 0.60)}]. Applied to the live collector
           within ~7 minutes of each submit.
         </div>`;
@@ -1623,6 +1684,28 @@
   <!-- Header scoreboard - Model quality metrics computed from the review
        store. Refreshes every 10 s so a review sitting shows the numbers
        shift in near-real-time. -->
+  <script>
+  (function initTabs() {
+    const main = document.querySelector("main");
+    const btns = [...document.querySelectorAll("[data-tab-btn]")];
+    if (!main || !btns.length) return;
+    function activate(tab) {
+      main.dataset.activeTab = tab;
+      for (const b of btns) b.classList.toggle("on", b.dataset.tabBtn === tab);
+      try { localStorage.setItem("dash-tab", tab); } catch (_) {}
+      // Charts sized while hidden come back at 0x0; a resize kick after the
+      // sections become visible lets Chart.js re-measure them.
+      requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
+    }
+    for (const b of btns) {
+      b.addEventListener("click", () => activate(b.dataset.tabBtn));
+    }
+    let saved = null;
+    try { saved = localStorage.getItem("dash-tab"); } catch (_) {}
+    if (saved && btns.some((b) => b.dataset.tabBtn === saved)) activate(saved);
+  })();
+  </script>
+
   <script>
   (function initModelMetrics() {
     const el = document.getElementById("model-metrics-line");

@@ -249,10 +249,16 @@ def header_line(metrics: dict, boost_summary: dict | None = None) -> str:
     parts = []
     right = f"right on {tp} of {n_prec} boxes you checked"
     acc = metrics.get("accuracy")
-    if acc is not None and n_prec >= MIN_REVIEWS_FOR_METRIC:
-        right += f" ({int(round(acc * 100))}% accurate)"
-    elif n_prec:
-        right += f" (a % appears after {MIN_REVIEWS_FOR_METRIC} checks)"
+    if acc is not None and n_prec:
+        pct = int(round(acc * 100))
+        if n_prec >= MIN_REVIEWS_FOR_METRIC:
+            right += f" ({pct}% accuracy)"
+        else:
+            # Always show the NUMBER (the operator asked for one), with the
+            # sample-size truth attached: 3-of-3 is "100% so far", not "the
+            # model is perfect" - the figure firms up at 20 checks.
+            right += (f" ({pct}% so far - small sample, firm after "
+                      f"{MIN_REVIEWS_FOR_METRIC} checks)")
     parts.append(right)
     if fn:
         parts.append(f"{fn} objects it missed are marked and queued for training")

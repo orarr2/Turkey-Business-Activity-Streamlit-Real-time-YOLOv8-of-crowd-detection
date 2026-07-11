@@ -530,34 +530,64 @@ def estimate_speeds(frames_boxes: list[list[dict]], frame_shape,
         return []
     tracks = track_burst(vehicle_frames, frame_shape,
                          max_move_frac=SPEED_TRACK_MOVE_FRAC)
+
+    def _speed_entry(track: list[dict]) -> dict | None:
+        cls = track[0].get("cls")
+        real_len = VEHICLE_LENGTH_M.get(cls)
+        if not real_len:
+            return None
+        # meters-per-pixel from the track's own boxes (mean of extents, so
+        # a size flicker between frames doesn't swing the scale).
+        exts = [max(_box_wh(b)) for b in track if max(_box_wh(b)) > 0]
+        if not exts:
+            return None
+        m_per_px = real_len / (sum(exts) / len(exts))
+        (x0, y0), (x1, y1) = _centroid(track[0]), _centroid(track[-1])
+        disp_px = ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5
+        kmh = disp_px * m_per_px / (dt * (len(track) - 1)) * 3.6
+        if kmh > SPEED_MAX_KMH:
+            return None                   # two different vehicles fused
+        if kmh < SPEED_MIN_KMH:
+            kmh = 0.0                     # parked / detection jitter
+        return {"cls": cls, "kmh": round(kmh, 1), "points": len(track),
+                "box": track[-1]}
+
     out: list[dict] = []
     for t in tracks:
         if len(t) < 2:
             continue
-        cls = t[0].get("cls")
-        real_len = VEHICLE_LENGTH_M.get(cls)
-        if not real_len:
+        entry = _speed_entry(t)
+        if entry:
+            out.append(entry)
+
+    # Fallback pass toward "every vehicle gets a speed": the greedy centroid
+    # matcher skips some pairs; slow/stationary vehicles overlap themselves
+    # heavily between burst frames, so an IoU match recovers exactly the
+    # population it missed. Physics still needs TWO sightings - a vehicle
+    # visible in only one burst frame cannot carry a speed.
+    matched_last = {id(e["box"]) for e in out}
+    used_first: set[int] = set()
+    for t in tracks:
+        if len(t) >= 2:
+            used_first.add(id(t[0]))
+    for lb in vehicle_frames[-1]:
+        if id(lb) in matched_last:
             continue
-        # meters-per-pixel from the track's own boxes (mean of extents, so a
-        # size flicker between frames doesn't swing the scale).
-        exts = []
-        for b in t:
-            w, h = _box_wh(b)
-            ext = max(w, h)
-            if ext > 0:
-                exts.append(ext)
-        if not exts:
+        best, best_iou = None, 0.25
+        for fb in vehicle_frames[0]:
+            if fb is lb or id(fb) in used_first:
+                continue
+            if fb.get("cls") != lb.get("cls"):
+                continue
+            iou = box_iou(fb, lb)
+            if iou > best_iou:
+                best, best_iou = fb, iou
+        if best is None:
             continue
-        m_per_px = real_len / (sum(exts) / len(exts))
-        (x0, y0), (x1, y1) = _centroid(t[0]), _centroid(t[-1])
-        disp_px = ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5
-        kmh = disp_px * m_per_px / (dt * (len(t) - 1)) * 3.6
-        if kmh > SPEED_MAX_KMH:
-            continue                      # two different vehicles fused
-        if kmh < SPEED_MIN_KMH:
-            kmh = 0.0                     # parked / detection jitter
-        out.append({"cls": cls, "kmh": round(kmh, 1), "points": len(t),
-                    "box": t[-1]})
+        used_first.add(id(best))
+        entry = _speed_entry([best] + [lb] * (len(vehicle_frames) - 1))
+        if entry:
+            out.append(entry)
     return out
 
 
@@ -866,9 +896,10 @@ def draw_boxes(frame: np.ndarray, boxes: list[dict]) -> np.ndarray:
         color = _BOX_COLORS.get(b.get("cls", ""), (255, 255, 255))
         cv2.rectangle(out, (x1, y1), (x2, y2), color, 2)
         label = f'{b.get("cls", "?")} {b.get("conf", 0):.2f}'
-        if b.get("kmh"):
-            # burst-based estimate (see estimate_speeds) - "~" marks it as such
-            label += f' ~{b["kmh"]:.0f}km/h'
+        if "kmh" in b:
+            # burst-based estimate (see estimate_speeds) - "~" marks it as
+            # such; 0 means matched-but-not-moving, i.e. parked.
+            label += f' ~{b["kmh"]:.0f}km/h' if b["kmh"] > 0 else " parked"
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
         ty = y1 - 4 if y1 - th - 6 >= 0 else y2 + th + 4
         cv2.rectangle(out, (x1, ty - th - 3), (x1 + tw + 4, ty + 3), color, -1)
@@ -995,9 +1026,11 @@ def detect_burst(model, frames: list[np.ndarray], conf: float = 0.35,
         summary = summarize_speeds(speeds)
         if summary:
             debug["speeds"] = summary
+            # Every matched vehicle carries its speed - including 0.0, which
+            # the annotator renders as "parked". Unmatched single-sighting
+            # vehicles stay unlabeled (no physics without a second look).
             for s in speeds:
-                if s["kmh"] > 0:
-                    s["box"]["kmh"] = s["kmh"]
+                s["box"]["kmh"] = s["kmh"]
     return counts, best[1], best[2], debug
 
 

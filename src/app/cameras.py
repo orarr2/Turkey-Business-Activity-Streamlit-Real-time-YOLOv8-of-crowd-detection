@@ -188,6 +188,14 @@ CAMERAS = {
         "page": "https://webcamera24.com/camera/turkey/8046-millet-caddesi/",
         "embed": "https://player.tvkur.com/l/c77i9cfbb2nj4i0fr82g",
         "type": "hospital junction / vehicular",
+        # The blue keep-right sign on the traffic island reads as `person`
+        # (~0.38) again and again - operator flagged it twice from live
+        # screenshots. Static street furniture, so a static exclude: any
+        # `person` whose foot-point lands on the island sign is dropped.
+        "roi_exclude_class": {
+            "person": [[[0.385, 0.17], [0.445, 0.17],
+                        [0.445, 0.30], [0.385, 0.30]]],
+        },
     },
     # --- Konya Ince Minareli Medrese (webcamera24 8033). The city's TRAM line
     # runs on dedicated tracks along the left of the frame (Alaaddin loop),

@@ -878,15 +878,35 @@ function renderAnomalyEvents() {
   toggleSection("anomaly-section", events.length > 0);
   if (!events.length) return;
   events.sort((a, b) => b.r.ts.localeCompare(a.r.ts));
-  const rows = events.slice(0, 60).map(({ area, r }) => {
+  // AGGREGATE repeats: the same (kind, camera) firing again and again is one
+  // STORY, not sixty rows - a stuck false trigger was drowning out every
+  // other anomaly type. One row per (kind, area, metric), carrying the
+  // latest occurrence, a repeat counter and the first-seen time.
+  const groups = new Map();
+  for (const { area, r } of events) {
+    const a = r.anomaly || {};
+    const key = `${a.kind}|${area}|${a.metric || ""}`;
+    const g = groups.get(key);
+    if (!g) {
+      groups.set(key, { area, latest: r, count: 1, firstTs: r.ts });
+    } else {
+      g.count += 1;
+      if (r.ts < g.firstTs) g.firstTs = r.ts;   // events sorted desc; track span
+    }
+  }
+  const rows = [...groups.values()].slice(0, 30).map((g) => {
+    const r = g.latest;
     const d = describeAnomaly(r);
     const snap = r.snapshot_annotated_url || r.snapshot_url;
     const expected = d.expected != null
         ? `~${d.expected}${d.bucket ? ` <span class="footnote">(${escapeHtml(d.bucket)} norm)</span>` : ""}`
         : "-";
+    const times = g.count > 1
+        ? `${fmtTime(r.ts)} <span class="footnote">(×${g.count} since ${fmtTime(g.firstTs)})</span>`
+        : fmtTime(r.ts);
     return `<tr>
-      <td>${fmtTime(r.ts)}</td>
-      <td>${escapeHtml(area)}</td>
+      <td>${times}</td>
+      <td>${escapeHtml(g.area)}</td>
       <td class="${d.dir}">${d.arrow} ${escapeHtml(d.kindLabel)}</td>
       <td>${escapeHtml(d.metricLabel)}</td>
       <td>${d.observed ?? "-"}</td>
@@ -896,7 +916,7 @@ function renderAnomalyEvents() {
   }).join("");
   wrap.innerHTML = `<table class="reid">
     <thead><tr>
-      <th>Time</th><th>Area</th><th>Type</th><th>Metric</th>
+      <th>Latest</th><th>Area</th><th>Type</th><th>Metric</th>
       <th>Observed</th><th>Expected</th><th>Snapshot</th>
     </tr></thead>
     <tbody>${rows}</tbody></table>`;
