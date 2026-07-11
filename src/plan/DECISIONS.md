@@ -100,7 +100,9 @@ comparison; a two-camera A/B is optional stretch, not a gate).
 1. Trainer host: Colab free notebook vs operator PC (CPU torch is
    installed and works; head-only fine-tune of ~500 images is ~20-60 min
    on CPU, minutes on any GPU).
-2. `REVIEW_SAMPLER` default: flip to `badge` immediately after the first
-   promoted adapter, or after the AL-curve shows separation.
+2. (revised 2026-07-11) The frame queue is uncertainty-first by default
+   and no naive mode exists; the remaining decision is whether to layer
+   BADGE DIVERSITY (k-means++ spread) on top of pure uncertainty, and
+   when. D8's efficiency comparison runs as an offline replay.
 3. Adapter retention: keep last 7 + every ever-promoted (spec default) or
    keep all.

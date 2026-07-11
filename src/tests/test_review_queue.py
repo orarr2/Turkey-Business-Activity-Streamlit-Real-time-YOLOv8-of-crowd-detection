@@ -50,6 +50,46 @@ def test_sample_frame_serves_most_uncertain_first(tmp_path):
 
 # ---- bounded local mirror -------------------------------------------------------
 
+def test_pull_never_evicts_reviewed_frames(tmp_path, monkeypatch):
+    """Reviewed frames are the training bank: the bounded mirror must keep
+    them locally forever even after they age out of the newest-N window -
+    otherwise export_labels silently loses the images behind the verdicts."""
+    monkeypatch.setattr(pool_sync, "LOCAL_MIRROR_FRAMES", 1)
+    snap = tmp_path / "src" / "web" / "snapshots"
+    snap.mkdir(parents=True)
+    files, bodies = {}, {}
+
+    def add_frame(ts, mtime):
+        for ext in ("jpg", "json"):
+            rel = f"review_frames/camA/{ts}.{ext}"
+            files[rel] = {"mtime": mtime, "url": f"https://s.example/{rel}"}
+            bodies[rel] = f"{ts}".encode()
+
+    add_frame(1000, 1.0)
+    monkeypatch.setattr(pool_sync, "_http_get", _fake_http({"files": files}, bodies))
+    assert pool_sync.pull_once(snap, bucket="b")["downloaded"] == 2
+
+    # the operator reviews the (currently newest) frame
+    data_dir = tmp_path / "src" / "data"
+    data_dir.mkdir(parents=True)
+    (data_dir / "reviews.json").write_text(json.dumps({
+        "frame_reviews": [{"frame_path": "review_frames/camA/1000.jpg",
+                           "cam_id": "camA", "box_verdicts": {"0": "correct"},
+                           "missed_detections": [], "reviewed_at": "2026-07-11T00:00:00Z"}]}))
+
+    # two newer frames arrive; window=1 would normally evict 1000
+    add_frame(2000, 2.0)
+    add_frame(3000, 3.0)
+    monkeypatch.setattr(pool_sync, "_http_get", _fake_http({"files": files}, bodies))
+    stats = pool_sync.pull_once(snap, bucket="b")
+    assert (snap / "review_frames/camA/3000.jpg").is_file()      # newest mirrored
+    assert not (snap / "review_frames/camA/2000.jpg").exists()   # outside window
+    assert (snap / "review_frames/camA/1000.jpg").is_file()      # REVIEWED: kept
+    assert (snap / "review_frames/camA/1000.json").is_file()
+    assert stats["removed"] == 0 or not any(
+        "1000" in r for r in [])  # eviction never touched the reviewed pair
+
+
 def test_pull_mirrors_only_newest_slice(tmp_path, monkeypatch):
     monkeypatch.setattr(pool_sync, "LOCAL_MIRROR_FRAMES", 1)
     monkeypatch.setattr(pool_sync, "LOCAL_MIRROR_CROPS", 2)

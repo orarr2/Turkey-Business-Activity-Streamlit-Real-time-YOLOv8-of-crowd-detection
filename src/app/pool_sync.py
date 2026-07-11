@@ -308,6 +308,28 @@ def _http_get(url: str, timeout: int = 30) -> bytes:
         return r.read()
 
 
+def _reviewed_frame_rels(snapshots_root: Path) -> set[str]:
+    """Frame rels (jpg + json sibling) the operator has REVIEWED. These are
+    the training set - the bounded local mirror must never age them out, or
+    tools/export_labels.py silently loses the images behind the verdicts.
+    They accumulate with the operator's own effort, which is exactly the
+    'tagged items enter the bank and keep growing' behavior asked for."""
+    reviews = snapshots_root.parent.parent / "data" / "reviews.json"
+    out: set[str] = set()
+    try:
+        data = json.loads(reviews.read_text())
+    except (OSError, ValueError):
+        return out
+    for fr in data.get("frame_reviews") or []:
+        rel = fr.get("frame_path")
+        if not rel or not isinstance(rel, str):
+            continue
+        out.add(rel)
+        if rel.endswith(".jpg"):
+            out.add(rel[:-4] + ".json")
+    return out
+
+
 def pull_once(snapshots_root: str | Path,
               bucket: str | None = None,
               state_path: str | Path | None = None) -> dict:
@@ -356,6 +378,9 @@ def pull_once(snapshots_root: str | Path,
     keep.update(r for r in files
                 if not r.startswith(("review_frames/", "live_samples/",
                                      "entities/")))
+    # Reviewed frames are the operator's training bank: protected from the
+    # window eviction below, and re-downloaded if still in the cloud bank.
+    keep.update(_reviewed_frame_rels(root))
 
     downloaded = removed = 0
     errors = 0

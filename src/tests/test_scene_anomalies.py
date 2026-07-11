@@ -15,6 +15,24 @@ def _fresh_cooldowns():
     yield
 
 
+def test_is_night_clock_beats_brightness():
+    """Lit city streets measure mean-gray 105-120 at 2 AM - brightness alone
+    never fired. The local clock must declare night regardless of luma."""
+    import datetime as dt
+    from app.collector import is_night
+    # 23:30 Turkey local (20:30 UTC), bright street -> night anyway
+    late = dt.datetime(2026, 7, 10, 20, 30, tzinfo=dt.timezone.utc)
+    assert is_night(115.0, late) is True
+    # 12:00 local, bright -> day
+    noon = dt.datetime(2026, 7, 10, 9, 0, tzinfo=dt.timezone.utc)
+    assert is_night(115.0, noon) is False
+    # 12:00 local but genuinely dark frame (storm / lens fault) -> night gates
+    assert is_night(30.0, noon) is True
+    # 05:00 local (02:00 UTC) still night; 07:00 local is day
+    assert is_night(115.0, dt.datetime(2026, 7, 10, 2, 0, tzinfo=dt.timezone.utc)) is True
+    assert is_night(115.0, dt.datetime(2026, 7, 10, 4, 0, tzinfo=dt.timezone.utc)) is False
+
+
 def test_night_bump_raises_every_gate_clamped():
     g = night_adjusted_conf(DEFAULT_PER_CLASS_CONF)
     for cls, v in DEFAULT_PER_CLASS_CONF.items():

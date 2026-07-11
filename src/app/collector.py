@@ -127,6 +127,22 @@ ANOMALY_BUDGET_PER_DAY = 8
 # Mean-gray threshold under which a frame is tagged `is_night` (the Konya cams
 # switch to sodium lighting; day/night baselines differ a lot).
 NIGHT_MEAN_GRAY = 60.0
+# Local-clock night window (Turkey). Measured on live frames at 01:46 local:
+# the lit city streets hold mean-gray 105-120 - far ABOVE the darkness
+# threshold - so brightness alone never declared night and the night gates
+# sat inert through the exact hours they were built for. Clock wins.
+NIGHT_START_HOUR = 20
+NIGHT_END_HOUR = 6
+
+
+def is_night(luma: float | None, now_utc: dt.datetime) -> bool:
+    """Night = local-clock night OR a genuinely dark frame (tunnel-dark
+    daytime failure counts too). Drives the per-class gate bump and the
+    record's is_night analysis tag."""
+    h = now_utc.astimezone(TURKEY_TZ).hour
+    if h >= NIGHT_START_HOUR or h < NIGHT_END_HOUR:
+        return True
+    return luma is not None and luma < NIGHT_MEAN_GRAY
 
 # ---- Scene anomalies (operator definition, 2026-07) ---------------------------
 # Statistical spike/drop verdicts are NOT anomalies to the operator - "more
@@ -1026,7 +1042,7 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
             raise RuntimeError("empty frame")
         # Day/night decided BEFORE detection so the gates can react to it.
         luma = float(np.mean(cv2.cvtColor(frames[-1], cv2.COLOR_BGR2GRAY)))
-        night = luma < NIGHT_MEAN_GRAY
+        night = is_night(luma, now_utc)
         # Effective per-class gates. This is ALSO the fix for a silent bug:
         # cameras.py merges the review-driven confidence boosts into
         # cam["per_class_conf"], but the value was never handed to

@@ -20,6 +20,33 @@ free write quota.
 | Per-(cam,cls) threshold nudging + auto/manual blacklist | `confidence_boost`, `auto_blacklist` | yes |
 | Anomaly-profile self-rebase | `collector.HourlyProfile` | yes |
 
+## Status update (2026-07-11, after the operator-redefinition batch)
+
+Parts of WS1/WS2 landed EARLY, out of the planned order, driven by the
+operator's queue-pacing demands:
+
+* SHIPPED: margin-based frame uncertainty (`labels.frame_uncertainty`,
+  post-hoc from stored conf vs default gates) + uncertainty-first paced
+  frame queue (5 visible / rest at 30) in the review UI. The naive random
+  frame sampler NO LONGER EXISTS.
+* SHIPPED: per-entity sighting gallery (`app/entity_gallery.py`) and the
+  batch-by-batch mistake-rate curve (`model_metrics.learning_curve`) -
+  the operator-facing improvement signal WS5 planned to source from
+  training runs now has an interim, verdict-based version.
+* REMAINING in WS1: capture-time uncertainty in `collector.sample_slot`
+  using the EFFECTIVE (boosted/night) gates rather than defaults,
+  flip-delta second pass, and per-crop persistence.
+* WS2 rescope: frame side is done sans flag; the crop sampler's 70%
+  anomaly-pool bias premise is obsolete (statistical anomalies removed,
+  scene anomalies are rare by design) - rebuild it as uncertainty+OSNet
+  BADGE over live_samples instead.
+* D8 consequence: the naive-vs-BADGE comparison arm must be a REPLAY
+  (re-rank historical pools offline), not a live A/B - there is no naive
+  mode left to run.
+* Guardrail honored by the sync layer: reviewed frames are pinned on the
+  operator's machine (pool_sync protects them from mirror eviction), so
+  the training exporter never loses images behind verdicts.
+
 ## Workstreams
 
 ### WS1 - Per-box uncertainty (replaces SPEC 4.1)
