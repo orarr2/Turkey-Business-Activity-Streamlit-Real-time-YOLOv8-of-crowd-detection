@@ -1713,7 +1713,7 @@
     // Bold the numbers we care about so they pop out of the muted grey.
     const highlight = (s) => String(s || "").replace(
         /(\d+(?:\.\d+)?)\s*(%|reviews|classes|boxes|objects|thresholds)/g,
-        "<b>$1</b> $2");
+        (_, n, u) => "<b>" + n + "</b>" + (u === "%" ? "" : " ") + u);
     // "Is it getting better?" line chart - mistake rate per tagging batch.
     let curveChart = null;
     function renderCurve(points) {
