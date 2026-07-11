@@ -85,8 +85,9 @@ def test_export_applies_corrections(tmp_path):
     # car kept + relabeled truck + added bicycle = 3; wrong person dropped
     assert len(rows) == 3
     ids = sorted(int(r.split()[0]) for r in rows)
-    # EXPORT_CLASSES: person=0 bicycle=1 car=2 motorcycle=3 bus=4 train=5 truck=6
-    assert ids == [1, 2, 6]
+    # NATIVE COCO ids (keeps the trained head base-shape-compatible):
+    # person=0 bicycle=1 car=2 motorcycle=3 bus=5 train=6 truck=7
+    assert ids == [1, 2, 7]
     assert ex[0]["stats"] == {"kept": 1, "dropped": 1, "relabeled": 1,
                               "weak": 0, "added_fn": 1}
 
@@ -94,7 +95,9 @@ def test_export_applies_corrections(tmp_path):
     totals = export(out, ex, val_frac=0.1)
     assert totals["frames"] == 1 and totals["labels"] == 3
     yaml = (out / "dataset.yaml").read_text()
-    assert "6: truck" in yaml
+    # the yaml must name ALL 80 base-model classes, ours at COCO positions
+    assert "7: truck" in yaml and "5: bus" in yaml and "0: person" in yaml
+    assert "79: toothbrush" in yaml
     txts = list((out / "labels").rglob("*.txt"))
     imgs = list((out / "images").rglob("*.jpg"))
     assert len(txts) == 1 and len(imgs) == 1

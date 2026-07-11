@@ -81,6 +81,18 @@ def main() -> None:
 
     trained = YOLO(str(best))
     head_state = adapters.extract_head(trained.model, head_idx=head_idx)
+    # Pre-flight: the artifact must overlay onto a FRESH base model - if the
+    # dataset yaml ever drifts from the COCO-80 name table the trained head
+    # changes shape, and that must fail HERE with one clear sentence, not
+    # two steps later inside the promotion gate.
+    fresh = YOLO(args.base)
+    try:
+        adapters.overlay_head(fresh.model, head_state)
+    except ValueError as e:
+        raise SystemExit(
+            f"trained head is not shape-compatible with {args.base}: {e}\n"
+            f"(the dataset yaml must keep the full COCO-80 name table - "
+            f"see tools/export_labels.py)")
     out_file = Path(args.out_file) if args.out_file else (
         adapters.ADAPTERS_DIR
         / f"head_{time.strftime('%Y%m%d_%H%M%S', time.gmtime())}.pt")

@@ -43,10 +43,35 @@ from pathlib import Path
 
 _SRC_ROOT = Path(__file__).resolve().parent.parent
 
-# Contiguous ids for training (YOLO wants 0..N-1, not COCO's sparse ids).
-EXPORT_CLASSES = ["person", "bicycle", "car", "motorcycle", "bus", "train",
-                  "truck"]
-_CLS_ID = {c: i for i, c in enumerate(EXPORT_CLASSES)}
+# NATIVE COCO ids, not a compact 0..6 remap. This is what makes the
+# head-adapter loop work: training against nc=80 keeps the Detect head the
+# EXACT shape of stock yolov8s, so (a) the fine-tune starts from the
+# pretrained head instead of a random 7-class one - which matters enormously
+# on tiny operator-labeled datasets - and (b) the emitted head tensors
+# overlay cleanly onto the base model at inference (a 7-class head is
+# shape-incompatible and the promotion gate rightly refuses it).
+# Classes the operator never labels simply contribute no examples.
+EXPORT_CLASSES = {"person": 0, "bicycle": 1, "car": 2, "motorcycle": 3,
+                  "bus": 5, "train": 6, "truck": 7}
+_CLS_ID = EXPORT_CLASSES
+
+# Full COCO-80 name table for dataset.yaml (ultralytics needs every id the
+# model predicts named, even the 73 we never label).
+COCO80 = [
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train",
+    "truck", "boat", "traffic light", "fire hydrant", "stop sign",
+    "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
+    "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella",
+    "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard",
+    "sports ball", "kite", "baseball bat", "baseball glove", "skateboard",
+    "surfboard", "tennis racket", "bottle", "wine glass", "cup", "fork",
+    "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange",
+    "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair",
+    "couch", "potted plant", "bed", "dining table", "toilet", "tv",
+    "laptop", "mouse", "remote", "keyboard", "cell phone", "microwave",
+    "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase",
+    "scissors", "teddy bear", "hair drier", "toothbrush",
+]
 
 
 def _yolo_row(cls: str, box: list[float], W: int, H: int) -> str | None:
@@ -155,7 +180,7 @@ def export(out_dir: Path, examples: list[dict], val_frac: float = 0.1) -> dict:
             "train: images/train",
             "val: images/val",
             "names:"]
-    yaml += [f"  {i}: {c}" for i, c in enumerate(EXPORT_CLASSES)]
+    yaml += [f"  {i}: {c}" for i, c in enumerate(COCO80)]
     (out_dir / "dataset.yaml").write_text("\n".join(yaml) + "\n")
     return totals
 
