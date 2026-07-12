@@ -42,12 +42,16 @@ _SRC_ROOT = Path(__file__).resolve().parent.parent
 WINDOW_HOURS_DEFAULT = 12
 STALE_SLOT_MIN = 10          # newest sample older than this = stuck stream
 
-KIND_HE = {
-    "extreme_load":      "עומס חריג",
-    "camera_obstructed": "חסימת מצלמה",
-    "camera_dark":       "החשכה פתאומית",
-    "loiter":            "שהייה ממושכת מול המצלמה",
-    "returning":         "מבקר חוזר",
+# Operator-facing labels for anomaly kinds. English throughout: the report
+# ships to the operator's Gmail and inline-previews on a plain LTR client;
+# every earlier Hebrew rendering (dashboard-side or bidi-shaped PDF) is
+# retired in favor of a single, unambiguous English pass.
+KIND_LABELS = {
+    "extreme_load":      "Extreme load",
+    "camera_obstructed": "Camera blocked",
+    "camera_dark":       "View went dark",
+    "loiter":            "Loitering",
+    "returning":         "Returning visitor",
 }
 
 
@@ -59,13 +63,13 @@ def _israel_now() -> dt.datetime:
 # ---- pure compose helpers (unit-tested, no I/O) -----------------------------
 
 def aggregate_events(events: list[dict]) -> list[dict]:
-    """(kind, camera) -> {kind_he, cam, count, last_ts}, newest group first."""
+    """(kind, camera) -> {label, cam, count, last_ts}, newest group first."""
     groups: dict[tuple, dict] = {}
     for e in events:
         kind = str(e.get("kind") or "?")
         cam = str(e.get("cam_name") or e.get("cam_id") or e.get("slot") or "?")
         g = groups.setdefault((kind, cam), {
-            "kind": kind, "kind_he": KIND_HE.get(kind, kind), "cam": cam,
+            "kind": kind, "label": KIND_LABELS.get(kind, kind), "cam": cam,
             "count": 0, "last_ts": ""})
         g["count"] += 1
         ts = str(e.get("ts") or "")
@@ -108,92 +112,92 @@ def footfall_stats(records: list[dict]) -> list[dict]:
     return sorted(cams.values(), key=lambda c: c["peak_person"], reverse=True)
 
 
-def _fmt_ts_he(ts_iso: str) -> str:
-    """UTC ISO -> HH:MM Israel."""
+def _fmt_ts(ts_iso: str) -> str:
+    """UTC ISO -> Israel-time HH:MM (the operator lives on this clock)."""
     try:
         from zoneinfo import ZoneInfo
-        t = dt.datetime.strptime(ts_iso[:19], "%Y-%m-%dT%H:%M:%S")
+        t = dt.datetime.strptime(str(ts_iso)[:19], "%Y-%m-%dT%H:%M:%S")
         t = t.replace(tzinfo=dt.timezone.utc).astimezone(ZoneInfo("Asia/Jerusalem"))
         return t.strftime("%H:%M")
-    except (ValueError, KeyError):
-        return ts_iso[:16]
+    except (ValueError, TypeError):
+        return str(ts_iso)[:16]
 
 
 def compose_digest(now_il: dt.datetime, window_hours: int,
                    event_groups: list[dict], cam_stats: list[dict],
                    training: dict | None, stale_slots: list[dict]
                    ) -> tuple[str, str, str]:
-    """Returns (subject, plain_text, html). Hebrew, phone-first layout."""
-    part = "דוח צהריים" if now_il.hour < 16 else "דוח ערב"
-    subject = f"קוניה - {part} {now_il.strftime('%d.%m')}"
+    """Returns (subject, plain_text, html). English throughout, phone-first."""
+    part = "Midday report" if now_il.hour < 16 else "Evening report"
+    subject = f"Konya - {part} {now_il.strftime('%d.%m')}"
 
-    lines: list[str] = [f"{part} - {window_hours} השעות האחרונות", ""]
+    lines: list[str] = [f"{part} - last {window_hours} hours", ""]
     html: list[str] = [
-        '<div dir="rtl" style="font-family:Arial,sans-serif;font-size:15px">',
+        '<div style="font-family:Arial,sans-serif;font-size:15px">',
         f"<h2 style='margin:0 0 12px'>{subject}</h2>",
     ]
 
     # health first - a stuck camera changes how everything below reads
     if stale_slots:
         for s in stale_slots:
-            w = (f"אזהרה: המצלמה {s['cam']} לא מדווחת כבר "
-                 f"{s['age_min']} דקות")
+            w = (f"WARNING: camera {s['cam']} has not reported for "
+                 f"{s['age_min']} minutes")
             lines.append("! " + w)
             html.append(f"<p style='color:#b00'><b>{w}</b></p>")
     else:
-        lines.append("כל המצלמות מדווחות כסדרן.")
-        html.append("<p>כל המצלמות מדווחות כסדרן.</p>")
+        lines.append("All cameras reporting normally.")
+        html.append("<p>All cameras reporting normally.</p>")
     lines.append("")
 
-    lines.append("חריגים:")
-    html.append("<h3 style='margin:14px 0 6px'>חריגים</h3>")
+    lines.append("Anomalies:")
+    html.append("<h3 style='margin:14px 0 6px'>Anomalies</h3>")
     if event_groups:
         html.append("<table cellpadding='4' style='border-collapse:collapse'>")
         for g in event_groups:
-            t = _fmt_ts_he(g["last_ts"])
-            row = (f"{g['kind_he']} - {g['cam']}"
+            t = _fmt_ts(g["last_ts"])
+            row = (f"{g['label']} - {g['cam']}"
                    + (f" (x{g['count']})" if g["count"] > 1 else "")
-                   + f", לאחרונה {t}")
+                   + f", latest {t}")
             lines.append("  - " + row)
             html.append(
-                f"<tr><td style='border-bottom:1px solid #ddd'>{g['kind_he']}</td>"
+                f"<tr><td style='border-bottom:1px solid #ddd'>{g['label']}</td>"
                 f"<td style='border-bottom:1px solid #ddd'>{g['cam']}</td>"
                 f"<td style='border-bottom:1px solid #ddd'>x{g['count']}</td>"
                 f"<td style='border-bottom:1px solid #ddd'>{t}</td></tr>")
         html.append("</table>")
     else:
-        lines.append("  שקט - לא נרשם אף חריג בחלון הזה.")
-        html.append("<p>שקט - לא נרשם אף חריג בחלון הזה.</p>")
+        lines.append("  Quiet - no anomalies in this window.")
+        html.append("<p>Quiet - no anomalies in this window.</p>")
     lines.append("")
 
-    lines.append("שיאי פעילות:")
-    html.append("<h3 style='margin:14px 0 6px'>שיאי פעילות</h3>")
+    lines.append("Activity peaks:")
+    html.append("<h3 style='margin:14px 0 6px'>Activity peaks</h3>")
     if cam_stats:
         html.append("<table cellpadding='4' style='border-collapse:collapse'>"
-                    "<tr><th align='right'>מצלמה</th><th>שיא אנשים</th>"
-                    "<th>שיא רכבים</th><th>מהירות מרבית</th></tr>")
+                    "<tr><th align='left'>Camera</th><th>Peak people</th>"
+                    "<th>Peak vehicles</th><th>Typical traffic</th></tr>")
         for c in cam_stats:
-            when = f" ב-{_fmt_ts_he(c['peak_person_ts'])}" if c["peak_person_ts"] else ""
-            spd = (f"תנועה אופיינית ~{c['typ_kmh']:.0f} קמ\"ש"
+            when = f" at {_fmt_ts(c['peak_person_ts'])}" if c["peak_person_ts"] else ""
+            spd = (f"~{c['typ_kmh']:.0f} km/h typical"
                    if c["typ_kmh"] > 0 else "-")
-            lines.append(f"  - {c['cam']}: עד {c['peak_person']} אנשים{when}, "
-                         f"עד {c['peak_vehicles']} רכבים, {spd}")
+            lines.append(f"  - {c['cam']}: up to {c['peak_person']} people{when}, "
+                         f"up to {c['peak_vehicles']} vehicles, {spd}")
             html.append(f"<tr><td>{c['cam']}</td>"
                         f"<td align='center'>{c['peak_person']}{when}</td>"
                         f"<td align='center'>{c['peak_vehicles']}</td>"
                         f"<td align='center'>{spd}</td></tr>")
         html.append("</table>")
     else:
-        lines.append("  אין דגימות בחלון - בדוק את יומן ה-VM.")
-        html.append("<p>אין דגימות בחלון - בדוק את יומן ה-VM.</p>")
+        lines.append("  No footfall samples in this window - check the VM journal.")
+        html.append("<p>No footfall samples in this window - check the VM journal.</p>")
     lines.append("")
 
-    lines.append("למידה:")
-    html.append("<h3 style='margin:14px 0 6px'>למידה</h3>")
+    lines.append("Learning:")
+    html.append("<h3 style='margin:14px 0 6px'>Learning</h3>")
     if training:
-        verdict = "קודם ראש חדש" if training.get("promoted") else "נדחה בשער"
+        verdict = "PROMOTED new head" if training.get("promoted") else "rejected at gate"
         cand = training.get("candidate") or training.get("file") or "?"
-        t = (f"ריצת אימון אחרונה ({str(training.get('at') or '')[:10]}): "
+        t = (f"Last training run ({str(training.get('at') or '')[:10]}): "
              f"{verdict} - {cand}")
         reasons = training.get("reasons") or []
         lines.append("  " + t)
@@ -202,8 +206,8 @@ def compose_digest(now_il: dt.datetime, window_hours: int,
             lines.append(f"    {r}")
             html.append(f"<p style='color:#666;margin:2px 0'>{r}</p>")
     else:
-        lines.append("  עוד לא רצה ריצת אימון.")
-        html.append("<p>עוד לא רצה ריצת אימון.</p>")
+        lines.append("  No training run has executed yet.")
+        html.append("<p>No training run has executed yet.</p>")
 
     html.append("</div>")
     return subject, "\n".join(lines), "".join(html)
@@ -343,7 +347,7 @@ def _build_pdf(now_il: dt.datetime, window_hours: int,
     try:
         from tools import report_pdf
     except ImportError as e:
-        print(f"digest: reportlab/bidi not available ({e}) - "
+        print(f"digest: reportlab not available ({e}) - "
               f"sending text-only mail")
         return None
     picks = report_pdf.pick_event_samples(events)
@@ -353,7 +357,7 @@ def _build_pdf(now_il: dt.datetime, window_hours: int,
         now_il=now_il, window_hours=window_hours,
         events_by_kind=event_groups, cam_stats=cam_stats,
         training=training, stale_slots=stale_slots,
-        snapshots=snapshots, kind_labels=KIND_HE,
+        snapshots=snapshots, kind_labels=KIND_LABELS,
         total_events=len(events), total_samples=footfall_count)
 
 

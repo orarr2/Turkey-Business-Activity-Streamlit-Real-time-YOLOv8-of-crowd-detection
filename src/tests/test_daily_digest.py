@@ -1,4 +1,4 @@
-"""Situation-report compose layer: aggregation, peaks, Hebrew rendering."""
+"""Situation-report compose layer: aggregation, peaks, English rendering."""
 import datetime as dt
 
 from tools.daily_digest import (aggregate_events, compose_digest,
@@ -22,8 +22,8 @@ def test_aggregate_events_groups_per_kind_and_camera():
     assert groups[0]["kind"] == "camera_obstructed"       # newest first
     assert groups[0]["count"] == 2
     assert groups[0]["last_ts"] == "2026-07-11T08:00:00Z"
-    assert groups[0]["kind_he"] == "חסימת מצלמה"
-    assert groups[1]["kind_he"] == "מבקר חוזר"
+    assert groups[0]["label"] == "Camera blocked"
+    assert groups[1]["label"] == "Returning visitor"
     assert aggregate_events([]) == []
 
 
@@ -33,7 +33,7 @@ def test_footfall_stats_peaks_and_speed():
          "ts": "2026-07-11T04:00:00Z"},
         {"cam_name": "Hukumet", "person": 9, "vehicles": 1,
          "ts": "2026-07-11T06:30:00Z",
-         "speeds": {"median_kmh": 42.5, "max_kmh": 127.0}},   # max = outlier
+         "speeds": {"median_kmh": 42.5, "max_kmh": 127.0}},
         {"cam_name": "Otogar", "person": 1, "vehicles": 7,
          "ts": "2026-07-11T05:00:00Z"},
         {"cam_name": "Hukumet", "person": None, "vehicles": None,
@@ -68,7 +68,7 @@ def test_stale_slots_flagged():
     assert [s["cam"] for s in stale] == ["Stuck"]
 
 
-def test_compose_full_report_hebrew():
+def test_compose_full_report_english():
     groups = aggregate_events([
         {"kind": "extreme_load", "cam_name": "Millet",
          "ts": "2026-07-11T06:00:00Z"},
@@ -82,24 +82,24 @@ def test_compose_full_report_hebrew():
                 "reasons": ["mAP50 gain +0.00pp < required +0.50pp"]}
     subject, text, html = compose_digest(_NOON, 12, groups, stats,
                                          training, [])
-    assert subject == "קוניה - דוח צהריים 11.07"
-    assert "עומס חריג" in text and "(x2)" in text
-    assert "עד 55 אנשים" in text
-    assert "נדחה בשער" in text and "head_run2.pt" in text
-    assert "כל המצלמות מדווחות כסדרן" in text
-    assert 'dir="rtl"' in html and "x2" in html
+    assert subject == "Konya - Midday report 11.07"
+    assert "Midday report" in text
+    assert "Extreme load" in text and "(x2)" in text
+    assert "up to 55 people" in text
+    assert "rejected at gate" in text and "head_run2.pt" in text
+    assert "All cameras reporting normally" in text
 
     # evening + stale camera + quiet window
     subject2, text2, _ = compose_digest(
         _EVE, 12, [], [], None, [{"cam": "Otogar", "age_min": 45}])
-    assert "דוח ערב" in subject2
-    assert "שקט - לא נרשם אף חריג" in text2
-    assert "Otogar" in text2 and "45 דקות" in text2
-    assert "עוד לא רצה ריצת אימון" in text2
+    assert "Evening report" in subject2
+    assert "Quiet - no anomalies" in text2
+    assert "Otogar" in text2 and "45 minutes" in text2
+    assert "No training run" in text2
 
 
 def test_promoted_line():
     training = {"event": "gate", "promoted": True, "candidate": "head_run9.pt",
                 "at": "2026-07-12T01:30:00Z", "reasons": ["+1.2pp"]}
     _, text, _ = compose_digest(_NOON, 12, [], [], training, [])
-    assert "קודם ראש חדש" in text and "head_run9.pt" in text
+    assert "PROMOTED new head" in text and "head_run9.pt" in text

@@ -1,40 +1,10 @@
-"""Rich Hebrew report: sample selection, snapshot fetch, PDF composition."""
+"""English report: sample selection, snapshot fetch, PDF composition."""
 import datetime as dt
 
 import pytest
 
 reportlab = pytest.importorskip("reportlab")
 report_pdf = pytest.importorskip("tools.report_pdf")
-
-
-def test_he_join_keeps_mixed_number_noun_together():
-    """python-bidi 0.6 misplaces LTR runs around neutral separators when
-    they sit next to Hebrew (observed live: '319 שניות' got split so the
-    number ended up in the wrong table cell). _he_join composes the visual
-    order manually so number+noun stay adjacent."""
-    line = report_pdf._he_join(
-        ["kind", "cam", "13:36", "319 שניות", "person"])
-    # In the visual (LTR-display) order, "person" is first (leftmost) and
-    # "kind" is last (rightmost). Reading right-to-left gives the logical
-    # order back.
-    assert line.startswith("person · ")
-    # The mixed 319+שניות part must appear as a single visually-adjacent
-    # unit somewhere in the middle - not with " · " between them.
-    assert "319" in line
-    # find where "319" ends up and check its immediate neighborhood keeps
-    # Hebrew letters (from "שניות") within 1-2 chars, no bullet separator.
-    i = line.index("319")
-    neighborhood = line[max(0, i - 8): i] + line[i + 3: i + 10]
-    hebrew_chars = [c for c in neighborhood
-                    if 0x0590 <= ord(c) < 0x0600]
-    assert len(hebrew_chars) >= 4, \
-        f"'319' got separated from 'שניות' in visual layout: {line!r}"
-
-
-def test_he_join_drops_empty_parts():
-    """Missing duration/class should not leave dangling separators."""
-    line = report_pdf._he_join(["kind", "", "cam", None, "time"])
-    assert line.count(" · ") == 2   # 3 non-empty parts
 
 
 def _mk(kind, cam, ts, full=None, snap=None, **extra):
@@ -100,7 +70,8 @@ def test_fetch_snapshots_uses_fullframe_then_snapshot():
             snap="https://snap.jpg"),                 # fullframe 404 -> use snap
         _mk("loiter", "cam_A", "t", full="https://gone.jpg"),  # both gone
     ]
-    out = report_pdf.fetch_snapshots(picks, downloader=dl)
+    # shrink=False so the byte comparison stays exact
+    out = report_pdf.fetch_snapshots(picks, downloader=dl, shrink=False)
     assert [b for _, b in out] == [b"x" * 5000, b"y" * 5000]
     assert seen == ["https://ff.jpg", "https://gone.jpg",
                     "https://snap.jpg", "https://gone.jpg"]
@@ -116,16 +87,34 @@ def _jpeg(color=(180, 180, 180)):
     return buf.getvalue()
 
 
+def test_event_caption_english():
+    """Caption is a simple dot-joined line: label · camera · time · duration
+    · class, with duration and class dropped when not applicable."""
+    cap = report_pdf._event_caption(
+        {"kind": "loiter", "cam_id": "konya_millet",
+         "ts": "2026-07-12T15:30:00Z", "duration_sec": 320, "cls": "person"},
+        {"loiter": "Loitering"})
+    assert "Loitering" in cap
+    assert "konya_millet" in cap
+    assert "320 sec" in cap
+    assert "person" in cap
+    # Missing duration/class - just three parts.
+    cap2 = report_pdf._event_caption(
+        {"kind": "returning", "cam_id": "cam_x", "ts": "2026-07-12T07:00:00Z"},
+        {"returning": "Returning visitor"})
+    assert cap2.count(" · ") == 2
+
+
 def test_compose_pdf_end_to_end(tmp_path):
     """Compose a real PDF from realistic inputs and validate: file exists,
-    is a valid PDF, contains multiple pages (evidence + summary)."""
+    is a valid PDF, contains English text."""
     out = tmp_path / "report.pdf"
     now = dt.datetime(2026, 7, 12, 20, 0)
     groups = [
-        {"kind": "loiter", "kind_he": "שהייה ממושכת מול המצלמה",
+        {"kind": "loiter", "label": "Loitering",
          "cam": "Konya - Millet Caddesi", "count": 14,
          "last_ts": "2026-07-12T15:30:00Z"},
-        {"kind": "camera_obstructed", "kind_he": "חסימת מצלמה",
+        {"kind": "camera_obstructed", "label": "Camera blocked",
          "cam": "Otogar Kavsagi", "count": 2,
          "last_ts": "2026-07-12T13:00:00Z"},
     ]
@@ -148,13 +137,12 @@ def test_compose_pdf_end_to_end(tmp_path):
         ({"kind": "loiter", "cam_id": "konya_millet_caddesi",
           "ts": "2026-07-12T15:30:00Z", "duration_sec": 420}, _jpeg((100, 140, 200))),
     ]
-    KIND_HE = {"loiter": "שהייה ממושכת מול המצלמה",
-               "camera_obstructed": "חסימת מצלמה"}
+    LABELS = {"loiter": "Loitering", "camera_obstructed": "Camera blocked"}
     p = report_pdf.compose_pdf(
         out, now_il=now, window_hours=12,
         events_by_kind=groups, cam_stats=cam_stats,
         training=training, stale_slots=stale,
-        snapshots=snaps, kind_labels=KIND_HE,
+        snapshots=snaps, kind_labels=LABELS,
         total_events=16, total_samples=980)
     assert p == out and p.is_file()
     head = p.read_bytes()[:8]

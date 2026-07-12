@@ -20,10 +20,9 @@ firebase-admin>=6.5
 python-dateutil>=2.9
 
 # Twice-daily situation report PDF (tools/daily_digest, tools/report_pdf).
-# reportlab pure-python; python-bidi reorders Hebrew logical<->visual so the
-# LTR-only reportlab layout engine shows letters in the right order.
+# reportlab pure-python; Pillow downscales snapshots before embedding so
+# eight fullframe HD images fit under Gmail's inline-preview envelope.
 reportlab>=4.0
-python-bidi>=0.4
 Pillow>=10.0
 
 # --- Optional at runtime (not installed by default) ---
