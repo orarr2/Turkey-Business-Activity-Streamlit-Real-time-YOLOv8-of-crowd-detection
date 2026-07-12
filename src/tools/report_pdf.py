@@ -39,6 +39,41 @@ except ImportError:                    # pragma: no cover - bidi ships with weas
     def get_display(s):                # type: ignore[no-redef]
         return s
 
+
+# ---- Hebrew shaping helpers -------------------------------------------------
+#
+# python-bidi 0.6 has a known bug in mixed-content strings: when a compound
+# caption like "kind · cam · time · 319 שניות · cls" runs through get_display
+# in one call, the LTR "319" and the RTL "שניות" get PLACED IN SEPARATE
+# CELLS of the visual layout (a debug walk over its output confirms this on
+# every version tested). The report shipped from the VM produced captions
+# reading as ``person · שניות konya_kulturpark · 13:36 · 319 · שהייה...`` -
+# each atom right on its own but the joined line unreadable.
+#
+# Workaround (below): compose the visual string ourselves. Reportlab is
+# LTR-only, so a Hebrew-first line renders with the FIRST logical word at
+# the RIGHT-MOST visual position. We hand the engine parts in REVERSE
+# logical order, and call get_display only on Hebrew-containing parts.
+# Pure-LTR parts (English, digits, timestamps) never leave get_display's
+# domain of mishandling in the first place.
+
+def _has_hebrew(s: str) -> bool:
+    return any(0x0590 <= ord(c) < 0x0600 for c in s)
+
+
+def _he(s) -> str:
+    """Single-piece Hebrew reordering. Safe for headings, table cells - a
+    self-contained phrase where python-bidi behaves correctly."""
+    s = str(s)
+    return get_display(s) if _has_hebrew(s) else s
+
+
+def _he_join(parts, sep: str = " · ") -> str:
+    """Compose a mixed-direction line in visual order for an LTR engine.
+    See the module-level note on why we do not hand the whole string to
+    get_display in one shot."""
+    return sep.join(_he(p) for p in reversed(list(parts)) if p is not None and str(p) != "")
+
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_RIGHT
 from reportlab.lib.pagesizes import A4
@@ -111,11 +146,6 @@ def _register_fonts() -> tuple[str, str]:
         return _FONT_CACHE
     _FONT_CACHE = ("Helvetica", "Helvetica-Bold")
     return _FONT_CACHE
-
-
-def _he(s) -> str:
-    """Logical -> visual for reportlab, which does not know RTL exists."""
-    return get_display(str(s))
 
 
 def pick_event_samples(events: list[dict], max_total: int = MAX_IMAGES
@@ -244,16 +274,19 @@ def _event_kind_he(e: dict, kind_labels: dict[str, str]) -> str:
 
 
 def _event_caption(e: dict, kind_labels: dict[str, str]) -> str:
+    """Visual-order caption ready for reportlab. Composed from LOGICAL
+    parts via ``_he_join``, so a Hebrew reader looking at the PDF from the
+    right sees them in kind → camera → time → duration → class order."""
     kind_he = _event_kind_he(e, kind_labels)
     cam = str(e.get("cam_name") or e.get("cam_id") or e.get("slot") or "?")
-    parts = [kind_he, cam, _fmt_ts_he(e.get("ts"))]
+    parts: list[str] = [kind_he, cam, _fmt_ts_he(e.get("ts"))]
     dur = e.get("duration_sec")
     if isinstance(dur, (int, float)) and dur > 0:
         parts.append(f"{int(dur)} שניות")
     cls = e.get("cls")
     if cls:
         parts.append(str(cls))
-    return " · ".join(parts)
+    return _he_join(parts)
 
 
 def compose_pdf(out_path: str | Path, *,
@@ -271,9 +304,6 @@ def compose_pdf(out_path: str | Path, *,
     reg, bold = _register_fonts()
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    def para(text, style):
-        return Paragraph(_he(text), style)
 
     styles = {
         "title": ParagraphStyle("title", fontName=bold, fontSize=22,
@@ -300,13 +330,21 @@ def compose_pdf(out_path: str | Path, *,
 
     story = []
     part = "צהריים" if now_il.hour < 16 else "ערב"
-    story.append(para(f"קוניה - סיכום פעילות ({part})", styles["title"]))
-    story.append(para(f"{_fmt_date_he(now_il)}  ·  חלון {window_hours} שעות אחורה",
-                      styles["sub"]))
+    # Parentheses render mirrored via python-bidi (unresolved bracket-pair
+    # mirroring in 0.6). A dash keeps the same intent without the fight.
+    story.append(Paragraph(
+        _he_join(["קוניה", "סיכום פעילות", part], sep=" – "),
+        styles["title"]))
+    story.append(Paragraph(
+        _he_join([f"חלון {window_hours} שעות אחורה", _fmt_date_he(now_il)],
+                 sep="  ·  "),
+        styles["sub"]))
 
-    # Two-column snapshot: totals + health
+    # Two-column snapshot: totals + health. Number + Hebrew noun uses the
+    # compound-safe join so the visual layout keeps them together.
     kpi_rows = [
-        [_he(f"{total_events} חריגים"), _he(f"{total_samples} דגימות")],
+        [_he_join([f"{total_events}", "חריגים"], sep=" "),
+         _he_join([f"{total_samples}", "דגימות"], sep=" ")],
     ]
     kpi = Table(kpi_rows, colWidths=[9*cm, 9*cm])
     kpi.setStyle(TableStyle([
@@ -323,17 +361,21 @@ def compose_pdf(out_path: str | Path, *,
     ]))
     story.append(kpi)
 
-    story.append(para("סטטוס מצלמות", styles["h"]))
+    story.append(Paragraph(_he("סטטוס מצלמות"), styles["h"]))
     if stale_slots:
         for s in stale_slots:
-            story.append(para(
-                f"⚠  {s['cam']} - לא מדווחת כבר {s['age_min']} דקות",
+            story.append(Paragraph(
+                _he_join(["⚠", s["cam"], "לא מדווחת כבר",
+                          f"{s['age_min']} דקות"], sep=" "),
                 styles["warn"]))
     else:
-        story.append(para("✓  כל המצלמות פעילות ומדווחות כסדרן", styles["ok"]))
+        story.append(Paragraph(
+            _he("✓  כל המצלמות פעילות ומדווחות כסדרן"), styles["ok"]))
 
-    # Aggregated anomalies table (right-most = first column visually)
-    story.append(para("סיכום חריגים לפי סוג ומצלמה", styles["h"]))
+    # Aggregated anomalies table. The header CELLS get standard get_display;
+    # each body cell's text is either single-script (safe for get_display)
+    # or numeric-only (kept as-is).
+    story.append(Paragraph(_he("סיכום חריגים לפי סוג ומצלמה"), styles["h"]))
     if events_by_kind:
         header = [_he(h) for h in ("מספר מופעים", "אחרון", "מצלמה", "סוג חריגה")]
         body = [header]
@@ -347,68 +389,100 @@ def compose_pdf(out_path: str | Path, *,
         tbl.setStyle(_table_style(reg, bold))
         story.append(tbl)
     else:
-        story.append(para("שקט - לא נרשם אף חריג בחלון הזה.",
-                          styles["body"]))
+        story.append(Paragraph(_he("שקט - לא נרשם אף חריג בחלון הזה."),
+                               styles["body"]))
 
-    # Camera activity peaks
-    story.append(para("שיאי פעילות לפי מצלמה", styles["h"]))
+    # Camera activity peaks. Speed cell is number+Hebrew (needs _he_join);
+    # the "N ב-HH:MM" people cell is likewise mixed.
+    story.append(Paragraph(_he("שיאי פעילות לפי מצלמה"), styles["h"]))
     if cam_stats:
         header = [_he(h) for h in ("תנועה אופיינית", "שיא רכבים",
                                     "שיא אנשים", "מצלמה")]
         body = [header]
         for c in cam_stats:
-            spd = f"~{c['typ_kmh']:.0f} קמ״ש" if c["typ_kmh"] > 0 else "-"
-            people = str(c["peak_person"])
+            if c["typ_kmh"] > 0:
+                spd = _he_join([f"~{c['typ_kmh']:.0f}", "קמ״ש"], sep=" ")
+            else:
+                spd = "-"
             if c["peak_person_ts"]:
-                people += f" ב-{_fmt_ts_he(c['peak_person_ts'])}"
-            body.append([_he(spd),
-                         str(c["peak_vehicles"]),
-                         _he(people),
-                         _he(c["cam"])])
+                people = _he_join([str(c['peak_person']), "ב-" +
+                                   _fmt_ts_he(c['peak_person_ts'])], sep=" ")
+            else:
+                people = str(c["peak_person"])
+            body.append([spd, str(c["peak_vehicles"]),
+                         people, _he(c["cam"])])
         tbl = Table(body, colWidths=[3.5*cm, 2.5*cm, 4*cm, 6.6*cm],
                     repeatRows=1)
         tbl.setStyle(_table_style(reg, bold))
         story.append(tbl)
     else:
-        story.append(para("אין דגימות פעילות בחלון.", styles["body"]))
+        story.append(Paragraph(_he("אין דגימות פעילות בחלון."),
+                               styles["body"]))
 
     # Training status
-    story.append(para("סטטוס למידת המודל", styles["h"]))
+    story.append(Paragraph(_he("סטטוס למידת המודל"), styles["h"]))
     if training:
         verdict_he = "קידום ראש חדש" if training.get("promoted") else "נדחה בשער"
         cand = training.get("candidate") or training.get("file") or "?"
         when = str(training.get("at") or "")[:10]
-        story.append(para(f"ריצת אימון אחרונה ({when}): {verdict_he} - {cand}",
-                          styles["body"]))
+        story.append(Paragraph(
+            _he_join([f"ריצת אימון אחרונה", when + ":",
+                      verdict_he, cand], sep=" · "), styles["body"]))
         for r in (training.get("reasons") or [])[:3]:
-            story.append(para(f"• {r}", styles["cap"]))
+            # reasons are English (mAP50 gain +0.00pp < required +0.50pp),
+            # rendered as-is.
+            story.append(Paragraph(f"• {r}", styles["cap"]))
     else:
-        story.append(para("עוד לא רצה ריצת אימון בענן.", styles["body"]))
+        story.append(Paragraph(_he("עוד לא רצה ריצת אימון בענן."),
+                               styles["body"]))
 
-    # Visual evidence pages - one image per event with its caption
+    # Visual evidence pages - one image + caption per event, wrapped in a
+    # single-cell Table with soft background + border so the caption reads
+    # as "belonging" to the image above it. Two per page fits comfortably.
     snap_list = list(snapshots)
     if snap_list:
         story.append(PageBreak())
-        story.append(para("דוגמאות מהחריגים - תמונות מקוריות מהמצלמות",
-                          styles["h"]))
-        story.append(para(
+        story.append(Paragraph(
+            _he("דוגמאות מהחריגים - תמונות מקוריות מהמצלמות"),
+            styles["h"]))
+        story.append(Paragraph(_he(
             "לכל סוג חריגה מצורפת התמונה המלאה שנשמרה בענן, "
-            "עם המצלמה, השעה, ופרטים נוספים.", styles["cap"]))
+            "עם המצלמה, השעה, ופרטים נוספים."), styles["cap"]))
+        cap_style = ParagraphStyle(
+            "img_cap", fontName=reg, fontSize=10, alignment=TA_RIGHT,
+            leading=13, textColor=colors.HexColor("#334155"))
         for e, jpeg in snap_list:
-            # Constrain to page width; reportlab keeps aspect via kind='proportional'.
             img = Image(BytesIO(jpeg), width=15*cm, height=8.5*cm,
                         kind="proportional")
-            story.append(img)
-            story.append(para(_event_caption(e, kind_labels), styles["cap"]))
-            story.append(Spacer(1, 0.3*cm))
+            caption = Paragraph(_event_caption(e, kind_labels), cap_style)
+            frame = Table([[img], [caption]], colWidths=[16.2*cm])
+            frame.setStyle(TableStyle([
+                ("BACKGROUND",    (0, 0), (-1, -1), colors.HexColor("#f8fafc")),
+                ("BOX",           (0, 0), (-1, -1), 0.75, colors.HexColor("#cbd5e1")),
+                ("LINEABOVE",     (0, 1), (-1, 1),  0.5,  colors.HexColor("#e2e8f0")),
+                ("TOPPADDING",    (0, 0), (-1, 0),  8),
+                ("BOTTOMPADDING", (0, 0), (-1, 0),  6),
+                ("TOPPADDING",    (0, 1), (-1, 1),  8),
+                ("BOTTOMPADDING", (0, 1), (-1, 1),  10),
+                ("LEFTPADDING",   (0, 0), (-1, -1), 10),
+                ("RIGHTPADDING",  (0, 0), (-1, -1), 10),
+                ("ALIGN",         (0, 0), (-1, 0),  "CENTER"),
+                ("ALIGN",         (0, 1), (-1, 1),  "RIGHT"),
+                ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
+            ]))
+            story.append(frame)
+            story.append(Spacer(1, 0.4*cm))
     else:
-        story.append(para("אין תמונות מצורפות (הבאקט של התמונות ריק "
-                          "או שהאירועים חסרים snapshot_url).", styles["cap"]))
+        story.append(Paragraph(_he("אין תמונות מצורפות (הבאקט של התמונות ריק "
+                                   "או שהאירועים חסרים snapshot_url)."),
+                               styles["cap"]))
 
+    # PDF metadata title is a UI string on Gmail/reader tabs; keep it
+    # ASCII-safe so no reader misrenders it in the tab bar.
     doc = SimpleDocTemplate(str(out_path), pagesize=A4,
                             leftMargin=1.5*cm, rightMargin=1.5*cm,
                             topMargin=1.4*cm, bottomMargin=1.4*cm,
-                            title=_he(f"סיכום קוניה {_fmt_date_he(now_il)}"),
+                            title=f"Konya activity report {_fmt_date_he(now_il)}",
                             author="turkey-collector")
     doc.build(story)
     return out_path

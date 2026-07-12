@@ -7,6 +7,36 @@ reportlab = pytest.importorskip("reportlab")
 report_pdf = pytest.importorskip("tools.report_pdf")
 
 
+def test_he_join_keeps_mixed_number_noun_together():
+    """python-bidi 0.6 misplaces LTR runs around neutral separators when
+    they sit next to Hebrew (observed live: '319 שניות' got split so the
+    number ended up in the wrong table cell). _he_join composes the visual
+    order manually so number+noun stay adjacent."""
+    line = report_pdf._he_join(
+        ["kind", "cam", "13:36", "319 שניות", "person"])
+    # In the visual (LTR-display) order, "person" is first (leftmost) and
+    # "kind" is last (rightmost). Reading right-to-left gives the logical
+    # order back.
+    assert line.startswith("person · ")
+    # The mixed 319+שניות part must appear as a single visually-adjacent
+    # unit somewhere in the middle - not with " · " between them.
+    assert "319" in line
+    # find where "319" ends up and check its immediate neighborhood keeps
+    # Hebrew letters (from "שניות") within 1-2 chars, no bullet separator.
+    i = line.index("319")
+    neighborhood = line[max(0, i - 8): i] + line[i + 3: i + 10]
+    hebrew_chars = [c for c in neighborhood
+                    if 0x0590 <= ord(c) < 0x0600]
+    assert len(hebrew_chars) >= 4, \
+        f"'319' got separated from 'שניות' in visual layout: {line!r}"
+
+
+def test_he_join_drops_empty_parts():
+    """Missing duration/class should not leave dangling separators."""
+    line = report_pdf._he_join(["kind", "", "cam", None, "time"])
+    assert line.count(" · ") == 2   # 3 non-empty parts
+
+
 def _mk(kind, cam, ts, full=None, snap=None, **extra):
     e = {"kind": kind, "cam_id": cam, "ts": ts, **extra}
     if full: e["fullframe_url"] = full
