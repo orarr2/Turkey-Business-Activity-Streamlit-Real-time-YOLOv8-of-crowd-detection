@@ -35,7 +35,8 @@ apt-get update -qq
 apt-get install -y --no-install-recommends \
     git python3 python3-venv python3-pip \
     ffmpeg libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 \
-    ca-certificates curl
+    ca-certificates curl \
+    fonts-dejavu-core
 
 # gcloud CLI is preinstalled on GCP VM images; verify it's present.
 if ! command -v gcloud >/dev/null; then

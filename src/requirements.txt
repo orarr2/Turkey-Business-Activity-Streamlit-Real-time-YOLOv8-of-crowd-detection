@@ -19,6 +19,13 @@ firebase-admin>=6.5
 # Optional: nicer time handling for the notebook
 python-dateutil>=2.9
 
+# Twice-daily situation report PDF (tools/daily_digest, tools/report_pdf).
+# reportlab pure-python; python-bidi reorders Hebrew logical<->visual so the
+# LTR-only reportlab layout engine shows letters in the right order.
+reportlab>=4.0
+python-bidi>=0.4
+Pillow>=10.0
+
 # --- Optional at runtime (not installed by default) ---
 # onnxruntime>=1.17   # only if you point --reid-model at an OSNet .onnx you
 #                     # produced separately (histogram default needs nothing).

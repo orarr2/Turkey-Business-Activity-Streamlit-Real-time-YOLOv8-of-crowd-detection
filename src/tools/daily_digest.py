@@ -29,7 +29,10 @@ import datetime as dt
 import json
 import os
 import smtplib
+import tempfile
 import urllib.request
+from email import encoders
+from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -288,45 +291,113 @@ def fetch_last_training() -> dict | None:
 
 # ---- send --------------------------------------------------------------------
 
-def send_gmail(subject: str, text: str, html: str) -> None:
+def send_gmail(subject: str, text: str, html: str,
+               attachments: list[Path] | None = None) -> None:
+    """Send via Gmail SMTP. The 'mixed' outer wraps the visible body
+    (alternative: text + html) and any attachments - the phone Gmail app
+    then treats each attachment as a downloadable file rather than inline
+    content, which is exactly what we want for the PDF report."""
     user = os.environ.get("GMAIL_USER")
     pwd = os.environ.get("GMAIL_APP_PASSWORD")
     to = os.environ.get("DIGEST_TO") or user
     if not user or not pwd:
         raise SystemExit("GMAIL_USER and GMAIL_APP_PASSWORD must be set "
                          "(see /etc/turkey-footfall/digest.env)")
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = user
-    msg["To"] = to
-    msg.attach(MIMEText(text, "plain", "utf-8"))
-    msg.attach(MIMEText(html, "html", "utf-8"))
+
+    outer = MIMEMultipart("mixed")
+    outer["Subject"] = subject
+    outer["From"] = user
+    outer["To"] = to
+
+    body = MIMEMultipart("alternative")
+    body.attach(MIMEText(text, "plain", "utf-8"))
+    body.attach(MIMEText(html, "html", "utf-8"))
+    outer.attach(body)
+
+    for path in attachments or []:
+        try:
+            data = Path(path).read_bytes()
+        except OSError as e:
+            print(f"digest: skipping attachment {path}: {e}")
+            continue
+        part = MIMEBase("application", "pdf")
+        part.set_payload(data)
+        encoders.encode_base64(part)
+        part.add_header("Content-Disposition",
+                        f'attachment; filename="{Path(path).name}"')
+        outer.attach(part)
+
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as s:
         s.login(user, pwd)
-        s.sendmail(user, [to], msg.as_string())
+        s.sendmail(user, [to], outer.as_string())
+
+
+def _build_pdf(now_il: dt.datetime, window_hours: int,
+               events: list[dict], event_groups: list[dict],
+               cam_stats: list[dict], training: dict | None,
+               stale_slots: list[dict], footfall_count: int,
+               out_path: Path) -> Path | None:
+    """Compose the PDF; returns the path or None if reportlab is missing
+    (the plain-text mail still ships in that case, which is the pre-PDF
+    behavior and better than silently dropping the whole run)."""
+    try:
+        from tools import report_pdf
+    except ImportError as e:
+        print(f"digest: reportlab/bidi not available ({e}) - "
+              f"sending text-only mail")
+        return None
+    picks = report_pdf.pick_event_samples(events)
+    snapshots = report_pdf.fetch_snapshots(picks)
+    return report_pdf.compose_pdf(
+        out_path,
+        now_il=now_il, window_hours=window_hours,
+        events_by_kind=event_groups, cam_stats=cam_stats,
+        training=training, stale_slots=stale_slots,
+        snapshots=snapshots, kind_labels=KIND_HE,
+        total_events=len(events), total_samples=footfall_count)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--window-hours", type=int, default=WINDOW_HOURS_DEFAULT)
     ap.add_argument("--dry-run", action="store_true",
-                    help="compose and print; do not send")
+                    help="compose and save the PDF locally; do not send")
+    ap.add_argument("--pdf-out", default=None,
+                    help="destination path for the PDF "
+                         "(default: temp file when sending, "
+                         "./daily_digest.pdf on --dry-run)")
     args = ap.parse_args()
 
     db = _firestore()
     events, footfall, latest, active = fetch_window(db, args.window_hours)
+    groups = aggregate_events(events)
+    cam_stats = footfall_stats(footfall)
+    training = fetch_last_training()
+    stale = stale_from_latest(latest, active_slots=active or None)
+    now_il = _israel_now()
+
     subject, text, html = compose_digest(
-        _israel_now(), args.window_hours,
-        aggregate_events(events), footfall_stats(footfall),
-        fetch_last_training(),
-        stale_from_latest(latest, active_slots=active or None))
+        now_il, args.window_hours, groups, cam_stats, training, stale)
+
+    default_pdf = (Path("./daily_digest.pdf") if args.dry_run
+                   else Path(tempfile.mkdtemp(prefix="digest-"))
+                        / f"konya_report_{now_il.strftime('%Y%m%d_%H%M')}.pdf")
+    pdf_path = Path(args.pdf_out) if args.pdf_out else default_pdf
+    built = _build_pdf(now_il, args.window_hours, events, groups, cam_stats,
+                       training, stale, len(footfall), pdf_path)
 
     if args.dry_run:
         print(f"SUBJECT: {subject}\n\n{text}")
+        if built:
+            print(f"\nPDF: {built.resolve()} "
+                  f"({built.stat().st_size / 1024:.0f} KB)")
         return
-    send_gmail(subject, text, html)
+    send_gmail(subject, text, html,
+               attachments=[built] if built else None)
     print(f"digest sent: {subject} ({len(events)} events, "
-          f"{len(footfall)} samples)")
+          f"{len(footfall)} samples"
+          + (f", PDF {built.stat().st_size // 1024} KB attached"
+             if built else ", text only") + ")")
 
 
 if __name__ == "__main__":
