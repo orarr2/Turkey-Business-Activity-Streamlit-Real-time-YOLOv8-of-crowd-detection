@@ -973,11 +973,18 @@ def _handle_loiter(firebase, alerts: AlertSink | None, slot: dict,
         except Exception as e:
             print(f"  ! loiter snapshot save failed: {e}")
     minutes = loiter["duration_sec"] / 60
+    fh, fw = (frame.shape[:2] if hasattr(frame, "shape") else (0, 0))
     _emit_event(firebase, alerts, {
         "kind": "loiter", "slot": slot["slot_id"], "cam_id": cam_id, "ts": ts,
         "cls": loiter["cls"], "entity_id": loiter["entity_id"],
         "duration_sec": loiter["duration_sec"],
         "snapshot_url": crop_url, "fullframe_url": full_url,
+        # Box coordinates + frame dimensions so the emailed report can draw
+        # a red overlay on the fullframe. Without this the operator sees
+        # "someone loitered in this scene" but has to hunt the person.
+        "box": [float(box.get("x1", 0)), float(box.get("y1", 0)),
+                float(box.get("x2", 0)), float(box.get("y2", 0))],
+        "frame_w": int(fw), "frame_h": int(fh),
     }, title=f"Prolonged presence @ {slot['display_area']}",
        body=(f"{loiter['cls']} #{loiter['entity_id']} stationary "
              f"for {minutes:.0f} min"),
@@ -1112,6 +1119,8 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
                             crop_url, full_url, crop_bytes = _save_returning_visitor(
                                 slot_id, cam_id, ts, r.entity_id, r.sightings,
                                 r.gap_seconds, frame, box, firebase)
+                            fh, fw = (frame.shape[:2]
+                                      if hasattr(frame, "shape") else (0, 0))
                             _emit_event(firebase, alerts, {
                                 "kind": "returning", "slot": slot_id,
                                 "cam_id": cam_id, "ts": ts,
@@ -1121,6 +1130,14 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
                                 "sightings": r.sightings,
                                 "snapshot_url": crop_url,
                                 "fullframe_url": full_url,
+                                # Same overlay data as loiter, so the report
+                                # PDF can circle the returning entity in
+                                # the scene rather than just captioning it.
+                                "box": [float(box.get("x1", 0)),
+                                        float(box.get("y1", 0)),
+                                        float(box.get("x2", 0)),
+                                        float(box.get("y2", 0))],
+                                "frame_w": int(fw), "frame_h": int(fh),
                             }, title=(f"Returning {box.get('cls')} @ "
                                       f"{slot['display_area']}"),
                                body=(f"entity #{r.entity_id} back after "

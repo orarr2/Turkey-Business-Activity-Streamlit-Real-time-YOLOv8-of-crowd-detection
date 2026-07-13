@@ -105,6 +105,43 @@ def test_event_caption_english():
     assert cap2.count(" · ") == 2
 
 
+def test_draw_box_marks_the_image():
+    """The overlay draws a red rectangle at the given coordinates. A
+    downstream reader (PIL) sees red pixels where the box was drawn and
+    none in the untouched center of a grey source image."""
+    pil = pytest.importorskip("PIL.Image")
+    from io import BytesIO
+    im = pil.new("RGB", (400, 300), (128, 128, 128))
+    buf = BytesIO(); im.save(buf, "JPEG", quality=90)
+    src = buf.getvalue()
+
+    out = report_pdf._draw_box_on_frame(
+        src, box=[100, 60, 200, 180], frame_w=400, frame_h=300, cls="person")
+    assert out != src and len(out) > 100
+    marked = pil.open(BytesIO(out))
+    # Sample a pixel exactly on the rectangle border - should be red-ish.
+    r, g, b = marked.getpixel((100, 60))[:3]
+    assert r > 180 and g < 80 and b < 80, f"border pixel not red: ({r},{g},{b})"
+    # Interior of the box stays the original grey (we only outline).
+    r2, g2, b2 = marked.getpixel((150, 120))[:3]
+    assert abs(r2 - 128) < 20 and abs(g2 - 128) < 20
+
+
+def test_draw_box_noop_on_bad_input():
+    """Missing coords or a corrupt image must not raise - the report ships
+    the fullframe as-is when overlay data is unusable."""
+    b = b"not-a-jpeg"
+    assert report_pdf._draw_box_on_frame(b, None, 100, 100) is b
+    assert report_pdf._draw_box_on_frame(b, [0, 0, 10, 10], 0, 100) is b
+    # inverted box (x2 < x1) is rejected before PIL sees it
+    pil = pytest.importorskip("PIL.Image")
+    from io import BytesIO
+    im = pil.new("RGB", (100, 100), (50, 50, 50))
+    buf = BytesIO(); im.save(buf, "JPEG", quality=80)
+    src = buf.getvalue()
+    assert report_pdf._draw_box_on_frame(src, [50, 50, 10, 10], 100, 100) is src
+
+
 def test_pick_group_samples_uses_priority_and_recency():
     """Groups (aggregated by kind+cam) are picked by kind priority, not by
     raw event count - a flood of loiter events at one camera is one row

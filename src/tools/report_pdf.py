@@ -191,6 +191,74 @@ def _shrink_jpeg(data: bytes,
         return data
 
 
+def _draw_box_on_frame(data: bytes, box, frame_w: int, frame_h: int,
+                       cls: str | None = None) -> bytes:
+    """Overlay a red bounding rectangle on the fullframe JPEG so the operator
+    can see WHICH object was flagged - the caption alone gave 'someone
+    loitered somewhere in this plaza'; the box says 'this specific person'.
+
+    ``box`` is [x1, y1, x2, y2] in the same pixel space as ``frame_w x
+    frame_h`` (whatever the collector emitted). We rescale to the actual
+    decoded image size, in case the fullframe was resized between capture
+    and upload. Returns the original bytes when PIL is missing, when the
+    coordinates are unusable, or when any step raises - a labeled image is
+    a nicety, an unlabeled one still ships the report."""
+    if not box or frame_w <= 0 or frame_h <= 0:
+        return data
+    try:
+        x1, y1, x2, y2 = (float(v) for v in box[:4])
+    except (TypeError, ValueError):
+        return data
+    if x2 <= x1 or y2 <= y1:
+        return data
+    try:
+        from PIL import Image as PILImage, ImageDraw, ImageFont
+        im = PILImage.open(BytesIO(data))
+        if im.mode != "RGB":
+            im = im.convert("RGB")
+        w, h = im.size
+        sx = w / float(frame_w)
+        sy = h / float(frame_h)
+        rx1, ry1 = int(max(0, x1 * sx)), int(max(0, y1 * sy))
+        rx2, ry2 = int(min(w - 1, x2 * sx)), int(min(h - 1, y2 * sy))
+        if rx2 <= rx1 or ry2 <= ry1:
+            return data
+        draw = ImageDraw.Draw(im)
+        # Bright red outline, thick enough to stay visible after the
+        # 900px downscale (~3-4px absolute at that width).
+        thickness = max(3, int(0.005 * max(w, h)))
+        for i in range(thickness):
+            draw.rectangle([rx1 - i, ry1 - i, rx2 + i, ry2 + i],
+                           outline=(220, 38, 38))
+        # Class label chip above the box; falls back to no chip if font
+        # loading fails (Debian VMs have DejaVu; dev machines vary).
+        if cls:
+            try:
+                font = ImageFont.truetype(
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
+            except (OSError, IOError):
+                font = ImageFont.load_default()
+            text = str(cls)
+            # Backwards-compat with old PIL: use textlength+getmetrics
+            # instead of textbbox when necessary.
+            try:
+                tw = draw.textlength(text, font=font)
+                th = font.size + 4
+            except AttributeError:
+                tw, th = draw.textsize(text, font=font)
+            pad = 4
+            chip_y0 = max(0, ry1 - th - 2 * pad)
+            draw.rectangle([rx1, chip_y0, rx1 + tw + 2 * pad, chip_y0 + th + 2 * pad],
+                           fill=(220, 38, 38))
+            draw.text((rx1 + pad, chip_y0 + pad), text,
+                      fill=(255, 255, 255), font=font)
+        buf = BytesIO()
+        im.save(buf, "JPEG", quality=PDF_IMAGE_QUALITY)
+        return buf.getvalue()
+    except Exception:
+        return data
+
+
 def fetch_snapshots(picks: list[dict],
                     downloader=_http_bytes,
                     shrink: bool = True) -> list[tuple[dict, bytes]]:
@@ -287,6 +355,18 @@ def fetch_snapshots_for_groups(groups: list[dict],
         if not ff_bytes and cr_bytes:
             ff_bytes = cr_bytes
             cr_bytes = None
+
+        # Draw the red rectangle on the fullframe BEFORE the downscale so
+        # the line-width scales down with the image. When the event does
+        # not carry box coords (pre-v6 collector output), the helper is a
+        # no-op and the fullframe ships as-is.
+        if ff_bytes:
+            ff_bytes = _draw_box_on_frame(
+                ff_bytes,
+                e.get("box"),
+                int(e.get("frame_w") or 0),
+                int(e.get("frame_h") or 0),
+                cls=e.get("cls"))
 
         entry["fullframe_jpeg"] = _shrink_jpeg(ff_bytes) if shrink and ff_bytes else ff_bytes
         entry["crop_jpeg"] = _shrink_jpeg(cr_bytes) if shrink and cr_bytes else cr_bytes
