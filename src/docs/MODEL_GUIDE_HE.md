@@ -13,6 +13,7 @@
 7. [מפת src/tools/ — הכלים בשורת הפקודה](#7-מפת-srctools--הכלים-בשורת-הפקודה)
 8. [מדוע נוצרות "הזיות" ואיך לצמצם אותן](#8-מדוע-נוצרות-הזיות-ואיך-לצמצם-אותן)
 9. [מסלולי שיפור מעשיים](#9-מסלולי-שיפור-מעשיים)
+10. [מה יש בפועל ב-VM — צלילה מלאה](#10-מה-יש-בפועל-ב-vm--צלילה-מלאה)
 
 ---
 
@@ -1146,6 +1147,717 @@ per camera @ imgsz=960:
 ### 9.6 שפר את הגדרות ה-loiter (עלות: 30 דקות, השפעה: בינונית)
 
 הרפים כרגע: person 5 min, vehicle 15 min. במצלמות שראית "אנומליות שווא" — הרם ל-‎person 8 min. גם: שקול הוספת דרישה "‎movement ≤ 40px" (הגבל תזוזה יותר) כדי לפסול הליכה איטית באזור.
+
+---
+
+## 10. מה יש בפועל ב-VM — צלילה מלאה
+
+הסעיפים הקודמים דיברו על ה-VM כ"קופסה שחורה שמריצה את הקוד". הסעיף הזה פותח את הקופסה: מה בדיוק יושב על הדיסק, איזה תהליכים רצים, מה כל אחד עושה שנייה-אחר-שנייה, ואיפה יכולות להיות תקלות. הוא ארוך בכוונה — זה החלק הכי אטום למי שלא בנה את זה.
+
+### 10.1 המכונה עצמה
+
+```
+Provider: Google Cloud Platform (GCP)
+Machine type: e2-micro (Always Free tier)
+CPU: 2 vCPU shared (0.25 vCPU guaranteed, ~1 vCPU burst)
+RAM: 1024 MB total (~950 MB usable after kernel)
+Disk: 30 GB SSD (Standard persistent disk)
+OS: Debian 12 (bookworm)
+Location: us-east1-c (Virginia)
+Public IP: static, one address
+Cost: $0/month (במסלול Always Free — 1 מכונת e2-micro חינם לצמיתות)
+```
+
+**מה חשוב לשים לב:**
+
+> **"‎0.25 vCPU guaranteed"** אומר שברירת המחדל היא רבע ליבה. יש ‎burst עד ~‎1 vCPU כשיש חלון פנוי בשרת המשותף. בפועל אנחנו מקבלים ‎~2 vCPU רוב הזמן, אבל **לא בזמנים עמוסים של GCP** — כל סבב לפעמים לוקח 25% יותר זמן ללא סיבה נראית לעין. זה נורמלי.
+
+> **‏‎1 GB RAM זה מעט מאוד** למודל של ‎‎11.2M פרמטרים ‎+ 4 זרמי HLS פעילים ‎+ OSNet. הוספתי swap של 2 GB לקובץ חלופי כדי לספוג peaks. ‏‎swap הוא איטי אבל טוב יותר מ-OOM kill.
+
+> **הסיבה שבחרנו us-east1-c ולא אזור קרוב לטורקיה:** ‏‎Always Free מוגבל למקומות מסוימים ‏(`us-west1`, `us-central1`, `us-east1`). לזרמים מטורקיה יש RTT של ~150ms, אבל זה לא חשוב לנו — אנחנו לא מנתחים תנועה בזמן אמת, רק דוגמים מדי 40 שניות.
+
+### 10.2 מבנה התיקיות ב-VM
+
+בהתחברות ל-VM (‎`gcloud compute ssh turkey-collector`), זה מה שרואים:
+
+```
+/opt/turkey-footfall/         ← הריפו נמצא כאן, קלון מ-main
+├── src/
+│   ├── app/                  ← כל קבצי הפייתון
+│   ├── tools/                ← כלי CLI
+│   ├── data/
+│   │   ├── reid.db           ← SQLite של OSNet embeddings
+│   │   ├── osnet_x0_25_msmt17.onnx   ← מודל re-ID
+│   │   ├── confidence_boost.json     ← ‎learned per-cam gates
+│   │   ├── blacklist_auto.json       ← polygons של auto-blacklist
+│   │   ├── reviews.json              ← לא רלוונטי ב-VM (עולה מהמחשב שלך)
+│   │   ├── adapters/                 ← ‎head-only artifacts
+│   │   │   ├── current.json          ← מצביע לראש שפעיל
+│   │   │   ├── history.jsonl         ← יומן קידומים/דחיות
+│   │   │   └── head_run7.pt          ← קובץ הראש עצמו
+│   │   └── training_pull/            ← ריק ב-VM (רק ב-Actions)
+│   ├── web/
+│   │   ├── snapshots/                ← המאגר החי — נקודת האמת
+│   │   │   ├── review_frames/        ← פריימים לתיוג (‎LRU 500)
+│   │   │   ├── live_samples/         ← crops לחיפוש (‎LRU 1000)
+│   │   │   ├── entities/             ← ‎per-entity crops (‎LRU 400)
+│   │   │   └── anomalies/            ← צילומים של אנומליות (‎24h TTL)
+│   │   └── firebase-config.js        ← מפתחות ציבוריים של Firebase Web
+│   ├── .venv/                        ← ‎Python virtualenv (‎~2 GB)
+│   └── deploy/gcp-vm/
+│       ├── install.sh                ← סקריפט התקנה
+│       ├── collector.service         ← יחידת systemd של הקולקטור
+│       └── digest.service, digest.timer   ← יחידות של דוח יומי
+├── yolov8s.pt                        ← משקולות הבסיס (‎~22 MB)
+
+/etc/turkey-footfall/            ← קונפיגורציה מוגנת (‎root only)
+├── serviceAccount.json          ← מפתח Firebase Admin SDK (0400)
+└── digest.env                   ← ‎GMAIL_USER + APP_PASSWORD (0600)
+
+/etc/systemd/system/
+├── collector.service            ← ‎symlinked to /opt/turkey-footfall
+├── digest.service               ← ‎symlinked
+└── digest.timer                 ← ‎symlinked
+
+/var/log/journal/                ← יומני systemd של הקולקטור וה-digest
+
+/var/swap                        ← ‎2 GB swap file
+```
+
+**מה חשוב לזכור:**
+
+> **‏‎`/etc/turkey-footfall/`** מוגן ‎`root:root`. הסודות שם. אף אחד מלבד ‎root לא יכול לקרוא. הקולקטור רץ כ-root כדי לקרוא את המפתח, זו סיבה טובה למה הוא רץ כ-root ולא כמשתמש רגיל.
+
+> **‏‎`.venv/` הוא 2 GB.** רוב זה ‎torch ‎(‎~1.2 GB) ו-`ultralytics` (~200 MB). אם תרצה לחסוך זיכרון דיסק, הרץ `pip install --no-cache-dir` — הסקריפט כבר עושה זה. אין דרך למחוק torch — הוא נדרש.
+
+### 10.3 install.sh — התקנה שלב-אחר-שלב
+
+הסקריפט ב-`src/deploy/gcp-vm/install.sh` בנוי להיות **‎idempotent** — אפשר להריץ אותו שוב ושוב ללא נזק. הרצה שנייה = git pull + restart. שלב-אחר-שלב:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail   # יציאה על כל שגיאה
+```
+
+**שלב 1 — התקנת חבילות מערכת:**
+```bash
+apt-get update -qq
+apt-get install -y --no-install-recommends \
+    git python3 python3-venv python3-pip \
+    ffmpeg libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 \
+    ca-certificates curl \
+    fonts-dejavu-core
+```
+- **‏‎`git`** — למשוך את הקוד.
+- **‏‎`python3-venv`** — כדי ליצור סביבה מבודדת.
+- **‏‎`ffmpeg`** — קידוד/פענוח וידאו (‎backend של OpenCV).
+- **‏‎`libgl1`, `libglib2.0-0`, וכו'** — תלויות של ‎`opencv-python-headless`. אפילו ‎headless צריך ‎libGL.
+- **‏‎`fonts-dejavu-core`** — נדרש ל-PDF (‎דוח יומי).
+
+**שלב 2 — קלון של הריפו:**
+```bash
+if [[ -d "${INSTALL_DIR}/.git" ]]; then
+  git -C "${INSTALL_DIR}" fetch --depth 1 origin "${REPO_BRANCH}"
+  git -C "${INSTALL_DIR}" reset --hard "origin/${REPO_BRANCH}"
+else
+  git clone --depth 1 --branch "${REPO_BRANCH}" "${REPO_URL}" "${INSTALL_DIR}"
+fi
+```
+**‏‎`--depth 1`** — shallow clone. חוסך ~50 MB של היסטוריה. אין צורך בהיסטוריה ב-VM.
+
+**‏‎`git reset --hard`** — אם יש קונפליקטים מקומיים, מוחקים. סקריפט הפצה, לא סביבת פיתוח.
+
+**שלב 3 — הכנת virtualenv:**
+```bash
+cd "${INSTALL_DIR}/src"
+python3 -m venv .venv
+export TMPDIR=/var/tmp   # /tmp על tmpfs (RAM); pip צריך מקום אמיתי
+.venv/bin/pip install --no-cache-dir -r requirements.txt
+```
+
+**‏‎`TMPDIR=/var/tmp`** — קריטי. ‏‎`/tmp` על ‎Debian ‎12 הוא ‎tmpfs (‎‎‎RAM). התקנה של ‎torch דורשת פריקת ‎800 MB זמניים — יקרוס את ה-RAM.
+
+**‏‎`--no-cache-dir`** — לא שומר את קבצי ההתקנה. חוסך עוד ‎800 MB.
+
+**שלב 4 — הבאת מפתח Firebase:**
+```bash
+mkdir -p "${CFG_DIR}"
+gcloud secrets versions access latest --secret="${SECRET_NAME}" > "${SA_PATH}"
+chown root:root "${SA_PATH}"
+chmod 0400 "${SA_PATH}"
+```
+- **‏‎`Secret Manager`** של GCP — הדרך הבטוחה לאחסן את המפתח. לא בגיט, לא ב-`.env`.
+- **‏‎`chmod 0400`** — קריאה בלבד לבעלים (‎root). אף אחד אחר לא יכול לקרוא.
+
+**שלב 5 — זיהוי אוטומטי של Storage bucket:**
+```bash
+PROJECT_ID=$(python3 -c "import json; print(json.load(open('${SA_PATH}'))['project_id'])")
+STORAGE_BUCKET=""
+for candidate in "${PROJECT_ID}.firebasestorage.app" "${PROJECT_ID}.appspot.com"; do
+  if gcloud storage buckets describe "gs://${candidate}" >/dev/null 2>&1; then
+    STORAGE_BUCKET="${candidate}"; break
+  fi
+done
+```
+פרויקטים שנוצרו ‎לפני אוקטובר ‎2024 קיבלו ‎bucket בפורמט `<project>.appspot.com`; חדשים יותר קיבלו `<project>.firebasestorage.app`. הסקריפט בודק את שניהם ובוחר את הקיים.
+
+**שלב 6 — התקנת יחידות systemd:**
+```bash
+sed -e "s|__STORAGE_BUCKET__|${STORAGE_BUCKET}|g" \
+    -e "s|__INSTALL_DIR__|${INSTALL_DIR}|g" \
+    -e "s|__SA_PATH__|${SA_PATH}|g" \
+    "${UNIT_SRC}" > "${UNIT_DEST}"
+systemctl daemon-reload
+systemctl enable --now collector.service
+```
+- **‏‎`sed`** ממיר את הפלייסהולדרים ב-`collector.service` לערכים הממשיים.
+- **‏‎`daemon-reload`** — אומר ל-systemd לקרוא את הקבצים החדשים.
+- **‏‎`enable --now`** — מפעיל מיד ‎+ מגדיר להפעלה אוטומטית ב-boot.
+
+### 10.4 collector.service — פירוק שורה-שורה
+
+הקובץ ב-`src/deploy/gcp-vm/collector.service`:
+
+```systemd
+[Unit]
+Description=Turkey Business Activity — footfall collector
+After=network-online.target
+Wants=network-online.target
+```
+
+**‏‎`After=network-online.target`** — לא להתחיל עד שיש רשת. חיוני — הקולקטור נכשל מיד אם אין רשת.
+
+**‏‎`Wants=`** ‎(ולא `Requires=`) — עדיפות רכה. אם הרשת לא עולה, הקולקטור בכל זאת ינסה.
+
+```systemd
+[Service]
+Type=simple
+WorkingDirectory=/opt/turkey-footfall/src
+Environment=PYTHONUNBUFFERED=1
+```
+
+**‏‎`PYTHONUNBUFFERED=1`** — כל `print()` נכתב מיד ל-journal. בלי זה, פייתון מבפר ולוגים מגיעים באיחור של דקות.
+
+```systemd
+Environment=OMP_NUM_THREADS=2
+Environment=MALLOC_ARENA_MAX=2
+```
+כפי שהוסבר בסעיף ‎4.5 — קריטי לזיכרון.
+
+```systemd
+Environment=FIREBASE_CREDENTIALS=/etc/turkey-footfall/serviceAccount.json
+Environment=FIREBASE_STORAGE_BUCKET=turkey-footfall.firebasestorage.app
+Environment=REID_MODEL=/opt/turkey-footfall/src/data/osnet_x0_25_msmt17.onnx
+```
+
+**‏‎`REID_MODEL`** — אם הקובץ קיים, יש OSNet. אם לא, נופלים ל-HSV histogram. הקולקטור לא נופל בלי הקובץ הזה.
+
+```systemd
+ExecStart=/opt/turkey-footfall/src/.venv/bin/python -m app.collector \
+    --interval 40 --imgsz 512 --burst 2 --burst-stride 13
+```
+
+הפרמטרים המוסברים בסעיף 4.
+
+```systemd
+Restart=always
+RestartSec=15
+```
+
+**‏‎`Restart=always`** — אם התהליך נפל מכל סיבה, ‎systemd מפעיל שוב אחרי ‎15 שניות. **חשוב:** ‏‎לא ‎`on-failure` — גם אם התהליך יצא ב-0 (‎‎`sys.exit()`), הוא מופעל שוב. הרעיון: הקולקטור לעולם לא צריך להיעצר לבד.
+
+```systemd
+MemoryHigh=760M
+MemoryMax=900M
+```
+
+הגבלות ‎cgroup:
+- **‏‎`MemoryHigh=760M`** — הגעה לזה גורמת לקרנל להאט את הקצאת הזיכרון (‎`memory pressure`).
+- **‏‎`MemoryMax=900M`** — הגעה לזה = OOM kill. שים לב שזה הרבה פחות מ-1024 MB של המכונה — 100 MB buffer לקרנל וסקריפטים אחרים.
+
+```systemd
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**‏‎`journal`** — הכל הולך ל-`journalctl`. אפשר לצפות בזמן אמת עם `journalctl -u collector -f`.
+
+**‏‎`multi-user.target`** — הפעלה ב-boot רגיל (לא recovery mode).
+
+### 10.5 digest.service + digest.timer
+
+הזוג הזה מפעיל את הדוח היומי פעמיים ביום. **‏‎`digest.service`** הוא `Type=oneshot` — רץ פעם אחת, מסתיים, לא רץ שוב עד שה-timer מפעיל אותו.
+
+`digest.timer`:
+```systemd
+[Timer]
+OnCalendar=*-*-* 12:00:00 Asia/Jerusalem
+OnCalendar=*-*-* 20:00:00 Asia/Jerusalem
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+**‏‎`OnCalendar` × 2** — שתי שעות שיריצו את השירות.
+
+**‏‎`Persistent=true`** — אם ה-VM היה כבוי בשעת ה-fire הצפויה (למשל rebooot לתחזוקה), הריצה תבוצע מיד כשהוא חוזר. חסכה לי כמה דוחות מפוספסים.
+
+**‏‎`Asia/Jerusalem`** — ‏‎systemd מטפל בעצמו בשעון קיץ. לא צריך לשנות שום דבר פעמיים בשנה.
+
+**איך לבדוק שהטיימר חמוש:**
+```bash
+systemctl list-timers digest.timer --no-pager
+# NEXT: Mon 2026-07-14 12:00:00 IDT
+# LAST: Mon 2026-07-14 08:00:00 IDT   (16 hours ago)
+```
+
+### 10.6 main() של הקולקטור — נקודת הכניסה
+
+```python
+# app/collector.py, בערך שורה 1500
+def main():
+    args = _parse_args()
+    firebase = FirebaseStore()   # קורא את FIREBASE_CREDENTIALS
+    model = load_model()          # yolov8s + adapter overlay אם קיים
+    reid = ReidStore() if REID_MODEL else None
+    trackers = _init_trackers()   # לכל מצלמה: rolling window
+    profile = HourlyProfile()     # פרופיל שעות פעילות
+    presence = PresenceTracker()  # לזיהוי loitering
+    alerts = AlertSink() if not args.no_alerts else None
+    
+    print("Restoring analysis state from Firestore...")
+    _restore_state(firebase, trackers, profile, ...)
+    firebase.write_grid_config(...)
+    
+    print(f"Collector started. {len(GRID_SLOTS)} slot(s):")
+    # מדפיס תחזית מכסת Firestore
+    # ...
+    
+    while True:  # הלולאה הראשית
+        ...
+```
+
+**שלבי אתחול (‎לפני הלולאה הראשית):**
+
+1. **קריאת ארגומנטים** ‎(`--interval`, ‎`--imgsz`, וכו').
+2. **‏‎`FirebaseStore()`** — טוען את ה-`serviceAccount.json`, מאמת מול Google.
+3. **‏‎`load_model()`** — טוען את `yolov8s.pt`. אם יש `data/adapters/current.json`, מכסה את משקולות ה-Detect head במשקולות מהראש המקודם.
+4. **‏‎`ReidStore()`** — פותח את `data/reid.db` (SQLite), טוען את OSNet.
+5. **‏‎`_restore_state`** — קורא את מצב האנומליות מ-Firestore ‏(‎`config/analysis_state`). אם היה restart, לא מאבדים את החלון הגלגול.
+6. **‏‎`write_grid_config`** — כותב את מצב 4 המצלמות ל-`config/grid` כדי שהדשבורד ידע איזו מצלמה בכל slot.
+
+**חשוב לשים לב:**
+
+> **‏‎`_restore_state`** מבטיח שאחרי restart, החישוב הרובוסטי ‎(‎median + MAD) של אנומליות ממשיך מאיפה שנעצר. בלי זה, כל restart היה גורם ל"אנומליות שווא" ב-‎12 הדגימות הראשונות עד שהחלון הגלגול מתמלא שוב.
+
+> **הודעת המזל שהקולקטור מדפיס בסטארט:** ‎`~19,008 Firestore writes/day projected (free tier ~20,000).`. זה הצ'ק שלנו — מתחת ל-‎20K. אם השורה מראה מספר גבוה יותר, הצוואר בקבוק לא רחוק.
+
+### 10.7 הלולאה הראשית — סבב-אחר-סבב
+
+הלולאה בערך משורה 1677 של `collector.py`:
+
+```python
+_REVIEW_RELOAD_EVERY_ROUNDS = 10
+_STATIC_LEARN_EVERY_ROUNDS = 90
+_ADAPTER_CHECK_EVERY_ROUNDS = 30
+_round_counter = 0
+
+while True:
+    round_start = time.time()
+    _round_counter += 1
+    
+    # (1) טעינה מחדש של overrides — כל 10 סבבים
+    if _round_counter % _REVIEW_RELOAD_EVERY_ROUNDS == 0:
+        reload_review_overrides()   # קריאה מחדש של confidence_boost.json, blacklist_auto.json
+    
+    # (2) בדיקת ראש מקודם חדש — כל 30 סבבים (‎~20 דקות)
+    if _round_counter % _ADAPTER_CHECK_EVERY_ROUNDS == 0:
+        fetched = adapters.refresh_from_storage(firebase.storage)
+        if fetched:
+            n = adapters.apply_current(model)
+            print(f"  * adapter: hot-loaded {fetched} ({n} head tensors)")
+    
+    # (3) למידת mishaps סטטיים — כל 90 סבבים (‎~1 שעה)
+    if _round_counter % _STATIC_LEARN_EVERY_ROUNDS == 0:
+        added = learn_from_positions(...)   # אם המודל מסמן אותו pixel range שוב ושוב → auto-blacklist
+    
+    # (4) הליבה — לכל אחד מ-4 המצלמות
+    for slot in GRID_SLOTS:
+        picker = pickers[slot["slot_id"]]
+        cam_id = picker.current_cam()
+        ok = sample_slot(model, slot, cam_id, firebase, reid=reid, ...)
+        changed = picker.record_result(ok)
+        if changed is not None:
+            firebase.write_grid_config(...)   # ‎fallback: primary נפל, עברנו ל-fallback
+    
+    # (5) העלאת pool ל-Storage
+    stats = pool_sync.sync_up(firebase, snapshots_root, reid_db_path)
+    
+    # (6) שמירת פרופילי שעות — כל 15 דקות
+    if time.time() - last_profile_save >= profile_save_s:
+        _persist_profiles()
+        last_profile_save = time.time()
+    
+    # (7) גיזום re-ID — כל 6 שעות
+    if time.time() - last_reid_prune >= reid_prune_s:
+        reid.prune_stale(older_than_hours=48)
+        last_reid_prune = time.time()
+    
+    # (8) המתנה עד לסבב הבא
+    elapsed = time.time() - round_start
+    if elapsed < args.interval:
+        time.sleep(args.interval - elapsed)
+```
+
+**דברים חשובים שכדאי לשים לב:**
+
+> **הפעולות התזמניות (‎`_round_counter % N == 0`) הן עדינות** — הן לא נכנסות ל-critical path של דגימת המצלמות. הן רצות **לפני** ה-`for slot in GRID_SLOTS`, אז אם משהו נכשל בהן — הקולקטור עדיין דוגם.
+
+> **‏‎`sync_up`** ב-(5) הוא ‎incremental. אם לא היה שינוי מקומי, הוא רק משווה dict — משנייה עולה מעט. רק כשיש קבצים חדשים הוא מעלה.
+
+> **‏‎`_persist_profiles`** שומר את חלון האנומליות ל-Firestore. אם ה-VM ייעצר או ריסטרט, הריסטור ב-`_restore_state` יקרא את זה חזרה.
+
+> **‏‎`reid.prune_stale(48h)`** מוחק entities שלא נראו 48 שעות. חשוב — בלי זה מסד ה-SQLite יגדל בלי גבול.
+
+### 10.8 sample_slot — צלילה למצלמה בודדת
+
+זה החלק הכי דחוס. מתחיל בערך שורה 989:
+
+```python
+def sample_slot(model, slot, cam_id, firebase, reid, conf, ...):
+    cam = CAMERAS[cam_id]
+    
+    # (1) הבאת burst
+    frames = grab_burst(cam["url"], n=burst, stride=burst_stride)
+    if not frames:
+        return False   # ‎picker יזכור, אחרי X כישלונות יעבור ל-fallback
+    
+    # (2) לילה?
+    luma = mean_gray(frames[0])
+    night = is_night(luma, now_utc)  # שעון-מבוסס
+    
+    # (3) YOLO על כל פריים ב-burst
+    gates = dict(cam.get("per_class_conf") or DEFAULT_PER_CLASS_CONF)
+    if night:
+        gates = night_adjusted_conf(gates)  # ‎+0.08 לכל class
+    
+    counts, boxes, frame, burst_dbg = detect_burst(
+        model, frames, per_class_conf=gates, burst_stride=burst_stride)
+    
+    # (4) speed estimation
+    speeds = burst_dbg.pop("speeds", None)
+    
+    # (5) re-ID
+    if reid:
+        results = reid.update_from_frame(cam_id, frame, boxes)
+        new_ids = [r.entity_id for r in results if r.is_new]
+        seen_again = [r.entity_id for r in results if not r.is_new]
+    
+    # (6) אנומליות סצנה (‎`extreme_load`, `camera_obstructed`, `camera_dark`)
+    scene = check_scene_anomalies(cam_id, counts, boxes, frame.shape, luma)
+    
+    # (7) loitering ‎+ returning
+    for r in reid_results:
+        if r.sightings >= 3:
+            entity_gallery.save_sighting(...)   # לגלריה
+        if presence.observe(...):
+            _handle_loiter(...)   # ‎emit event
+        if r.is_returning():
+            _handle_returning(...)  # ‎emit event
+    
+    # (8) כתיבה ל-Firestore
+    record = {"ts": ts, "cam_id": cam_id, "cam_name": cam["name"],
+              "person": counts["person"], "vehicles": counts["vehicles"],
+              "counts": counts, "ok": ok,
+              "new_entities": len(new_ids), "seen_entities": len(seen_again),
+              "is_anomaly": bool(scene)}
+    if speeds:
+        record["speeds"] = summarize_speeds(speeds)
+    firebase.write(slot["slot_id"], record)
+    
+    return True
+```
+
+**מה חשוב שיהיה ברור:**
+
+> **הסדר של השלבים משנה!** ‏‎(3) YOLO **חייב לבוא לפני** (4) speed ולפני (5) re-ID. ‏‎speed צריך תיבות; re-ID צריך תיבות; שניהם דורשים את הפלט של YOLO.
+
+> **‏‎`night_adjusted_conf`** ב-(3) הוא הגנה מיצירתית: בלילה יש יותר רעש (‎מצלמות משפרות ISO, יש הרבה sensor noise). מרים את כל הרפים ב-0.08 כדי לקבל פחות FPs. הפסד: כמה true positives נופלים. איזון נכון.
+
+> **‏‎`(8) firebase.write`** הוא כתיבה **אחת** ל-Firestore לכל סבב. עם 4 מצלמות = 4 writes/round. אם round הוא 40s → 8,640 writes/day = בטוח מתחת ל-20K.
+
+### 10.9 מודל הזיכרון — cgroups, malloc, swap
+
+זה החלק שהפיל אותנו פעמיים לפני שהתייצב.
+
+**cgroup limits מ-`collector.service`:**
+- **‏‎`MemoryHigh=760M`** — כשהתהליך חוצה, קרנל מפעיל ‎memory pressure. ההקצאות הופכות איטיות, יותר עבודה עוברת ל-swap.
+- **‏‎`MemoryMax=900M`** — כשהתהליך חוצה, OOM kill. ‏‎systemd מפעיל שוב אחרי 15 שניות.
+
+**מדוע דווקא 900MB ולא ‎‎1000MB?** ‏‎למה שנשאר ‎`~50MB` בערך. הקרנל של Debian לוקח קצת (‎‎‎`vm.min_free_kbytes ≈ 40MB`), יש `journald` שרץ, יש ‎`gcloud agent` — הם צריכים לחיות.
+
+**malloc arenas — הבעיה השקטה:**
+
+‏‎glibc יוצר ‎arena אחד לכל thread. כל arena לוקח 32-64MB של virtual memory (RSS מעל 20MB כשמתמלאים). ‏‎torch יוצר ~8 threads → 8 arenas → ‎160MB בזבוז מרגע ההפעלה.
+
+**התיקון:** ‏‎`MALLOC_ARENA_MAX=2` — מגביל ל-2 arenas. RSS יורד ב-100MB לפחות. **זה מה שהציל אותנו מ-oom-kill loop.**
+
+**‏‎swap file:**
+
+הוספתי ב-VM:
+```bash
+sudo fallocate -l 2G /var/swap
+sudo chmod 600 /var/swap
+sudo mkswap /var/swap
+sudo swapon /var/swap
+# הוספתי גם ל-/etc/fstab לצורך persist
+```
+
+**‏‎`2GB swap` על ‎1GB RAM זה יחס גדול** — הרעיון: לספוג peaks נדירים. הקולקטור **לא** צריך להשתמש ב-swap בשגרה (swap איטי פי 100 מ-RAM). אם רואים ‎swap הרבה בשימוש (`free -h`), הבעיה עמוקה יותר.
+
+**חשוב לזכור:**
+
+> **‏‎`journalctl -u collector | grep "oom-killed"`** — אם רואים את זה, ‎OOM חזר. או שהוספתי מצלמה חמישית ולא שיניתי פרמטרים, או שהראש המקודם גדול מהצפוי.
+
+> **‏‎`free -h`** ב-SSH נותן תמונת מצב מיידית. אם ‎`used > 950MB` באופן קבוע — במצוקה. אם ‎`Swap used` > ‎0 — הקולקטור נגע ב-swap.
+
+### 10.10 הרשת — HLS decoding + iter_frames
+
+מצלמות tvkur לא עובדות עם `cv2.VideoCapture(url)` הרגיל. הסיבה: הן דורשות ‎`Referer` ו-`Origin` headers, ו-OpenCV לא מאפשר להעביר headers.
+
+**הפתרון: `iter_frames` ב-`app/detect_core.py`:**
+```python
+def iter_frames(stream_url, max_frames=1):
+    # HTTP GET של ה-master playlist עם headers מותאמים
+    playlist = requests.get(stream_url, headers=BROWSER_HEADERS).text
+    # פרסינג של m3u8 → רשימת segments
+    segments = _parse_m3u8(playlist)
+    # הורדת segments כ-bytes
+    for seg_url in segments[-3:]:  # 3 האחרונים
+        seg_bytes = requests.get(seg_url, headers=BROWSER_HEADERS).content
+        # פענוח מקומי עם ffmpeg → פריימים
+        frames = _decode_h264_bytes(seg_bytes)
+        for f in frames:
+            yield f
+```
+
+**זרימת עבודה:**
+
+1. **‏‎`GET` על ה-playlist** — `.m3u8` הוא קובץ טקסט שמפרט segments. תפוגה ~30 שניות.
+2. **‏‎‏parsing** — שלושת ה-segments האחרונים = 30 השניות הכי עדכניות.
+3. **‏‎`GET` על segments** — כל אחד ~1MB, מכיל ~5 שניות של HD בקידוד H.264.
+4. **פענוח מקומי** — ‎`ffmpeg` מקבל את ה-bytes, מחזיר frames כ-numpy arrays.
+5. **`yield`** — generator, חוסך זיכרון.
+
+**מה חשוב לזכור:**
+
+> **‏‎`BROWSER_HEADERS`** ‏(‎ב-‎`detect_core.py`) מגדירים ‎`User-Agent`, ‎`Referer=https://tvkur.com/`, ‎`Origin=https://tvkur.com`. בלי זה, tvkur מחזיר 403. הם שינו את המדיניות שלהם פעמיים בזמן החיים של הפרויקט — אם הזרם נפל, בדוק אם צריך לעדכן.
+
+> **הטעימות של resolution:** ‏‎`_pick_variant` בוחר את הגרסה הכי קרובה ל-‎`imgsz` אבל לא נמוך יותר. אם הפריים המקורי הוא 1080p וה-imgsz שלנו 512 — נבחר את הגרסה של 720p ‏(‎‎`~1.5x`) כדי לא לפתוח 1080p בכלל. חוסך ‎H.264 decode של ‎~50%.
+
+### 10.11 Firestore — מבנה ומכסה
+
+**הקולקציות שהקולקטור כותב אליהן:**
+
+| קולקציה | מה יש שם | קצב כתיבה |
+|---|---|---|
+| `footfall` | דגימות היסטוריות של ספירות ‎+ עוצמות ‎+ אנומליות ‎(‎‎`is_anomaly`) | 4 מצלמות/סבב = ~‎8,640/day |
+| `latest` | דוגמה **אחת בלבד** לכל מצלמה — הכי חדשה. `set` (‎לא `add`) | 4 מצלמות/סבב = ~‎8,640/day |
+| `events` | אירועים תפעוליים (loiter, returning, obstructed, וכו') | ‎5-30/day בממוצע |
+| `reid_stats` | סטטיסטיקות re-ID ‏(entities, sightings) | ‎4 מצלמות / **5 סבבים** = ‎‎1,728/day |
+| `config` | ‎`grid` (מצלמות פעילות), ‎`analysis_state` (‎checkpoint) | ‎‎~4/day |
+
+**סה"כ:** ‎~19,000 writes/day.
+
+**‏‎`Firestore Spark plan` (‎חינם):** ‎‎20,000 writes/day, 50,000 reads/day, 1 GiB storage.
+
+**איך שומרים מרחוק מהרף:**
+
+- **‏‎`REID_STATS_EVERY_ROUNDS = 5`** — כותבים סטטיסטיקות re-ID רק כל 5 סבבים. חוסך ‎6,912 writes/day. **זה מה שמכניס אותנו מתחת ל-20K.**
+- **‏‎`footfall`** משתמש ב-‎`add()` (מוסיף) ולא ב-`set()`, כי כל דגימה חדשה = מסמך חדש. ‏‎TTL של 24 שעות (‎דרך שדה `expire_at`) מגביל את סה"כ הדוקומנטים לכ-‎‎‎34,560 (‎‎4 cams × 8,640/day).
+- **‏‎`latest`** משתמש ב-`set()` על מסמך קבוע — 1 מסמך למצלמה. **תמיד** יש בדיוק 4 מסמכים בקולקציה הזו.
+- **‏‎`events`** נדיר. ‎5-30 ביום.
+
+**מה חשוב שיהיה ברור:**
+
+> **‏‎`is_anomaly=True`** ב-`footfall` הוא **לא** אירוע ב-`events`. שני מאגרים שונים לקטגוריות שונות. הדשבורד קורא מ-`events` להצגה, ומ-`footfall` לגרף.
+
+> **‏‎`Firestore quotas` הן פר-דקה** ‏(‎‎‎`50,000 reads/day`, אבל גם ‎`10,000 reads/minute`). אם הדשבורד עולה על ‎10K reads בבת אחת — יש throttle. הדשבורד שלנו קורא רק מה שצריך (‎onSnapshot listeners עם where clauses), אז זה לא קרה.
+
+### 10.12 Firebase Storage — מבנה הבאקט
+
+באקט: `turkey-footfall.firebasestorage.app`.
+
+**מבנה:**
+
+```
+gs://turkey-footfall.firebasestorage.app/
+├── snapshots/                          ← 24h TTL (lifecycle rule)
+│   ├── anomalies/{slot_id}/{ts}.jpg
+│   ├── anomalies/{slot_id}/{ts}_annotated.jpg
+│   ├── returning/{slot_id}/eid{N}_seen{K}_{ts}.jpg
+│   ├── returning/{slot_id}/eid{N}_seen{K}_{ts}_full.jpg
+│   └── events/loiter/{slot_id}/loiter_eid{N}_{ts}.jpg
+├── review_sync/                        ← אין TTL — מאגר קבוע
+│   ├── manifest.json                   ← אינדקס של כל הקבצים ב-review_sync
+│   ├── review_frames/{cam_id}/{ts_us}.jpg + .json
+│   ├── live_samples/{cam_id}/{ts_us}.jpg
+│   ├── entities/{cam_id}/{entity_id}/{ts_us}.jpg
+│   └── reid.db                         ← ‎compact snapshot של SQLite
+└── training/                           ← מאגר הענן של האימון
+    ├── reviews.json                    ← ‎uploads מהדשבורד המקומי
+    ├── snapshots/review_frames/...     ← פריימים מתויגים
+    ├── adapter_current.json            ← מצביע לראש הפעיל
+    ├── history.jsonl                   ← יומן קידומים/דחיות
+    └── adapters/head_run{N}.pt         ← קבצי הראש עצמם
+```
+
+**חוקי lifecycle:**
+
+- **‏‎`snapshots/`** נמחק אחרי ‎24 שעות. חוסך storage. הדוחות/הדשבורד מציגים אותם עד לתפוגה.
+- **‏‎`review_sync/`** נשאר לצמיתות. LRU-מנוהל על ידי הקולקטור עצמו (`pool_sync.py`).
+- **‏‎`training/`** נשאר לצמיתות. גדל עם הזמן.
+
+**מה חשוב לשים לב:**
+
+> **‏‎`manifest.json` הוא הקובץ הכי חשוב.** הוא dict של כל הקבצים ב-`review_sync/` עם `mtime` ו-`url` של כל אחד. הדשבורד המקומי מוריד אותו וסונכרן משם. אם ה-manifest נשבר — הדשבורד לא רואה כלום.
+
+> **‏‎`cache_control="no-store"`** על ה-manifest ועל `reid.db`. בלי זה, ‎GCS CDN מגיש גרסה מיושנת עד שעה — הבעיה שגילינו חי.
+
+> **הבאקט כולו public-read.** לא ‎`private`. בגלל שהקבצים מתאימים לצפייה מהדשבורד המקומי דרך HTTP רגיל. הדשבורד לא צריך מפתח.
+
+### 10.13 Hot-swap של Detect head — איך זה בפועל עובד
+
+זה מהלך עדין. כל ‎30 סבבים (‎‎‎~20 דקות):
+
+```python
+# ב-collector.py, סעיף ‎10.7 (2)
+fetched = adapters.refresh_from_storage(firebase.storage)
+if fetched:
+    n = adapters.apply_current(model)
+    print(f"  * adapter: hot-loaded {fetched} ({n} head tensors)")
+```
+
+**מה קורה בפועל:**
+
+1. **‏‎`refresh_from_storage`** מוריד את `training/adapter_current.json` ‏(‎‎‎`~200 bytes`).
+2. משווה עם `data/adapters/current.json` המקומי. אם השם זהה — מחזיר `None`.
+3. אם שונה — מוריד את קובץ הראש `training/adapters/head_run{N}.pt` (~‎5MB).
+4. שומר מקומית ל-`data/adapters/head_run{N}.pt`.
+5. מעדכן את `data/adapters/current.json` המקומי.
+
+**אחר כך `apply_current`:**
+
+1. קורא את `data/adapters/current.json`.
+2. טוען את הקובץ .pt (רק tensors של הראש, ~‎4-6 MB).
+3. **‏‎`model.model.load_state_dict(head_tensors, strict=False)`** — מחליף את הראש **‎in-place** במודל הפעיל.
+4. **אין restart, אין reload של השאר, אין spike ב-RAM.**
+
+**חשוב שיהיה ברור:**
+
+> **הפעלה של ‎`load_state_dict(strict=False)` באמצע לולאה חיה** — כן, זה בטוח. הקולקטור לא נמצא ב-`.predict()` בזמן הזה (הוא בין סבבים). ה-tensors הישנים משוחררים (‎‎`refcount=0`), החדשים מוקצים. **הצריכה תישאר זהה** — אותו גודל מודל.
+
+> **‏‎`ADAPTERS_DISABLE=1`** — משתנה סביבה שאם מוגדר, מתעלמים מכל ראש מקודם. הצלה חירום אם ראש חדש מקרים דיוק (‎‎rollback רך).
+
+### 10.14 יומנים ודיבוג — SSH ‎+ journalctl
+
+**התחברות ל-VM:**
+```bash
+gcloud compute ssh turkey-collector --zone=us-east1-c
+```
+
+**יומן הקולקטור בזמן אמת:**
+```bash
+sudo journalctl -u collector -f
+```
+
+**יומן ה-digest (‎דוחות):**
+```bash
+sudo journalctl -u digest -n 20
+```
+
+**סטטוס:**
+```bash
+sudo systemctl status collector.service
+# יראה: active (running), memory usage, uptime, last log lines
+```
+
+**‏‎restart ידני:**
+```bash
+sudo systemctl restart collector
+```
+
+**‏‎disable זמני (למשל לתחזוקה):**
+```bash
+sudo systemctl stop collector
+# ...לעשות מה שצריך...
+sudo systemctl start collector
+```
+
+**חיפוש OOM kills בעבר:**
+```bash
+sudo journalctl -u collector --since "1 week ago" | grep -i "oom\|killed"
+```
+
+**זיכרון בזמן אמת:**
+```bash
+free -h
+# יראה: total 1.0G, used, available, swap
+```
+
+**דיסק:**
+```bash
+df -h /
+# יראה: 30GB total, used (בטוח ‎<10GB)
+```
+
+### 10.15 Billing kill-switch
+
+יש cloud function שכתבתי לתסריט חירום. הרעיון: אם GCP billing עולה מעל 0.10$ — ניצול חורג — הפונקציה **מפסיקה את הבילינג ומכבה כל שירות**. שיריון נגד תאונות.
+
+**איך זה עובד:**
+
+1. GCP Billing שולח alerts ל-Pub/Sub topic על שינויי חיוב.
+2. הפונקציה `disable_billing` מאזינה ל-topic.
+3. אם הודעה על ‎`cost > threshold`, קוראת ל-Cloud Billing API עם `unlink_project_from_billing_account`.
+4. GCP מכבה מיד את כל השירותים במסלול משלמים.
+5. VM נעצר (אבל לא נמחק).
+
+**איך להפעיל מחדש:**
+
+בעצמך, ידנית. הפונקציה לא יכולה להחזיר לבד — הזה בכוונה.
+
+**קובץ:** `src/deploy/gcp-billing-killswitch/`. פרטים מלאים ב-`README.md` שם.
+
+**מה חשוב לזכור:**
+
+> **הכפתור הזה לא נלחץ במהלך הפרויקט.** אבל טוב שהוא שם — הפרויקט רץ במסלול ‎Always Free, ובסה"כ נשלם רק אם חורגים ממנו במקרה של קונפיגורציה שגויה.
+
+### 10.16 שגרות ריקוברי
+
+**מקרים ידועים:**
+
+| מקרה | סימפטום | טיפול אוטומטי | טיפול ידני |
+|---|---|---|---|
+| **OOM kill** | ‎`journalctl` מראה ‎`Killed`, RSS ~900MB | ‎`Restart=always` ‎+ 15s | להוריד `--imgsz` או להסיר מצלמה |
+| **‏‎Stream drop** | ‎`grab_frame` מחזיר `None` | ‎`picker` מדלג ל-fallback אחרי X כישלונות | לבדוק ‎`tvkur.com` — לפעמים down |
+| **‏‎Firestore quota exceeded** | ‎‎`write_error 429` | לא — הקולקטור לא ידע לעצור | ‎`stop collector` עד למחר |
+| **‏‎Reboot של GCP** | ‎VM כבוי לכמה דקות | ‎VM חוזר, ‎`enable=on-boot` מפעיל את הקולקטור | לא נדרש |
+| **‏‎Adapter רע** | דיוק נופל מיד אחרי hot-load | לא | ‎`export ADAPTERS_DISABLE=1` ‎+ restart, או ‎`rollback` דרך `promote_adapter --rollback` |
+| **‏‎`reid.db` corrupt** | ‎`SQLite disk image is malformed` | לא | ‎`rm data/reid.db && restart` — יתחיל מחדש |
+| **‏‎disk full** (יומן ‎`No space left on device`) | קולקטור נכשל בכתיבה | לא | ‎`sudo journalctl --vacuum-size=100M` |
+
+**‏‎Rules of thumb לתקינות:**
+
+> **אם `journalctl -u collector -f` מראה סבב תוך ‎40-60 שניות ורק הודעות `*` פה ושם** — הכל בסדר. אם כל ריצה לוקחת ‎‎‎90+ שניות, יש בעיה (רשת איטית או ‎swap).
+
+> **אם ‎`free -h`** מראה ‎`used > 850MB` באופן קבוע — קרוב ל-cgroup limit. יעצור בקרוב.
+
+> **אם ‎`df -h /`** מראה ‎`>‎75%` בשימוש — הזמן לפינוי (`journalctl --vacuum-size=100M`).
 
 ---
 
