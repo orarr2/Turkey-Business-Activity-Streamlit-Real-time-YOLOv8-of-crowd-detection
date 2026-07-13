@@ -153,12 +153,19 @@ def find_first_sighting(bucket_name: str, cam_id: str, entity_id,
 
 def _http_bytes(url: str, timeout: float = IMAGE_DOWNLOAD_TIMEOUT_S
                 ) -> bytes | None:
+    """Fetch a JPEG. The lower bound was 1024 bytes originally to reject
+    broken/empty responses, but valid crops of small subjects (a distant
+    person, an entity-gallery portrait) come in around 800-1000 bytes
+    JPEG-encoded - a real loiter-person crop at 971 bytes was being
+    silently dropped, leaving the evidence card with only the fullframe.
+    256 bytes still guards against zero-byte / html-error payloads while
+    accepting every real JPEG the collector produces."""
     import urllib.request
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "digest/2"})
         with urllib.request.urlopen(req, timeout=timeout) as r:
             data = r.read()
-        return data if 1024 < len(data) < MAX_IMAGE_BYTES else None
+        return data if 256 < len(data) < MAX_IMAGE_BYTES else None
     except Exception:
         return None
 
