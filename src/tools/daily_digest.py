@@ -63,19 +63,27 @@ def _israel_now() -> dt.datetime:
 # ---- pure compose helpers (unit-tested, no I/O) -----------------------------
 
 def aggregate_events(events: list[dict]) -> list[dict]:
-    """(kind, camera) -> {label, cam, count, last_ts}, newest group first."""
+    """(kind, camera) -> {ref, label, cam, count, last_ts, latest_event},
+    newest group first. `ref` is a 1-based row number the report uses to
+    pair the aggregated row with the specific snapshot pulled for it -
+    without the ref, the operator has to eyeball the caption to figure
+    out which table row an image belongs to."""
     groups: dict[tuple, dict] = {}
     for e in events:
         kind = str(e.get("kind") or "?")
         cam = str(e.get("cam_name") or e.get("cam_id") or e.get("slot") or "?")
         g = groups.setdefault((kind, cam), {
             "kind": kind, "label": KIND_LABELS.get(kind, kind), "cam": cam,
-            "count": 0, "last_ts": ""})
+            "count": 0, "last_ts": "", "latest_event": None})
         g["count"] += 1
         ts = str(e.get("ts") or "")
         if ts > g["last_ts"]:
             g["last_ts"] = ts
-    return sorted(groups.values(), key=lambda g: g["last_ts"], reverse=True)
+            g["latest_event"] = e
+    out = sorted(groups.values(), key=lambda g: g["last_ts"], reverse=True)
+    for i, g in enumerate(out, start=1):
+        g["ref"] = i
+    return out
 
 
 def footfall_stats(records: list[dict]) -> list[dict]:
@@ -123,9 +131,46 @@ def _fmt_ts(ts_iso: str) -> str:
         return str(ts_iso)[:16]
 
 
+def _training_lines(training: dict | None,
+                    reviews: dict | None) -> list[str]:
+    """One or two friendly sentences summarizing where the learning loop
+    stands. The old phrasing ('rejected at gate - head_run2.pt') read as
+    'the model is broken' - it isn't; the gate did its job on a tiny
+    dataset. Frame it as 'here's how many labels you have, here's what
+    the trainer did with them'."""
+    lines: list[str] = []
+    r = reviews or {}
+    if r.get("frames_labeled"):
+        stats = (f"You have labeled {r['frames_labeled']} frames "
+                 f"({r.get('boxes_confirmed', 0)} confirmed, "
+                 f"{r.get('boxes_rejected', 0)} rejected, "
+                 f"{r.get('missed_marked', 0)} objects you added).")
+        lines.append(stats)
+    else:
+        lines.append("No frames labeled yet - open the Reinforcement "
+                     "Learning tab in the dashboard and start tagging.")
+    if training:
+        when = str(training.get("at") or "")[:10]
+        cand = training.get("candidate") or training.get("file") or "?"
+        if training.get("promoted"):
+            lines.append(f"Cloud training on {when} promoted a new "
+                         f"detection head ({cand}). The VM has already "
+                         f"picked it up.")
+        else:
+            lines.append(f"Cloud training on {when} did not improve on the "
+                         f"baseline yet ({cand}). More diverse labels will "
+                         f"give the next run something new to learn from.")
+    else:
+        lines.append("No cloud training run has executed yet. Trigger "
+                     "'train-head' in the GitHub Actions tab once you have "
+                     "20+ labeled frames.")
+    return lines
+
+
 def compose_digest(now_il: dt.datetime, window_hours: int,
                    event_groups: list[dict], cam_stats: list[dict],
-                   training: dict | None, stale_slots: list[dict]
+                   training: dict | None, stale_slots: list[dict],
+                   reviews: dict | None = None,
                    ) -> tuple[str, str, str]:
     """Returns (subject, plain_text, html). English throughout, phone-first."""
     part = "Midday report" if now_il.hour < 16 else "Evening report"
@@ -194,20 +239,9 @@ def compose_digest(now_il: dt.datetime, window_hours: int,
 
     lines.append("Learning:")
     html.append("<h3 style='margin:14px 0 6px'>Learning</h3>")
-    if training:
-        verdict = "PROMOTED new head" if training.get("promoted") else "rejected at gate"
-        cand = training.get("candidate") or training.get("file") or "?"
-        t = (f"Last training run ({str(training.get('at') or '')[:10]}): "
-             f"{verdict} - {cand}")
-        reasons = training.get("reasons") or []
-        lines.append("  " + t)
-        html.append(f"<p>{t}</p>")
-        for r in reasons[:2]:
-            lines.append(f"    {r}")
-            html.append(f"<p style='color:#666;margin:2px 0'>{r}</p>")
-    else:
-        lines.append("  No training run has executed yet.")
-        html.append("<p>No training run has executed yet.</p>")
+    for line in _training_lines(training, reviews):
+        lines.append("  " + line)
+        html.append(f"<p>{line}</p>")
 
     html.append("</div>")
     return subject, "\n".join(lines), "".join(html)
@@ -293,6 +327,43 @@ def fetch_last_training() -> dict | None:
         return None            # trainer never ran / offline - not an error
 
 
+def fetch_review_stats() -> dict | None:
+    """Operator-side labeling progress, from the reviews store the dashboard
+    uploads to training/reviews.json at every Submit. Feeds the "you have
+    labeled N frames" line - the training-status section was reading as
+    'the model rejected itself'; the plain count reframes it as progress."""
+    try:
+        from app.pool_sync import _bucket_name, _http_get
+        import time as _t
+        bucket = os.environ.get("FIREBASE_STORAGE_BUCKET") or _bucket_name()
+        if not bucket:
+            return None
+        raw = _http_get(f"https://storage.googleapis.com/{bucket}/"
+                        f"training/reviews.json?t={int(_t.time())}")
+        data = json.loads(raw.decode("utf-8"))
+        frame_reviews = data.get("frame_reviews") or []
+        crops = data.get("reviews") or []
+        confirmed = sum(1 for fr in frame_reviews
+                        for v in (fr.get("box_verdicts") or {}).values()
+                        if v == "correct")
+        rejected = sum(1 for fr in frame_reviews
+                       for v in (fr.get("box_verdicts") or {}).values()
+                       if v == "wrong")
+        relabeled = sum(1 for fr in frame_reviews
+                        for v in (fr.get("box_verdicts") or {}).values()
+                        if isinstance(v, str) and v.startswith("relabel:"))
+        missed = sum(len(fr.get("missed_detections") or [])
+                     for fr in frame_reviews)
+        return {"frames_labeled": len(frame_reviews),
+                "crop_reviews":   len(crops),
+                "boxes_confirmed": confirmed,
+                "boxes_rejected":  rejected,
+                "boxes_relabeled": relabeled,
+                "missed_marked":  missed}
+    except Exception:
+        return None
+
+
 # ---- send --------------------------------------------------------------------
 
 def send_gmail(subject: str, text: str, html: str,
@@ -337,9 +408,11 @@ def send_gmail(subject: str, text: str, html: str,
 
 
 def _build_pdf(now_il: dt.datetime, window_hours: int,
-               events: list[dict], event_groups: list[dict],
+               event_groups: list[dict],
                cam_stats: list[dict], training: dict | None,
+               reviews: dict | None,
                stale_slots: list[dict], footfall_count: int,
+               total_events: int,
                out_path: Path) -> Path | None:
     """Compose the PDF; returns the path or None if reportlab is missing
     (the plain-text mail still ships in that case, which is the pre-PDF
@@ -350,15 +423,18 @@ def _build_pdf(now_il: dt.datetime, window_hours: int,
         print(f"digest: reportlab not available ({e}) - "
               f"sending text-only mail")
         return None
-    picks = report_pdf.pick_event_samples(events)
-    snapshots = report_pdf.fetch_snapshots(picks)
+    from app.pool_sync import _bucket_name
+    bucket = os.environ.get("FIREBASE_STORAGE_BUCKET") or _bucket_name()
+    picked_groups = report_pdf.pick_group_samples(event_groups)
+    snapshots = report_pdf.fetch_snapshots_for_groups(picked_groups, bucket)
     return report_pdf.compose_pdf(
         out_path,
         now_il=now_il, window_hours=window_hours,
         events_by_kind=event_groups, cam_stats=cam_stats,
         training=training, stale_slots=stale_slots,
         snapshots=snapshots, kind_labels=KIND_LABELS,
-        total_events=len(events), total_samples=footfall_count)
+        total_events=total_events, total_samples=footfall_count,
+        training_lines=_training_lines(training, reviews))
 
 
 def main() -> None:
@@ -377,18 +453,21 @@ def main() -> None:
     groups = aggregate_events(events)
     cam_stats = footfall_stats(footfall)
     training = fetch_last_training()
+    reviews = fetch_review_stats()
     stale = stale_from_latest(latest, active_slots=active or None)
     now_il = _israel_now()
 
     subject, text, html = compose_digest(
-        now_il, args.window_hours, groups, cam_stats, training, stale)
+        now_il, args.window_hours, groups, cam_stats, training, stale,
+        reviews=reviews)
 
     default_pdf = (Path("./daily_digest.pdf") if args.dry_run
                    else Path(tempfile.mkdtemp(prefix="digest-"))
                         / f"konya_report_{now_il.strftime('%Y%m%d_%H%M')}.pdf")
     pdf_path = Path(args.pdf_out) if args.pdf_out else default_pdf
-    built = _build_pdf(now_il, args.window_hours, events, groups, cam_stats,
-                       training, stale, len(footfall), pdf_path)
+    built = _build_pdf(now_il, args.window_hours, groups, cam_stats,
+                       training, reviews, stale, len(footfall),
+                       total_events=len(events), out_path=pdf_path)
 
     if args.dry_run:
         print(f"SUBJECT: {subject}\n\n{text}")

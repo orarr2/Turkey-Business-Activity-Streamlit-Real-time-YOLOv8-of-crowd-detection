@@ -54,13 +54,10 @@ PDF_IMAGE_QUALITY = 75
 
 def pick_event_samples(events: list[dict], max_total: int = MAX_IMAGES
                        ) -> list[dict]:
-    """Best representative events across kinds.
-
-    For each kind that appears in the window we take the LAST occurrence
-    (so time-of-day makes sense in the caption); we cycle across kinds in
-    the priority order above, then round-robin any extras. A kind with no
-    events contributes nothing. Missing snapshot_url disqualifies an event
-    from the visual layer (the row still counts in the aggregation table)."""
+    """Legacy sample picker: one event per KIND, priority-ordered.
+    Kept for the tests that pin its behavior; new callers use
+    ``pick_group_samples`` which ties each picked event back to its
+    aggregated row so the numbered badge lines up."""
     by_kind: dict[str, list[dict]] = {}
     for e in events:
         if not e.get("snapshot_url") and not e.get("fullframe_url"):
@@ -85,6 +82,73 @@ def pick_event_samples(events: list[dict], max_total: int = MAX_IMAGES
             break
         round_idx += 1
     return picks
+
+
+def pick_group_samples(groups: list[dict], max_total: int = MAX_IMAGES
+                       ) -> list[dict]:
+    """Pick which aggregated ROWS deserve a visual card, priority-ordered.
+
+    The report's promise is: every image in the evidence pages traces back
+    to a specific #N row in the anomalies table. We pick groups (not
+    events) so the mapping is unambiguous - one image per row, at most.
+    Priority ordering (obstructed > dark > extreme > loiter > returning)
+    beats volume; ties within a priority level use recency."""
+    by_kind: dict[str, list[dict]] = {}
+    for g in groups:
+        if not g.get("latest_event"):
+            continue
+        e = g["latest_event"]
+        if not e.get("snapshot_url") and not e.get("fullframe_url"):
+            continue
+        by_kind.setdefault(g["kind"], []).append(g)
+    for gs in by_kind.values():
+        gs.sort(key=lambda g: str(g["last_ts"]), reverse=True)
+
+    kinds_ordered = [k for k in KIND_PRIORITY if k in by_kind] + \
+                    [k for k in by_kind if k not in KIND_PRIORITY]
+    picks: list[dict] = []
+    round_idx = 0
+    while len(picks) < max_total and kinds_ordered:
+        progress = False
+        for k in list(kinds_ordered):
+            if round_idx < len(by_kind[k]):
+                picks.append(by_kind[k][round_idx])
+                progress = True
+                if len(picks) >= max_total:
+                    break
+        if not progress:
+            break
+        round_idx += 1
+    return picks
+
+
+def find_first_sighting(bucket_name: str, cam_id: str, entity_id,
+                        downloader=None) -> str | None:
+    """The oldest entity-gallery image URL for a (cam, entity) pair, from
+    the review_sync manifest. Returning-visitor events without this look
+    up the current crop only; with it, the report can show 'first seen' +
+    'now' side-by-side and the operator can eyeball the identity claim."""
+    import json
+    import time as _t
+    if downloader is None:
+        downloader = _http_bytes
+    try:
+        raw = downloader(
+            f"https://storage.googleapis.com/{bucket_name}/"
+            f"review_sync/manifest.json?t={int(_t.time())}")
+        if not raw:
+            return None
+        manifest = json.loads(raw.decode("utf-8"))
+        prefix = f"entities/{cam_id}/{entity_id}/"
+        candidates = [(rel, meta) for rel, meta in
+                      (manifest.get("files") or {}).items()
+                      if rel.startswith(prefix) and rel.endswith(".jpg")]
+        if not candidates:
+            return None
+        candidates.sort(key=lambda kv: float(kv[1].get("mtime", 0)))
+        return candidates[0][1].get("url")
+    except Exception:
+        return None
 
 
 def _http_bytes(url: str, timeout: float = IMAGE_DOWNLOAD_TIMEOUT_S
@@ -187,6 +251,149 @@ def _event_caption(e: dict, kind_labels: dict[str, str]) -> str:
     return " · ".join(parts)
 
 
+def fetch_snapshots_for_groups(groups: list[dict],
+                               bucket_name: str | None = None,
+                               downloader=None,
+                               shrink: bool = True) -> list[dict]:
+    """Download the visual assets for each picked group. Returns groups
+    augmented with ``fullframe_jpeg`` (context), ``crop_jpeg`` (the specific
+    object) and, for returning-visitor entries, ``first_jpeg`` (oldest
+    sighting of that entity from the entity gallery).
+
+    Groups whose downloads all fail are dropped - a card without images is
+    just repeated text."""
+    if downloader is None:
+        downloader = _http_bytes
+    out: list[dict] = []
+    for g in groups:
+        e = g.get("latest_event") or {}
+        entry = dict(g)
+
+        ff = e.get("fullframe_url")
+        cr = e.get("snapshot_url")
+        ff_bytes = downloader(ff) if ff else None
+        cr_bytes = downloader(cr) if cr else None
+        if not ff_bytes and not cr_bytes:
+            continue
+        # If we have only the crop, promote it to fullframe slot so the
+        # card layout still fills its primary image row.
+        if not ff_bytes and cr_bytes:
+            ff_bytes = cr_bytes
+            cr_bytes = None
+
+        entry["fullframe_jpeg"] = _shrink_jpeg(ff_bytes) if shrink and ff_bytes else ff_bytes
+        entry["crop_jpeg"] = _shrink_jpeg(cr_bytes) if shrink and cr_bytes else cr_bytes
+
+        # First-sighting lookup for returning visitors. Missing entity_id,
+        # missing bucket, or a stale manifest all resolve to "no first
+        # image" - the card degrades gracefully to a single object crop.
+        if (g.get("kind") == "returning" and bucket_name
+                and e.get("entity_id") is not None):
+            first_url = find_first_sighting(bucket_name,
+                                            str(e.get("cam_id") or ""),
+                                            e.get("entity_id"),
+                                            downloader=downloader)
+            if first_url:
+                first_bytes = downloader(first_url)
+                if first_bytes:
+                    entry["first_jpeg"] = (_shrink_jpeg(first_bytes)
+                                           if shrink else first_bytes)
+        out.append(entry)
+    return out
+
+
+def _evidence_card(group: dict, kind_labels: dict[str, str]) -> Table:
+    """Framed layout: header line with the #N badge + primary fullframe +
+    the small crop of the object (and, for returning visitors, the first
+    sighting side-by-side with the current crop)."""
+    e = group.get("latest_event") or {}
+    ref = group.get("ref")
+    header_style = ParagraphStyle(
+        "ev_head", fontName="Helvetica-Bold", fontSize=12, alignment=TA_LEFT,
+        leading=15, textColor=colors.HexColor("#0f172a"))
+    body_style = ParagraphStyle(
+        "ev_body", fontName="Helvetica", fontSize=10, alignment=TA_LEFT,
+        leading=13, textColor=colors.HexColor("#334155"))
+    small_style = ParagraphStyle(
+        "ev_small", fontName="Helvetica", fontSize=9, alignment=TA_LEFT,
+        leading=11, textColor=colors.HexColor("#64748b"))
+
+    header_bits = []
+    if ref:
+        header_bits.append(f"<font color='#b91c1c'>#{ref}</font>")
+    header_bits.append(group.get("label") or "?")
+    header_bits.append(group.get("cam") or "?")
+    if group.get("count", 0) > 1:
+        header_bits.append(f"x{group['count']}")
+    header_bits.append(f"latest {_fmt_ts(group.get('last_ts'))}")
+    header = Paragraph(" · ".join(header_bits), header_style)
+
+    extras = []
+    dur = e.get("duration_sec")
+    if isinstance(dur, (int, float)) and dur > 0:
+        extras.append(f"duration {int(dur)} sec")
+    cls = e.get("cls")
+    if cls:
+        extras.append(f"class '{cls}'")
+    eid = e.get("entity_id")
+    if eid is not None:
+        extras.append(f"entity #{eid}")
+    sub = Paragraph(" · ".join(extras) if extras else "-", body_style)
+
+    rows: list[list] = [[header], [sub]]
+
+    ff = group.get("fullframe_jpeg")
+    if ff:
+        rows.append([Image(BytesIO(ff), width=15*cm, height=8.5*cm,
+                           kind="proportional")])
+
+    # Crop + first sighting row: side-by-side when both present.
+    crop_bytes = group.get("crop_jpeg")
+    first_bytes = group.get("first_jpeg")
+    if crop_bytes or first_bytes:
+        image_cells: list[list] = [[], []]
+        if first_bytes:
+            image_cells[0].append(Paragraph("First seen previously:",
+                                            small_style))
+            image_cells[0].append(Image(BytesIO(first_bytes),
+                                        width=6*cm, height=4.5*cm,
+                                        kind="proportional"))
+        else:
+            image_cells[0].append(Paragraph("", small_style))
+        if crop_bytes:
+            label = ("Same object now:" if first_bytes
+                     else "Specific object flagged:")
+            image_cells[1].append(Paragraph(label, small_style))
+            image_cells[1].append(Image(BytesIO(crop_bytes),
+                                        width=6*cm, height=4.5*cm,
+                                        kind="proportional"))
+        else:
+            image_cells[1].append(Paragraph("", small_style))
+        pair = Table([image_cells], colWidths=[8*cm, 8*cm])
+        pair.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        rows.append([pair])
+
+    frame = Table(rows, colWidths=[16.2*cm])
+    frame.setStyle(TableStyle([
+        ("BACKGROUND",    (0, 0), (-1, -1), colors.HexColor("#f8fafc")),
+        ("BOX",           (0, 0), (-1, -1), 0.75, colors.HexColor("#cbd5e1")),
+        ("LINEBELOW",     (0, 1), (-1, 1),  0.5,  colors.HexColor("#e2e8f0")),
+        ("TOPPADDING",    (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 10),
+        ("RIGHTPADDING",  (0, 0), (-1, -1), 10),
+        ("ALIGN",         (0, 0), (-1, -1), "LEFT"),
+        ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+    ]))
+    return frame
+
+
 def compose_pdf(out_path: str | Path, *,
                 now_il: dt.datetime,
                 window_hours: int,
@@ -194,11 +401,18 @@ def compose_pdf(out_path: str | Path, *,
                 cam_stats: list[dict],
                 training: dict | None,
                 stale_slots: list[dict],
-                snapshots: Iterable[tuple[dict, bytes]],
+                snapshots: Iterable[dict],
                 kind_labels: dict[str, str],
                 total_events: int,
-                total_samples: int) -> Path:
-    """Compose the phone-oriented English PDF and return its path."""
+                total_samples: int,
+                training_lines: list[str] | None = None) -> Path:
+    """Compose the phone-oriented English PDF and return its path.
+
+    ``snapshots`` is a list of picked GROUP dicts (from
+    ``pick_group_samples``) - each carries a ``ref`` linking back to the
+    numbered row in the anomalies table, plus the primary image bytes
+    (``fullframe_jpeg``), optional object crop (``crop_jpeg``), and optional
+    first-sighting crop (``first_jpeg``) for returning-visitor entries."""
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -269,19 +483,25 @@ def compose_pdf(out_path: str | Path, *,
     cell_style = ParagraphStyle("cell", fontName="Helvetica", fontSize=10,
                                 alignment=TA_LEFT, leading=12)
 
-    # Aggregated anomalies table
+    # Aggregated anomalies table with a "#" column that ties every row to
+    # its evidence card on the pages below. A row without a matching image
+    # simply has no card - the operator can still see the count and location.
     story.append(Paragraph("Anomalies by Type and Camera", styles["h"]))
     if events_by_kind:
-        header = ["Type", "Camera", "Last", "Count"]
+        header = ["#", "Type", "Camera", "Last", "Count"]
         body = [header]
         for g in events_by_kind:
-            body.append([Paragraph(g["label"], cell_style),
+            body.append([str(g.get("ref") or ""),
+                         Paragraph(g["label"], cell_style),
                          Paragraph(g["cam"], cell_style),
                          _fmt_ts(g["last_ts"]), str(g["count"])])
-        tbl = Table(body, colWidths=[5.5*cm, 6.5*cm, 2.2*cm, 2.4*cm],
+        tbl = Table(body, colWidths=[1*cm, 5*cm, 6*cm, 2.2*cm, 2.4*cm],
                     repeatRows=1)
         tbl.setStyle(_table_style())
         story.append(tbl)
+        story.append(Paragraph(
+            "Numbered rows have a matching image on the next pages.",
+            styles["cap"]))
     else:
         story.append(Paragraph("Quiet - no anomalies in this window.",
                                styles["body"]))
@@ -308,59 +528,46 @@ def compose_pdf(out_path: str | Path, *,
 
     # Training status
     story.append(Paragraph("Model Training Status", styles["h"]))
-    if training:
-        verdict = ("PROMOTED new head" if training.get("promoted")
-                   else "rejected at gate")
-        cand = training.get("candidate") or training.get("file") or "?"
-        when = str(training.get("at") or "")[:10]
-        story.append(Paragraph(
-            f"Last training run ({when}): {verdict} - {cand}",
-            styles["body"]))
-        for r in (training.get("reasons") or [])[:3]:
-            story.append(Paragraph(f"• {r}", styles["cap"]))
-    else:
-        story.append(Paragraph("No cloud training run has executed yet.",
-                               styles["body"]))
+    for line in (training_lines or []):
+        story.append(Paragraph(line, styles["body"]))
+    if not training_lines:
+        # Fallback for callers that predate the training_lines parameter -
+        # keep the report shipping instead of leaving a blank section.
+        if training:
+            verdict = ("PROMOTED new head" if training.get("promoted")
+                       else "did not clear the gate yet")
+            cand = training.get("candidate") or training.get("file") or "?"
+            when = str(training.get("at") or "")[:10]
+            story.append(Paragraph(
+                f"Last cloud training ({when}): {verdict} - {cand}.",
+                styles["body"]))
+        else:
+            story.append(Paragraph(
+                "No cloud training run has executed yet.", styles["body"]))
 
-    # Visual evidence pages
+    # Visual evidence pages - each card carries the #N badge that appears
+    # in the anomalies table above, so the operator can look at an image
+    # and tell exactly which row it belongs to (no more caption hunting).
     snap_list = list(snapshots)
     if snap_list:
         story.append(PageBreak())
         story.append(Paragraph(
-            "Anomaly Samples - Original Camera Snapshots",
+            "Evidence - What the Model Actually Flagged",
             styles["h"]))
         story.append(Paragraph(
-            "One representative snapshot per anomaly type, saved to the "
-            "cloud with the camera, time, and additional details.",
+            "Each card matches one numbered row in the Anomalies table. "
+            "The full scene shows context; the small crop is the specific "
+            "object the model flagged. For returning visitors, the earlier "
+            "sighting of the same identity is included so you can eyeball "
+            "the identity claim.",
             styles["cap"]))
-        cap_style = ParagraphStyle(
-            "img_cap", fontName="Helvetica", fontSize=10, alignment=TA_LEFT,
-            leading=13, textColor=colors.HexColor("#334155"))
-        for e, jpeg in snap_list:
-            img = Image(BytesIO(jpeg), width=15*cm, height=8.5*cm,
-                        kind="proportional")
-            caption = Paragraph(_event_caption(e, kind_labels), cap_style)
-            frame = Table([[img], [caption]], colWidths=[16.2*cm])
-            frame.setStyle(TableStyle([
-                ("BACKGROUND",    (0, 0), (-1, -1), colors.HexColor("#f8fafc")),
-                ("BOX",           (0, 0), (-1, -1), 0.75, colors.HexColor("#cbd5e1")),
-                ("LINEABOVE",     (0, 1), (-1, 1),  0.5,  colors.HexColor("#e2e8f0")),
-                ("TOPPADDING",    (0, 0), (-1, 0),  8),
-                ("BOTTOMPADDING", (0, 0), (-1, 0),  6),
-                ("TOPPADDING",    (0, 1), (-1, 1),  8),
-                ("BOTTOMPADDING", (0, 1), (-1, 1),  10),
-                ("LEFTPADDING",   (0, 0), (-1, -1), 10),
-                ("RIGHTPADDING",  (0, 0), (-1, -1), 10),
-                ("ALIGN",         (0, 0), (-1, 0),  "CENTER"),
-                ("ALIGN",         (0, 1), (-1, 1),  "LEFT"),
-                ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
-            ]))
-            story.append(frame)
+        for g in snap_list:
+            story.append(_evidence_card(g, kind_labels))
             story.append(Spacer(1, 0.4*cm))
     else:
         story.append(Paragraph(
-            "No images attached (image bucket is empty or events lack "
-            "snapshot_url).", styles["cap"]))
+            "No evidence images attached (all events lacked snapshot URLs "
+            "or the bucket was unreachable).", styles["cap"]))
 
     doc = SimpleDocTemplate(str(out_path), pagesize=A4,
                             leftMargin=1.5*cm, rightMargin=1.5*cm,

@@ -105,45 +105,131 @@ def test_event_caption_english():
     assert cap2.count(" · ") == 2
 
 
+def test_pick_group_samples_uses_priority_and_recency():
+    """Groups (aggregated by kind+cam) are picked by kind priority, not by
+    raw event count - a flood of loiter events at one camera is one row
+    that gets one visual card, freeing the other slots for other kinds."""
+    groups = [
+        {"kind": "loiter", "cam": "A", "count": 20,
+         "last_ts": "2026-07-11T09:00:00Z",
+         "latest_event": {"kind": "loiter", "snapshot_url": "s"}},
+        {"kind": "camera_obstructed", "cam": "B", "count": 1,
+         "last_ts": "2026-07-11T02:00:00Z",
+         "latest_event": {"kind": "camera_obstructed", "snapshot_url": "s"}},
+        {"kind": "returning", "cam": "A", "count": 1,
+         "last_ts": "2026-07-11T04:00:00Z",
+         "latest_event": {"kind": "returning", "snapshot_url": "s"}},
+        # No URL -> disqualified
+        {"kind": "camera_dark", "cam": "C", "count": 1,
+         "last_ts": "2026-07-11T05:00:00Z",
+         "latest_event": {"kind": "camera_dark"}},
+    ]
+    picks = report_pdf.pick_group_samples(groups, max_total=4)
+    kinds = [p["kind"] for p in picks]
+    assert "camera_obstructed" in kinds        # priority beats recency
+    assert "loiter" in kinds and "returning" in kinds
+    assert "camera_dark" not in kinds          # no image = no card
+
+
+def test_find_first_sighting(monkeypatch):
+    """Manifest lookup returns the URL of the oldest entity-gallery jpg for
+    the given (cam, entity)."""
+    import json
+    manifest = {"files": {
+        "entities/camA/7/2000.jpg": {"mtime": 2000.0, "url": "u2"},
+        "entities/camA/7/1000.jpg": {"mtime": 1000.0, "url": "u1"},
+        "entities/camA/7/1500.jpg": {"mtime": 1500.0, "url": "u1_5"},
+        "entities/camB/9/9999.jpg": {"mtime": 9999.0, "url": "u_other"},
+    }}
+    served = {"manifest": json.dumps(manifest).encode()}
+
+    def dl(url):
+        if "manifest" in url: return served["manifest"]
+        return None
+
+    url = report_pdf.find_first_sighting("bkt", "camA", 7, downloader=dl)
+    assert url == "u1"
+    # unknown entity -> None, no exception
+    assert report_pdf.find_first_sighting("bkt", "camA", 999, downloader=dl) is None
+
+
+def test_fetch_snapshots_for_groups_wires_crop_and_first_sighting():
+    served = {
+        "https://ff.jpg":  b"F" * 5000,
+        "https://cr.jpg":  b"C" * 5000,
+        "https://first.jpg": b"P" * 5000,
+        "https://storage.googleapis.com/bkt/review_sync/manifest.json?t=":
+            None,
+    }
+    import json
+
+    def dl(url):
+        # coarse match ignoring cache-buster
+        if url.startswith("https://ff.jpg"): return served["https://ff.jpg"]
+        if url.startswith("https://cr.jpg"): return served["https://cr.jpg"]
+        if url.startswith("https://first.jpg"): return served["https://first.jpg"]
+        if "manifest" in url:
+            return json.dumps({"files": {
+                "entities/camA/7/1000.jpg": {"mtime": 1000.0,
+                                             "url": "https://first.jpg"},
+            }}).encode()
+        return None
+
+    groups = [
+        {"ref": 1, "kind": "returning", "cam": "camA",
+         "label": "Returning visitor", "count": 1,
+         "last_ts": "2026-07-11T06:00:00Z",
+         "latest_event": {"kind": "returning", "cam_id": "camA",
+                          "entity_id": 7,
+                          "fullframe_url": "https://ff.jpg",
+                          "snapshot_url":  "https://cr.jpg"}},
+    ]
+    out = report_pdf.fetch_snapshots_for_groups(groups, bucket_name="bkt",
+                                                downloader=dl, shrink=False)
+    assert len(out) == 1
+    g = out[0]
+    assert g["fullframe_jpeg"] == b"F" * 5000
+    assert g["crop_jpeg"] == b"C" * 5000
+    assert g.get("first_jpeg") == b"P" * 5000
+
+
 def test_compose_pdf_end_to_end(tmp_path):
     """Compose a real PDF from realistic inputs and validate: file exists,
-    is a valid PDF, contains English text."""
+    is a valid PDF, has both summary and evidence pages."""
     out = tmp_path / "report.pdf"
     now = dt.datetime(2026, 7, 12, 20, 0)
     groups = [
-        {"kind": "loiter", "label": "Loitering",
+        {"ref": 1, "kind": "loiter", "label": "Loitering",
          "cam": "Konya - Millet Caddesi", "count": 14,
-         "last_ts": "2026-07-12T15:30:00Z"},
-        {"kind": "camera_obstructed", "label": "Camera blocked",
+         "last_ts": "2026-07-12T15:30:00Z",
+         "latest_event": {"kind": "loiter", "cam_id": "konya_millet",
+                          "ts": "2026-07-12T15:30:00Z",
+                          "duration_sec": 420, "cls": "person"}},
+        {"ref": 2, "kind": "camera_obstructed", "label": "Camera blocked",
          "cam": "Otogar Kavsagi", "count": 2,
-         "last_ts": "2026-07-12T13:00:00Z"},
+         "last_ts": "2026-07-12T13:00:00Z",
+         "latest_event": {"kind": "camera_obstructed", "cam_id": "otogar",
+                          "ts": "2026-07-12T13:00:00Z", "cls": "train"}},
     ]
     cam_stats = [
         {"cam": "Konya - Hukumet", "peak_person": 14,
          "peak_person_ts": "2026-07-12T09:07:00Z",
          "peak_vehicles": 13, "typ_kmh": 22.0, "samples": 500},
-        {"cam": "Konya - Millet Caddesi", "peak_person": 4,
-         "peak_person_ts": "2026-07-12T08:54:00Z",
-         "peak_vehicles": 11, "typ_kmh": 24.0, "samples": 480},
     ]
-    training = {"event": "gate", "promoted": False,
-                "candidate": "head_run2.pt",
-                "at": "2026-07-11T10:09:52Z",
-                "reasons": ["mAP50 gain +0.00pp < required +0.50pp"]}
     stale = []
-    snaps = [
-        ({"kind": "camera_obstructed", "cam_id": "otogar_kavsagi",
-          "ts": "2026-07-12T13:00:00Z", "cls": "train"}, _jpeg((60, 60, 60))),
-        ({"kind": "loiter", "cam_id": "konya_millet_caddesi",
-          "ts": "2026-07-12T15:30:00Z", "duration_sec": 420}, _jpeg((100, 140, 200))),
-    ]
+    snaps = [dict(groups[0], fullframe_jpeg=_jpeg((100, 140, 200)),
+                  crop_jpeg=_jpeg((200, 200, 200))),
+             dict(groups[1], fullframe_jpeg=_jpeg((60, 60, 60)),
+                  crop_jpeg=None)]
     LABELS = {"loiter": "Loitering", "camera_obstructed": "Camera blocked"}
     p = report_pdf.compose_pdf(
         out, now_il=now, window_hours=12,
         events_by_kind=groups, cam_stats=cam_stats,
-        training=training, stale_slots=stale,
+        training=None, stale_slots=stale,
         snapshots=snaps, kind_labels=LABELS,
-        total_events=16, total_samples=980)
+        total_events=16, total_samples=980,
+        training_lines=["You have labeled 5 frames so far.",
+                        "Cloud training did not improve on the baseline yet."])
     assert p == out and p.is_file()
     head = p.read_bytes()[:8]
     assert head.startswith(b"%PDF-"), f"not a PDF: {head!r}"

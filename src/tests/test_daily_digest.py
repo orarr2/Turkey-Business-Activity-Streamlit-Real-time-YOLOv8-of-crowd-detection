@@ -1,8 +1,9 @@
 """Situation-report compose layer: aggregation, peaks, English rendering."""
 import datetime as dt
 
-from tools.daily_digest import (aggregate_events, compose_digest,
-                                footfall_stats, stale_from_latest)
+from tools.daily_digest import (_training_lines, aggregate_events,
+                                compose_digest, footfall_stats,
+                                stale_from_latest)
 
 _NOON = dt.datetime(2026, 7, 11, 12, 0)
 _EVE = dt.datetime(2026, 7, 11, 20, 0)
@@ -22,8 +23,14 @@ def test_aggregate_events_groups_per_kind_and_camera():
     assert groups[0]["kind"] == "camera_obstructed"       # newest first
     assert groups[0]["count"] == 2
     assert groups[0]["last_ts"] == "2026-07-11T08:00:00Z"
+    assert groups[0]["ref"] == 1                          # 1-based numbering
+    assert groups[1]["ref"] == 2
     assert groups[0]["label"] == "Camera blocked"
     assert groups[1]["label"] == "Returning visitor"
+    # latest_event carries the event whose ts matches the group's last_ts,
+    # so the composer can pull its snapshot/fullframe URLs.
+    assert groups[0]["latest_event"] is evs[1]
+    assert groups[1]["latest_event"] is evs[2]
     assert aggregate_events([]) == []
 
 
@@ -68,6 +75,42 @@ def test_stale_slots_flagged():
     assert [s["cam"] for s in stale] == ["Stuck"]
 
 
+def test_training_lines_no_data():
+    """The old copy read as an alarm ('rejected at gate - head_run2.pt'); a
+    fresh install with nothing labeled and nothing trained should just say
+    what to do next."""
+    lines = _training_lines(training=None, reviews=None)
+    assert any("No frames labeled yet" in l for l in lines)
+    assert any("No cloud training" in l for l in lines)
+
+
+def test_training_lines_with_labels_but_rejected():
+    """Reject verdict must be framed as 'the gate did its job', not 'the
+    model is broken'."""
+    reviews = {"frames_labeled": 5, "boxes_confirmed": 8,
+               "boxes_rejected": 2, "missed_marked": 3}
+    training = {"promoted": False, "candidate": "head_run2.pt",
+                "at": "2026-07-11T10:09:52Z"}
+    lines = _training_lines(training, reviews)
+    joined = " ".join(lines)
+    assert "labeled 5 frames" in joined
+    assert "8 confirmed" in joined and "3 objects you added" in joined
+    assert "did not improve" in joined and "diverse labels" in joined
+    # Must NOT include the alarm-flavored old copy.
+    assert "rejected at gate" not in joined
+    assert "REJECTED" not in joined
+
+
+def test_training_lines_promoted():
+    training = {"promoted": True, "candidate": "head_run9.pt",
+                "at": "2026-07-12T01:30:00Z"}
+    lines = _training_lines(training, {"frames_labeled": 25})
+    joined = " ".join(lines)
+    assert "promoted a new detection head" in joined
+    assert "head_run9.pt" in joined
+    assert "already picked it up" in joined
+
+
 def test_compose_full_report_english():
     groups = aggregate_events([
         {"kind": "extreme_load", "cam_name": "Millet",
@@ -86,7 +129,9 @@ def test_compose_full_report_english():
     assert "Midday report" in text
     assert "Extreme load" in text and "(x2)" in text
     assert "up to 55 people" in text
-    assert "rejected at gate" in text and "head_run2.pt" in text
+    # Training section reframed - no more "rejected at gate" alarm text
+    assert "rejected at gate" not in text
+    assert "did not improve" in text and "head_run2.pt" in text
     assert "All cameras reporting normally" in text
 
     # evening + stale camera + quiet window
@@ -95,11 +140,13 @@ def test_compose_full_report_english():
     assert "Evening report" in subject2
     assert "Quiet - no anomalies" in text2
     assert "Otogar" in text2 and "45 minutes" in text2
-    assert "No training run" in text2
+    assert "No cloud training" in text2 or "No frames labeled" in text2
 
 
 def test_promoted_line():
     training = {"event": "gate", "promoted": True, "candidate": "head_run9.pt",
                 "at": "2026-07-12T01:30:00Z", "reasons": ["+1.2pp"]}
-    _, text, _ = compose_digest(_NOON, 12, [], [], training, [])
-    assert "PROMOTED new head" in text and "head_run9.pt" in text
+    _, text, _ = compose_digest(_NOON, 12, [], [], training, [],
+                                reviews={"frames_labeled": 25})
+    assert "promoted a new detection head" in text
+    assert "head_run9.pt" in text
