@@ -27,8 +27,8 @@ on:
       imgsz:
         description: "train/val image size"
         default: "512"
-  schedule:
-    - cron: "0 9 * * 3"     # every Wednesday 09:00 UTC = 12:00 Israel (IDT summer; 11:00 IST winter - GitHub cron is UTC, no DST)
+  # schedule:
+  #   - cron: "20 1 * * *"   # 01:20 UTC = 04:20 Turkey - streets quiet, data fresh
 
 permissions:
   contents: read
