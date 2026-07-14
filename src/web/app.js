@@ -27,7 +27,17 @@ const _ver = (_u.searchParams.get("v") || _u.searchParams.get("ver")
               || new URLSearchParams(location.search).get("ver") || "dev");
 const _q = "?v=" + encodeURIComponent(_ver);
 
-const { GRID_SLOTS, hlsUrlForActiveCam } = await import("./cameras.js" + _q);
+const { GRID_SLOTS: _ALL_SLOTS, hlsUrlForActiveCam } = await import("./cameras.js" + _q);
+
+// ?cams=konya_hukumet,otogar_kavsagi filters the tiles down to a subset
+// chosen by the notebook's picker (section 6b). Missing/empty/all-invalid
+// means "show every slot", so pasting the plain URL still works.
+const _wantCams = new URLSearchParams(location.search).get("cams")
+    ?.split(",").map((s) => s.trim()).filter(Boolean);
+const _filteredSlots = _wantCams?.length
+    ? _ALL_SLOTS.filter((s) => _wantCams.includes(s.primary))
+    : null;
+const GRID_SLOTS = (_filteredSlots && _filteredSlots.length) ? _filteredSlots : _ALL_SLOTS;
 
 let firebaseConfig;
 try {
