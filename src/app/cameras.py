@@ -131,6 +131,37 @@ CAMERAS = {
         "embed": None,
         "type": "tourist square",
     },
+    # --- Three more IBB kamerayayin cameras added 2026-07-14 after the
+    # Konya tvkur backend went 404. All three verified HTTP 200 at add time
+    # and returned as CORS: * so the web dashboard can play them directly
+    # via hls.js. Their -yeni public pages are on istanbuluseyret. ---
+    "beyazit_meydan_yeni": {
+        "name": "Beyazit Meydani (live)",
+        "city": "Istanbul",
+        "kind": "hls",
+        "url": "https://kamerayayin.ibb.istanbul/turistikcam/beyazitmeydan.stream/playlist.m3u8",
+        "page": "https://istanbuluseyret.ibb.gov.tr/beyazit-meydani-yeni/",
+        "embed": None,
+        "type": "square/market-gateway",
+    },
+    "eyup_sultan_yeni": {
+        "name": "Eyup Sultan (live)",
+        "city": "Istanbul",
+        "kind": "hls",
+        "url": "https://kamerayayin.ibb.istanbul/turistikcam/eyupsultan.stream/playlist.m3u8",
+        "page": "https://istanbuluseyret.ibb.gov.tr/eyup-sultan-yeni/",
+        "embed": None,
+        "type": "religious square",
+    },
+    "buyuk_camlica_yeni": {
+        "name": "Buyuk Camlica (live)",
+        "city": "Istanbul",
+        "kind": "hls",
+        "url": "https://kamerayayin.ibb.istanbul/turistikcam/buyukcamlica.stream/playlist.m3u8",
+        "page": "https://istanbuluseyret.ibb.gov.tr/buyuk-camlica-yeni/",
+        "embed": None,
+        "type": "park/vista",
+    },
     "kadikoy": {
         "name": "Kadikoy",
         "city": "Istanbul",
