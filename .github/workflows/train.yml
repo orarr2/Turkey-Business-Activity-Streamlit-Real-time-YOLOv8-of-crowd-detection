@@ -27,8 +27,8 @@ on:
       imgsz:
         description: "train/val image size"
         default: "512"
-  # schedule:
-  #   - cron: "20 1 * * *"   # 01:20 UTC = 04:20 Turkey - streets quiet, data fresh
+  schedule:
+    - cron: "20 1 * * 2"    # every Tuesday 01:20 UTC = 04:20 Turkey - streets quiet, week of data fresh
 
 permissions:
   contents: read
