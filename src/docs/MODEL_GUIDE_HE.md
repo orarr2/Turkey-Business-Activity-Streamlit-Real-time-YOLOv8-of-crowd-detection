@@ -16,6 +16,7 @@
 8. [מדוע נוצרות "הזיות" ואיך לצמצם אותן](#8-מדוע-נוצרות-הזיות-ואיך-לצמצם-אותן)
 9. [מסלולי שיפור מעשיים](#9-מסלולי-שיפור-מעשיים)
 10. [מה יש בפועל ב-VM — צלילה מלאה](#10-מה-יש-בפועל-ב-vm--צלילה-מלאה)
+11. [VM בענן מול מחברת מקומית - כל ההבדלים](#11-vm-בענן-מול-מחברת-מקומית---כל-ההבדלים)
 
 ---
 
@@ -2354,6 +2355,364 @@ df -h /
 > **אם `free -h`** מראה `used > 850MB` באופן קבוע — קרוב ל-cgroup limit. יעצור בקרוב.
 
 > **אם `df -h /`** מראה `>75%` בשימוש — הזמן לפינוי (`journalctl --vacuum-size=100M`).
+
+---
+
+## 11. VM בענן מול מחברת מקומית - כל ההבדלים
+
+לפרויקט שתי סביבות ריצה שונות מהותית: אחת בענן ואחת על המחשב האישי. שתיהן נוגעות באותו קוד, אבל כל אחת עונה על שאלה אחרת. מי שלא מפריד בין השתיים מתבלבל בקלות: הקוד נראה זהה, הפלט לא מגיע לאותו מקום, וההגדרות שונות. הסעיף הזה שם את שתי הסביבות זו לצד זו, מציג טבלה מלאה של ההבדלים, ואז מעמיק בנקודות שקל להיתפס בהן.
+
+### 11.1 הגדרות ראשוניות
+
+לפני שנכנסים להשוואה, שני משפטים על כל צד:
+
+**‏‎ה-VM בענן** הוא מכונה וירטואלית קטנה של Google Cloud (‏‎e2-micro במסלול Always Free) שרצה 24 שעות ביממה. עליה מותקן שירות systemd בשם `collector.service` שמריץ את `python -m app.collector`, וטיימר `digest.timer` שמפעיל פעמיים ביום את `python -m tools.daily_digest`. אין למכונה הזאת מסך, אין דפדפן, אין ממשק משתמש. היא רק אוספת נתונים ממצלמות רחוב, מריצה זיהוי, ושולחת הכל ל-Firestore ול-Firebase Storage. פרטים מלאים על מה שמותקן בה יש בסעיף 10.
+
+**המחברת המקומית** היא קובץ Jupyter בשם `turkey_business_activity.ipynb` שיושב בשורש הריפו ומורץ על המחשב האישי. הוא מתחלק ל-18 תאים שמדגימים את כל הרכיבים של המערכת: טעינת מודל, איסוף פריים, זיהוי, אנומליות, זמן שהייה, זיהוי מחדש, ציון עסקי, והטמעה של הדשבורד הענני בתוך המחברת עצמה דרך שרת HTTP מקומי שנפתח מתא 7. המטרה שלה חינוכית ודמו: להריץ תא-אחר-תא, לראות פלט, להשוות למה שהעננן מציג.
+
+**המסקנה המקדימה:** ה-VM הוא מנוע ההפקה. המחברת היא חלון לתוך המנוע ומעבדה לניסויים. הן לא מחליפות זו את זו והן לא רצות במקביל על אותם משאבים.
+
+### 11.2 טבלת השוואה מלאה
+
+הטבלה מסודרת לפי קטגוריות. השורות הקצרות מסבירות עצמן, שורות שדורשות הקשר מעמיק מקבלות תת-סעיף בהמשך.
+
+| קטגוריה | מאפיין | ‎VM ‏(ענן) | מחברת מקומית |
+|---|---|---|---|
+| **תשתית** | סוג המחשב | ‎GCP e2-micro, ‎1 GB RAM, ‎2 vCPU shared, Debian 12 | המחשב האישי של המשתמש, כל מפרט |
+| | מיקום | ‎`us-east1-c` (וירג'יניה) | המקום בו המחשב עומד |
+| | עלות | ‎‎‎0 דולר/חודש במסלול ‎Always Free | חינם, על תשתית שכבר שולמה |
+| | זמינות | ‎24/7, מופעל אוטומטית ב-boot | מופעל ידנית בכל פעם שהמשתמש רוצה להריץ |
+| **הפעלה** | פקודת הפעלה | ‎`sudo systemctl start collector.service` (חד פעמי, אחרי `install.sh`) | ‎`jupyter lab` או ‎`jupyter notebook` על ‎`turkey_business_activity.ipynb` |
+| | מנהל התהליך | ‎systemd עם `Restart=always` | הליבה של Jupyter (‎kernel Python) |
+| | שרידות תקלה | קורס, systemd מפעיל שוב אחרי 15 שניות | תא נכשל, המשתמש רואה שגיאה ומריץ שוב ידנית |
+| | הפעלה מחדש בעת ‎reboot | אוטומטית ‎(`enable --now`) | לא. הכל מת עם המחשב |
+| **מטרה** | מטרת הריצה | לאסוף נתונים בפועל, לשמור אותם בענן, להוציא דוחות | להסביר, להדגים, לנסות, להשוות למה שהעננן ראה |
+| | קהל היעד | אף אחד. מריץ לבד ומייצר דוחות | מפתח או משתמש שלומד את המערכת ידנית |
+| **מודל** | קובץ משקולות | ‎`yolov8s.pt` ‏(‎~22 MB, 11.2M פרמטרים) | ‎`yolov8n.pt` ‏(‎~6 MB, 3.2M פרמטרים) |
+| | סיבה לבחירה | ‎recall מספיק על אנשים רחוקים | קטן, מהיר, מספיק להדגמה, פחות זיכרון בכניסה למחברת |
+| | ‎imgsz | 512 ‏(מקובע בפקודת ההפעלה) | 640 ‏(ברירת המחדל של ‎Ultralytics; לא מועבר מפורשות) |
+| | ‎burst | 2 פריימים במרווח של ‎13 שניות בכל סבב | תא 3: פריים בודד לפי ‎`interval_s`. תא 5: burst קצר של ‎`target_fps=3` למשך ‎30 שניות |
+| | ‎conf gate | ‎per-camera מטעונת ‎`data/confidence_boost.json` ‏(‎learned) | ערך קבוע בקוד התא (‎‎0.35 לתא 2, 0.35 לתא 5, 0.25 לתא 5b) |
+| | ‎tracker | לא במפורש. השוואת ‎IoU בין בורסטים לצורך מהירות | ‎ByteTrack פעיל בתא 5 עבור ‎dwell |
+| | ‎LoRA / adapter overlay | פעיל. נשלף מ-Storage ומוחלף ‎in-place כל 30 סבבים | לא. תמיד יורה עם המשקולות הבסיסיות |
+| **מצלמות** | כמה במקביל | 4 מצלמות במקביל בכל סבב | אחת בכל תא. משתנה ‎`CAM_ID` בתא 1 |
+| | קטלוג | ‎`GRID_CAMERAS` = ‎4 מצלמות קונייה | ‎`CAMERAS` המלא (‎16 מצלמות), המשתמש בוחר לפי טעם |
+| | תדירות דגימה | ‎`--interval 40` שניות. סבב שלם כולל את 4 המצלמות | תא 3: ‎`interval_s=10` למשך דקה. תא 5: ‎`target_fps=3` למשך 30 שניות |
+| **חריגות** | סוגי אנומליה שמזוהים | ‎5 סוגים: ‎`extreme_load`, `camera_obstructed`, `camera_dark`, `loiter`, `returning`. עם ‎cooldown של 30 דקות | סוג יחיד: ‎rolling z-score על סדרת זמן של ספירת אנשים (תא 4) |
+| | מנוע החישוב | ‎`app/alerts.py`, ‎`app/presence.py`, ‎`app/anomaly_crops.py`, ‎`app/frame_crops.py` | פונקציה מקומית `flag_anomalies` שכתובה בתוך המחברת |
+| | חלון עדכון | ‎rolling window ארוך (‎שעות) עם ‎median + MAD | ‎`window=12` דגימות ‎(‎‎‎‎~2 דקות במקרה של ‎`interval_s=10`) |
+| | ‎profile שעות | ‎`app/anomaly_crops.py.HourlyProfile` שמצטבר ‎30 יום | ‎`groupby('hour').mean()` על סדרת דקה אחת של ‎6 דגימות |
+| **‏‎Re-ID** | קובץ SQLite | ‎`data/reid.db` (מתמיד, גדל עם הזמן, ‎‎prune אחרי ‎48 שעות ללא סיטינג) | ‎`data/reid_notebook.db` (‎‎‎‎‎‎‎‎‎‎‎unlink בתחילת כל תא 5b כדי שההרצה תהיה רפליקבילית) |
+| | ‎embedder ברירת מחדל | ‎OSNet ONNX ‏(‎`osnet_x0_25_msmt17.onnx`, ‎5 MB, 2048 מימדים) | ‎‎masked HSV histogram + aspect + area ‏(‎514 מימדים) |
+| | הגדרת ‎threshold | 0.86 מקוד (‎‎`REID_THRESHOLD` ‎env) | 0.92 מקוד המחברת (מחמיר יותר כי HSV פחות מדויק) |
+| | ‎prune אוטומטי | כן, `_prune_stale` כל 90 סבבים | לא. הרצה נקייה מאתחלת את הקובץ מחדש |
+| **פלט** | יעד ראשי | ‎Firestore ‎‎‎(`footfall`, ‎`latest`, ‎`events`, `reid_stats`) ‎+ Firebase Storage ‏(‎`review_sync/`, `snapshots/`, `training/`) | ‎`pandas.DataFrame` בתוך הזיכרון, ‎`.csv` ב-`data/`, גרפי ‎matplotlib בתוך המחברת |
+| | הצגה למשתמש | אין. מי שרוצה לראות פותח את הדשבורד שרץ בנפרד | פלט מודפס תחת התא, טבלאות ‎HTML, גרפים ‎PNG |
+| | ‎push לפרודקשן | כן, כל סבב | לא. הכל בזיכרון בלבד ומת עם ה-kernel |
+| **דשבורד** | האם מריץ ‎`serve.py` | לא. אין ‎HTTP server ב-VM | כן. תא 7 מפעיל ‎`http.server.ThreadingHTTPServer` על ‎`localhost:8000` |
+| | מקור הנתונים בדשבורד | ‎Firestore ישירות דרך ‎`onSnapshot` ‏(‎JavaScript בדפדפן) | אותו ‎Firestore. הדשבורד עצמו זהה, רק מקום ההגשה שונה |
+| | מטרת התצוגה | ‎24 שעות מצטברות של 4 מצלמות | ‎24 שעות של ‎VM ‎+ דקה אחת של המצלמה המקומית להשוואה |
+| | ‎proxy של HLS | לא נדרש בענן | כן: תא 7 מעביר ‎`GET /tvkur/*` דרך שרת מקומי כי הדפדפן לא יכול לצרף ‎Referer ל-‎`content.tvkur.com` |
+| **דוחות** | דוח יומי במייל | פעמיים ביום: ‎`digest.timer` ב-12:00 ו-20:00 שעון ישראל, ‎PDF עם תמונות מצורף | לא. אין ‎‎email pipeline במחברת |
+| | ניתוח ‎"‏‎business score" | לא. ה-VM לא מוציא סיכומים מסחריים | כן, תא 6: ‎`business_score(df, dwell)` מחזיר ציון ‎0-100 עם ‎volume / linger / consistency |
+| | דירוג מקומות | לא. ה-VM אוסף לפי סבב, לא לפי מקום | כן, תא 17-18: ‎comparison across ‎`CAMERAS` |
+| **משאבים** | הגבלת זיכרון | ‎cgroup: `MemoryHigh=760M` ‎+ ‎`MemoryMax=900M`. חריגה = ‎OOM kill | ‎‎‎ללא הגבלה חיצונית. הזיכרון שמותקן במחשב, פחות מה ש-Jupyter וה-kernel לוקחים |
+| | ‎OMP threads | ‎‎‎2 קבוע (‎`OMP_NUM_THREADS=2`) | ‎‎ברירת מחדל של ‎torch (מספר הליבות של המעבד) |
+| | ‎malloc arenas | ‎‎2 קבוע (‎‎`MALLOC_ARENA_MAX=2`) | ברירת מחדל (‎~‎`8 × ליבות`) |
+| | ‎swap | ‎2 GB swap file ב-`/var/swap` | תלוי במערכת ההפעלה |
+| **סודות** | ‎Firebase Admin SDK | ‎`/etc/turkey-footfall/serviceAccount.json` ‏(‎root, ‎0400, ‎נשלף מ-Secret Manager) | לא נדרש כלל. הדשבורד קורא רק ב-‎public-read |
+| | ‎Gmail app password | ‎`/etc/turkey-footfall/digest.env` ‏(‎root, ‎0600) | לא רלוונטי |
+| | ‎GitHub Actions secret | ‎`FIREBASE_SA` בהגדרות הריפו | לא רלוונטי |
+| **רשת** | פתרון ‎HLS | ‎`app/detect_core.iter_frames` עם ‎`BROWSER_HEADERS` שמצרף ‎`Referer`, `Origin`, `User-Agent` | אותה פונקציה. אבל בתא ‎7 יש ‎proxy נוסף בדפדפן כי ‎JavaScript לא יכול לצרף כותרות מסוימות |
+| | תלות ב-internet | כרונית: אם אין רשת ‎‎`grab_frame` מחזיר ‎None והסבב נדלג | חד פעמית: המחברת נכשלת בתא הקונקרטי, המשתמש רואה, מריץ שוב |
+| | ‎IP סטטי | כן, ‎GCP מקצה כתובת קבועה למכונה | לא. ‎IP דינמי לפי הרשת של המשתמש |
+| **קוד משותף** | ‎`app/detect_core.py` | כן. משמש לפריים grab + זיהוי | כן. אותו קובץ, אותם imports |
+| | ‎`app/reid.py` | כן. עם ‎`REID_MODEL=osnet` | כן. ללא ‎`REID_MODEL`, נופל ל-HSV |
+| | ‎`app/cameras.py` | כן. משמש כמקור ‎`GRID_CAMERAS` | כן. אותו קטלוג. המחברת יכולה לבחור מכל 16 המצלמות |
+| | ‎`app/alerts.py`, `app/presence.py` | כן. פעילים בתוך הלולאה של הקולקטור | לא נטענים בכלל. המחברת לא מפעילה מנוע חריגות ‎production |
+
+### 11.3 מודל שונה: yolov8n מול yolov8s
+
+זה ההבדל הנקודתי הראשון שמבלבל. פותחים את המחברת, רואים בתא 0:
+
+```python
+model = load_model(str(_src_dir / 'yolov8n.pt'))
+```
+
+ופותחים את `src/deploy/gcp-vm/collector.service`, רואים בפקודת ההפעלה:
+
+```
+ExecStart=__INSTALL_DIR__/src/.venv/bin/python -m app.collector \
+    --interval 40 --imgsz 512 --burst 2 --burst-stride 13
+```
+
+הפקודה לא מזכירה קובץ משקולות במפורש. `app/collector.py` פונה ל-`load_model(WEIGHTS_PATH)` שבברירת המחדל `WEIGHTS_PATH = 'yolov8s.pt'` (ראה `app/detect_core.py`).
+
+לכן, גם אם התא הראשון במחברת יופעל מתחת לתיקיית `src/` שבה שני הקבצים יושבים (`yolov8n.pt` ו-`yolov8s.pt`), המחברת בוחרת נאנו במפורש והקולקטור בוחר סמול משתמע.
+
+**למה שני מודלים שונים?**
+
+- yolov8n ‏(‎3.2M פרמטרים, ‎‎6 MB) נטען מהר יותר וזוכר פחות. ההשקעה הראשונית של המחברת (‎`torch.load`) לוקחת פחות משנייה על מחשב חזק, וזה שומר על תחושת אינטרקטיביות. הדיוק הנמוך שלו לא מזיק לתא הדגמה של דקה אחת.
+- yolov8s ‏(‎‎‎11.2M פרמטרים, ‎‎22 MB) הכי גבוה שאפשר לרוץ בו על ‎e2-micro בלי OOM. שיפור ה-mAP של כ-‎7.6 נקודות (מ-37.3 ל-44.9) קריטי כי ה-VM דוגם 24 שעות ביממה 4 מצלמות, וכל ‎false negative מצטבר לדיוק היומי של הדוח.
+
+**מה קורה אם משנים את המחברת ל-yolov8s?**
+
+מותר לגמרי. משנים בתא 0 את השורה:
+
+```python
+model = load_model(str(_src_dir / 'yolov8s.pt'))
+```
+
+הריצה תהיה כ-‎2.5 פעמים איטית יותר בכל תא שקורא ל-`predict` או ‎`track`, אבל התוצאה תהיה זהה למה שה-VM היה מדפיס אילו היינו מוציאים ‎log של הפריים הנוכחי. שימושי כשמנסים להבין ‎false negative של ה-VM על ידי הרצת אותה פונקציה על אותה מצלמה מקומית.
+
+### 11.4 ‎imgsz שונה: 640 מול 512
+
+ההבדל השני שקל להתפספס. המחברת לא מעבירה ‎`imgsz` מפורשות. פונקציית ‎`detect_and_count` ב-`app/detect_core.py` נראית כך (מקוצר):
+
+```python
+def detect_and_count(model, frame):
+    res = model.predict(frame, conf=0.35, classes=DETECT_CLASSES, verbose=False)[0]
+    return _count_by_class(res)
+```
+
+בלי ‎`imgsz=`, ‎Ultralytics משתמש בברירת מחדל ‎640×640. הפריים המקורי HD (1920×1080) עובר ‎letterbox ל-‎640×360, ואז לתוך רשת ‎640×640 עם padding.
+
+הקולקטור מעביר במפורש `--imgsz 512` שהמחברת לא. הפריים ההוא הופך ל-‎512×288, ואז לתוך ‎512×512 עם padding.
+
+**ההשלכה:** ריצת המחברת רואה ‎‎`~36%` יותר FLOPs מריצת ה-VM לאותה מצלמה. אנשים רחוקים במיוחד ‎(<30px גובה בפריים המקורי) יזוהו טוב יותר במחברת, ופחות טוב ב-‎VM. זו הסיבה שאם ההשוואה בין ‎"‏‎מה שהמחברת דוגמת עכשיו" לבין "מה שה-VM דגם באותה שנייה" מראה פערים של פריט או שניים, הכיוון של הפער צפוי: המחברת מוצאת יותר.
+
+### 11.5 מנגנון חריגות: מנוע שלם מול פונקציה בודדת
+
+זה ההבדל המעשי הכי גדול, כי הוא משפיע ישירות על מה שנרשם ל-Firestore ומה שמופיע בדוח היומי.
+
+**במחברת (תא 4):**
+
+```python
+def flag_anomalies(s, window=12, z=3.5, min_delta=3):
+    med = s.rolling(window, min_periods=4).median()
+    mad = (s - med).abs().rolling(window, min_periods=4).median() * 1.4826
+    spread = mad.clip(lower=1.0)
+    robust_z = (s - med) / spread
+    return (robust_z.abs() > z) & ((s - med).abs() >= min_delta)
+```
+
+פונקציה של ‎6 שורות. מקבלת ‎Series של ספירות אנשים, מחזירה ‎Series בוליאני שאומר האם כל דגימה חריגה. זה הכל.
+
+**ב-‎VM:** קיים מנוע שלם. הכניסה שלו היא כל דגימה של כל מצלמה בכל סבב, והוא כותב ל-`events` בפירסטור אם וכאשר מתקיים אחד מחמישה תנאים נפרדים. בקוד זה מפוזר על פני:
+
+- ‎`app/alerts.py` -‏ מכיל את הגלאים של ‎`extreme_load` (‎‎robust z על חלון של שעות), ‎`camera_obstructed` (זרם החזיר ‎None ברציפות), ‎`camera_dark` (חישוב ‎luma של הפריים בשילוב עם ‎`is_night` מבוסס שעון מקומי).
+- ‎`app/presence.py` -‏ מנהל ‎`PresenceTracker` שמעקב אחרי ‎entity_id של OSNet, סופר כמה שניות כל ‎ID נמצא מול המצלמה, ופותח אירוע ‎`loiter` כאשר עוברים סף קבוע (‎40 שניות למכונית, 25 לאדם).
+- ‎‎`app/anomaly_crops.py` -‏ מחזיק את ‎`HourlyProfile` שמצטבר לאורך 30 יום. במקום z-score על חלון של דקות, החישוב עוקב אחרי פרופיל השעה: ‎‎`14:00 בימי שני` הוא ה-baseline הפרטי של השעה הזאת ביום הזה.
+- ‎`app/frame_crops.py` -‏ חותך את ה-`box` של האובייקט שהפעיל את החריגה ושומר אותו ל-‎`web/snapshots/anomalies/`. הפריים הזה הוא מה שמופיע בדוח היומי במייל.
+
+**מדוע ההפרדה הזאת חשובה:** כשמפתח שם לב שדוח יומי מציג "‏‎Extreme load" בקונייה בשעה ‎3:00 בבוקר, אין דרך למצוא את מקור ההחלטה במחברת. המחברת לא מפעילה את המנוע הזה כלל. חייבים לחזור ל-`app/alerts.py` בקוד וללמוד את הלוגיקה שם. המחברת אינה תחליף לחיטוט בקוד ה-‎production.
+
+### 11.6 ‎Re-ID: שני עולמות עם אותו שם
+
+הפונקציונליות של "מי זה שוב מולי" קיימת בשתי הסביבות, אבל היא לא זהה.
+
+**במחברת (תא 5b):**
+
+```python
+REID_DB = str(_src_dir / 'data' / 'reid_notebook.db')
+try:
+    reid.close()
+except NameError:
+    pass
+try:
+    Path(REID_DB).unlink(missing_ok=True)
+    print('reid_notebook.db cleared - fresh demo registry')
+except PermissionError:
+    print('...keeping existing rows...')
+
+reid = ReidStore(REID_DB, threshold=0.92)
+```
+
+הקובץ נמחק בכוונה בתחילת כל הרצה כדי שהתא יהיה רפליקבילי. ה-`ReidStore` הוא אותו class מ-`app/reid.py`, אבל הוא נטען בלי משתנה סביבה `REID_MODEL`, לכן נופל אוטומטית ל-‎masked HSV histogram (‎‎‎‎`app/reid.py._hsv_embed`).
+
+**ב-‎VM:**
+
+הקובץ הוא `data/reid.db` (ללא הסיומת ‎`_notebook`). הוא לעולם לא נמחק אוטומטית. גדל עם הזמן, prune חכם מסיר entities שלא נראו יותר מ-‎48 שעות (‎`app/reid.py._prune_stale`) כדי לשמור על גודל הגיוני.
+
+משתנה הסביבה `REID_MODEL=/opt/turkey-footfall/src/data/osnet_x0_25_msmt17.onnx` מוגדר ב-‎`collector.service`. `ReidStore` מזהה את הקובץ, מעלה ‎onnxruntime, וכל ‎`update_from_frame` מרוץ ‎‎`~5-10 ms` על ה-CPU במקום פרוצדורת ה-HSV.
+
+**מדוע ההבדל חשוב:**
+
+- זיהוי HSV מתבלבל בלילה כי כל הסצנה הופכת לצהוב אחיד. במחברת זה מקובל: התא מדגמים דקה אחת ורואים אם רואים ‎`seen_again`, ‎לא מטרתם דיוק לילי.
+- זיהוי OSNet שורד שינוי תאורה, שינוי פוזה, ואפילו חסימה חלקית של האובייקט. ל-VM זה קריטי כי הוא רץ 24 שעות ביממה ורוב הזמן זה או עלייה חדה של אור השחר, או ירידה חדה לצהוב-כתום של הלילה. אילו ה-VM היה משתמש ב-HSV, החריגה ‎`returning` הייתה חוזרת על עצמה כל שינוי תאורה עבור מכונית מזויפת, לא רק אנשים שבאמת חוזרים.
+
+**שני קבצים שונים באותה תיקייה:** במחברת נעשה שימוש ב-`reid_notebook.db` בכוונה כדי לא לזהם את ה-`reid.db` שה-VM כותב אליו כשמסנכרנים חזרה. בפועל, ‎VM ו-‎local לעולם לא רצים על אותה מכונה: ה-`reid.db` יושב על דיסק ה-VM ב-‎`/opt/turkey-footfall/src/data/`, ואילו ‎`reid_notebook.db` נוצר במחשב המקומי. הפרדה שם-‎קובץ מגינה גם ממקרים של סנכרון חלקי (למשל אם מישהו יעתיק ‎`data/` מ-‎VM למחשב מקומי דרך ‎`gcloud compute scp`).
+
+### 11.7 מסלול הפלט: Firestore מול DataFrame בזיכרון
+
+הגורל של ‎`counts = detect_and_count(model, frame)` שונה מהותית בשתי הסביבות.
+
+**ב-‎VM:** בכל סבב, אחרי שכל 4 המצלמות סיימו, ‎`app/collector.py._flush_to_firebase` מריץ כתיבה מרוכזת ל-Firestore:
+
+```python
+# app/collector.py, בערך שורה 800
+firebase.batch()\
+    .set(f"footfall/{doc_id}", counts_doc)\
+    .set(f"latest/{cam_id}", latest_doc)\
+    .commit()
+```
+
+אחר כך, אם יש חריגות, כתיבה נפרדת ל-‎`events/{cam_id}/{ts}`. ואם חלף מרווח של 5 סבבים, גם ‎`reid_stats/{cam_id}` מתעדכן. הכל בפרסיסטנטי, שרוד ‎reboot, פתוח לקריאה מהדשבורד מיד.
+
+**במחברת:** תא 3 מריץ:
+
+```python
+def footfall_series(stream_url, cam_name, interval_s=20, duration_min=1.0):
+    rows, t_end = [], time.time() + duration_min * 60
+    while time.time() < t_end:
+        ts = dt.datetime.now(dt.timezone.utc)
+        f = grab_frame(stream_url)
+        c = detect_and_count(model, f) if f is not None else {'person': np.nan, 'vehicles': np.nan}
+        rows.append({'ts': ts, 'cam': cam_name, 'person': c.get('person'), 'vehicles': c.get('vehicles')})
+        print(f"[{ts:%H:%M:%S}] person={c.get('person')} vehicles={c.get('vehicles')}")
+        time.sleep(interval_s)
+    return pd.DataFrame(rows)
+
+df = footfall_series(stream_url, cam['name'], interval_s=10, duration_min=1.0)
+df.to_csv(DATA_DIR / f'footfall_{CAM_ID}.csv', index=False)
+```
+
+הפלט הוא `df` בזיכרון של ה-kernel של ‎Jupyter, וגם `.csv` בתיקייה ‎`data/`. אין קשר ל-Firestore. אם המחשב האישי כובה, ה-`df` נעלם. ה-`.csv` נשאר.
+
+**מה שאף פעם לא קורה:** המחברת לא כותבת ל-Firestore. חשוב לדעת את זה כי מפתח בטעות עלול לחשוב שהרצה מקומית תעדכן את הדשבורד הענני. היא לא. הדשבורד מציג רק מה שה-VM כתב. אם רוצים ‎test end-to-end של ‎write ל-Firestore, יש לבצע זאת דרך `tools/publish_test_event.py` (יש כזה כלי ב-‎`src/tools/`) או מ-VM ישירות.
+
+### 11.8 הדשבורד: אותו קובץ, שני מקומות הגשה
+
+זה סעיף שקל להתבלבל בו כי הדשבורד ‎"‏‎נראה אותו דבר" בשתי הסביבות.
+
+**המחברת (תא 7):**
+
+```python
+from app.dashboard_server import DashboardHandler, WEB_DIR, port_is_free
+
+DASHBOARD_PORT = 8000
+if getattr(_main, '_dash_server', None) is None:
+    if not port_is_free(DASHBOARD_PORT):
+        print(f'Port {DASHBOARD_PORT} already in use...')
+        _main._dash_server = 'external'
+    else:
+        factory = lambda *a, **k: DashboardHandler(*a, directory=str(WEB_DIR), **k)
+        http.server.ThreadingHTTPServer.allow_reuse_address = True
+        srv = http.server.ThreadingHTTPServer(('', DASHBOARD_PORT), factory)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        _main._dash_server = srv
+```
+
+התא הזה מפעיל ‎HTTP server מקומי על ‎`localhost:8000`. הוא מגיש את הקבצים מ-`src/web/`:
+
+- ‎`index.html` הראשי עם ‎`<script>` שיוצר ‎Firebase Web SDK, מתחבר ל-project, ומרים ‎`onSnapshot` על ‎`footfall`, ‎`latest`, ‎`events`, ‎`reid_stats`.
+- ‎`app.js` שמעדכן את הכרטיסים כשמגיעה עדכן מ-Firestore.
+- ‎`firebase-config.js` עם מפתחות public-read.
+
+לאחר מכן התא מטמיע ‎iframe ב-Jupyter שמצביע ל-`http://localhost:8000/`. הדפדפן של המחברת (‎JupyterLab) פותח את הדשבורד בתוך ה-notebook.
+
+**ה-VM:** לא מריץ ‎`serve.py` ולא ‎`dashboard_server.py`. אין ‎HTTP endpoint ב-‎VM. בפועל, אף אחד לא רואה את הדשבורד מ-‎VM. יש שלוש דרכים לצפות בדשבורד בפועל:
+
+1. הרצה מקומית של ‎`python src/serve.py` (או תא 7 של המחברת) שקוראת מ-Firestore מרחוק.
+2. הרצה של ‎`firebase deploy --only hosting` שמעלה את ‎`src/web/` ל-Firebase Hosting. הדשבורד זמין ב-URL ציבורי.
+3. הצבה בשירות ‎static hosting אחר (GitHub Pages, Netlify, וכולי).
+
+**נקודה טכנית חשובה ‎(proxy ל-tvkur):**
+
+הדשבורד מנסה לנגן את הזרם החי של המצלמות דרך ‎hls.js. הדפדפן של המשתמש לא יכול לצרף ‎`Referer: player.tvkur.com` ל-request של ‎‎`content.tvkur.com/l/*/master.m3u8`, לכן ‎`content.tvkur.com` מחזיר ‎403.
+
+הפתרון: הדשבורד קורא לנתיבים כמו ‎`/tvkur/<stream_id>/master.m3u8`, ו-`dashboard_server.py._proxy_tvkur` מעביר את הבקשה הלאה ל-`content.tvkur.com` עם הכותרות הנכונות. הבעיה: הפתרון עובד רק כשיש HTTP server מקומי. בפריסה של ‎static hosting לא יהיה ‎proxy, והנגן ידום עד שמשתמש יריץ ‎`serve.py` על מחשבו.
+
+זה סיבה מרכזית למה תא 7 קיים בכלל, ולמה הוא מאתחל את ה-‎`serve.py` המקומי לפני הטמעת ה-iframe.
+
+### 11.9 ‎LoRA hot-swap: קיים רק ב-‎VM
+
+לפרויקט יש מנגנון ‎adapter hot-swap שמאפשר להחליף את ‎Detect head של המודל באמצע ריצה בלי restart. הזרימה המלאה:
+
+1. המשתמש מתייג פריימים בדשבורד המקומי (‎`review_frames` פאנל).
+2. ‎`app/training_sync.py` מעלה את ה-`reviews.json` ל-Firebase Storage ‎`training/`.
+3. ‎GitHub Actions workflow `train-head` מריץ ‎`python tools/train_head.py` שמאמן ‎adapter על הפריימים החדשים.
+4. אם ‎`tools/promote_adapter.py` עובר את ‎gate ההשוואה מול ה-adapter הנוכחי, הוא כותב `training/adapters/current.json` שמצביע לקובץ ה-‎.pt החדש.
+5. **ב-VM,** ‎`app/adapters.py.refresh_from_storage` פועל כל 30 סבבים. אם ‎`current.json` השתנה, הוא מוריד את הקובץ, מוחל את ‎‎`load_state_dict(head_tensors, strict=False)` ‎in-place על המודל.
+
+**במחברת:** אין ‎`refresh_from_storage`. ה-`load_model` בתא 0 מחזיר מודל שנטען מהקובץ המקומי (‎‎`yolov8n.pt`) ולא מסתכל על ‎Storage. תוצאה: המחברת רואה את המודל הבסיסי המקורי, ואילו ה-VM ‎might already run with a promoted head.
+
+**מה זה אומר בפועל:** אם המחברת מריצה את אותה המצלמה ורואה תוצאה שונה מזו שה-VM כותב ל-Firestore, אחד ההסברים האפשריים הוא ‎head promotion. הבדיקה: להריץ `python tools/promote_adapter.py --status` ולראות איזה ‎head פעיל, ומאיזה תאריך.
+
+### 11.10 דוחות אימייל: קיים רק ב-‎VM
+
+‎`digest.timer` ‎+ ‎`digest.service` הם זוג ‎systemd שמפעיל ‎`python -m tools.daily_digest` פעמיים ביום. הקובץ ‎`src/tools/daily_digest.py` בונה ‎PDF מעוצב עם:
+
+- סיכום ‎24 שעות של ספירות ‎person / vehicles לכל מצלמה.
+- טבלה של כל החריגות שאירעו, ממוספרות ‎#1 עד ‎#N.
+- כרטיסי ‎evidence עם ‎fullframe (עם ‎bounding box מסומן) ‎+ ‎crop של האובייקט שהפעיל את החריגה.
+- סטטיסטיקות של ‎model reviews (כמה תיוגים ידניים נוספו, יחס ‎correct/incorrect).
+
+הכל נשלח דרך ‎Gmail SMTP. משתמשי המערכת מקבלים ‎push notification בטלפון דרך אפליקציית Gmail.
+
+**במחברת:** אין ‎pipeline דוחות. תא 6 מציג ‎`business_score` שהוא סיכום קטן (‎`volume_median`, ‎`linger_rate`, ‎`consistency`, ציון ‎0-100). זו הצגה בזיכרון בלבד. תא 15-18 מציעים דירוג משווה בין מקומות, אבל שוב ‎ההצגה מקומית ולא נשלחת לאף אחד.
+
+### 11.11 מגבלות זיכרון וטיפול בשגיאות
+
+**ב-‎VM (מ-`collector.service`):**
+
+```
+Environment=OMP_NUM_THREADS=2
+Environment=MALLOC_ARENA_MAX=2
+MemoryHigh=760M
+MemoryMax=900M
+Restart=always
+RestartSec=15
+```
+
+הכללים כאן חמורים. חריגה מ-‎900MB זרוקה מהקרנל (‎OOM kill). אחרי הזריקה, ‎`Restart=always` מפעיל את הקולקטור שוב אחרי 15 שניות. יומן העברה שלם ב-`journalctl -u collector -f`.
+
+**במחברת:** אין ‎cgroup, אין ‎`Restart`. אם תא נכשל מ-‎`MemoryError`, ‎Jupyter מדפיס ‎traceback והמשתמש רואה. אם ה-kernel קורס לגמרי, המשתמש לוחץ ‎"‏‎Restart Kernel" ומתחיל מחדש. כל המשתנים בזיכרון אבודים.
+
+**‎`OMP_NUM_THREADS`:** ‎ב-‎VM זה קבוע ‎2 כי המכונה יש רק 2 vCPU. במחברת זה ‎‎‎לא מוגדר, אז ‎torch משתמש ב-‎‎כל הליבות. במחשב עם 8 ליבות, זה יגרום ל-inference להיות ‎‎‎‎3-4 פעמים מהיר יותר מב-‎VM.
+
+**‎`MALLOC_ARENA_MAX`:** בעיה שקטה של ‎glibc. כברירת מחדל, ‎glibc יוצר ‎malloc arena בנפרד עבור כל ‎thread שיוצר בקשת זיכרון בפעם הראשונה. עם ‎`OMP_NUM_THREADS=2` וגם עם ‎torch שמייצר ‎threads פנימיים לזיהוי, ‎python process עלול לצבור ‎8-16 arenas כל אחד עם ‎fragment של ‎‎`~10-15 MB` שלא משוחררים. הצטבר של ‎50-150 MB שקט. במכונה עם ‎1 GB זה קורע. הפתרון: מקבעים ‎`MALLOC_ARENA_MAX=2`, שני ‎arenas ‎בסך הכל. חוסך ‎~80 MB.
+
+במחברת אין את הצורך הזה. במחשב עם ‎‎16 GB RAM, ‎80 MB מבוזבזים לא מזיזים לאף אחד.
+
+### 11.12 מתי משתמשים במה: החלטה מעשית
+
+הטבלה הבאה מסכמת את השאלה ‎"‏‎מה עלי להריץ עכשיו?" למקרים שכיחים.
+
+| המשימה | הסביבה הנכונה | סיבה |
+|---|---|---|
+| לראות מה קורה במצלמה עכשיו | דשבורד ‎(‎`serve.py` או ‎תא 7 של המחברת) | קורא מ-Firestore בזמן אמת, מציג את מה שה-VM כתב לפני שניות ספורות |
+| לבדוק את הדיוק של המודל על ‎scene ספציפי | מחברת, תא 2 (single frame) | להריץ ‎`res.plot()` ולראות את ‎bounding boxes על התמונה |
+| לחקור למה החריגה לא נורתה | קוד ‎`app/alerts.py` ו-`app/presence.py`. המחברת לא תעזור | המחברת לא מפעילה את מנועי החריגות. חייבים לקרוא את הקוד ולהריץ מבחני יחידה |
+| ‎"‏‎האם הדשבורד מציג הכל?" | דשבורד + השוואה ל-‎`gcloud compute ssh` ‎+ ‎`journalctl -u collector -f` | הדשבורד מציג רק את מה שנכתב לפירסטור. אם משהו חסר, בודקים ב-VM |
+| להוסיף מצלמה חדשה | לערוך ‎`app/cameras.py`, לבדוק במחברת (תא 1-2), לשמר בגיט, לפרוס ל-VM דרך ‎`gcloud compute ssh` ‎+ ‎`git pull` ‎+ ‎`systemctl restart collector` | שינויים קבועים חייבים להיות בקוד, מסונכרנים ל-VM. הבדיקה המקומית מוודאת שהזרם ניתן לפתיחה בכלל |
+| להריץ ‎fine-tune על ‎adapter | ‎GitHub Actions ‎(‎`train-head` workflow) | ‎VM לא יכול לאמן: אין ‎GPU. המחברת גם לא (‎`ultralytics train` על CPU של מחשב אישי לוקח שעות רבות) |
+| לתייג פריימים לאימון | הדשבורד המקומי (‎פאנל ‎"‏‎Review detections") | התיוגים עולים אוטומטית ל-Storage דרך ‎`app/training_sync.py` |
+| לבדוק שכתיבה ל-Firestore לא נשברה | להריץ קטע יזום מ-‎`tools/` (למשל ‎`tools/publish_test_event.py`) | המחברת לא כותבת. חייבים ‎tool ייעודי או ‎VM |
+| לצפות בדוח היומי לפני שהוא נשלח | ‎`gcloud compute ssh` ‎+ ‎`python -m tools.daily_digest --dry-run > /tmp/preview.pdf` | הפקודה בנויה עם ‎`--dry-run` שכותב לקובץ ולא שולח מייל |
+| להבין למה זרם ‎tvkur לא מתחבר | להריץ ‎תא 2 של המחברת ידנית עם ‎`CAM_ID` הבעייתי, לראות ‎traceback | ‎VM שקט: הוא מדפיס ‎`grab_frame miss` ורצף. המחברת נותנת ‎traceback מלא של requests |
+
+### 11.13 טעויות נפוצות בהבנת ההבדל
+
+הסעיף הזה מרכז שגיאות שחוזרות ומתעורר לא פעם.
+
+> **"‏‎הרצתי את המחברת ולא רואה עדכון בדשבורד."** נכון. המחברת לא כותבת ל-Firestore. הדשבורד מציג מה שה-VM כתב. אם ה-VM מושבת, הדשבורד יקפא (‎‎`onSnapshot` לא יקבל עדכונים חדשים). לוודא סטטוס ‎VM עם ‎`systemctl status collector` דרך SSH.
+
+> **"‏‎שיניתי ‎`app/cameras.py` וזה עובד במחברת אבל לא מופיע בדשבורד."** נכון. השינוי המקומי בקוד לא מגיע ל-VM עד ‎`git push` ‎+ ‎`git pull` ‎ב-VM ‎+ ‎`systemctl restart collector`. הדשבורד מציג את ‎`GRID_CAMERAS` כפי שהיה בעת הריצה של ה-VM.
+
+> **"‏‎הזיהוי במחברת מוצא ‎5 אנשים, ‎VM כותב 3."** צפוי. המחברת רצה עם ‎yolov8n ‎+ imgsz 640, ה-VM עם ‎yolov8s ‎+ imgsz 512. בנוסף, ‎VM מפעיל ‎per-camera confidence gate מ-`data/confidence_boost.json` שיכול להיות מחמיר יותר מ-`0.35` הקבוע של המחברת. פער של ‎‎‎1-2 פריטים לגמרי בטווח.
+
+> **"‏‎ראיתי חריגה בדשבורד אבל תא ‎4 של המחברת לא מצא כלום."** צפוי. תא ‎4 בודק רק ‎extreme_load על סדרת דקה אחת. הדשבורד מציג גם ‎`camera_dark`, ‎`camera_obstructed`, ‎`loiter`, ‎`returning`. אלה לא נבדקים במחברת בכלל.
+
+> **"‏‎‎`reid_notebook.db` יש בו ‎‎24 entities, ‎`reid.db` יש בו ‎‎‎2,400. איך זה?"** ההסבר: ‎`reid.db` של ‎VM נצבר ‎48 שעות ברציפות של ‎4 מצלמות. ‎`reid_notebook.db` נמחק בתחילת כל הרצה של תא 5b ומצטבר מדגימה של ‎40 שניות בלבד. סדר גודל שונה לחלוטין, גם כי הזמן שונה וגם כי OSNet יותר בררני מ-HSV.
+
+> **"‏‎שיניתי משתני סביבה במחברת (‎‎`os.environ['...']`) והתקווה שזה יגיע ל-VM."** לא יגיע. משתני סביבה של המחברת פועלים על ה-kernel של Jupyter בלבד. משתני סביבה של ‎VM נטענים מ-`collector.service`. שינוי חייב להיות בקובץ יחידת ‎systemd ולאחר מכן ‎`systemctl daemon-reload` ‎+ ‎`systemctl restart collector`.
+
+> **"‏‎יש לי מפתח ‎Firebase באחת מהתיקיות של המחברת."** לא נדרש. הדשבורד קורא מ-‎`onSnapshot` בעזרת ‎`firebase-config.js` שמכיל רק מפתחות ‎public. כתיבה ל-‎Firestore אף פעם לא מתבצעת מהמחברת. אם קיים ‎`serviceAccount.json` במחשב האישי, יש למחוק אותו: הוא מקום סיכון גדול (‎‎admin privileges), ולא נדרש לפעילות המחברת.
+
+### 11.14 סיכום קצר
+
+השתיים לא רצות באותם משאבים, לא כותבות לאותם יעדים, ולא מריצות את אותו מודל. ה-VM הוא המנוע האמיתי של הפרויקט, פועל 24 שעות ביממה, מקבל את ההחלטות שהמשתמש רואה בדשבורד ובדוחות. המחברת היא כלי חקירה: להסתכל על מצלמה בודדת עכשיו, להבין מה קורה בפריים אחד, לנסות פונקציה, להשוות למה שהעננן ראה. שתיהן חולקות את ‎`app/detect_core.py`, `app/reid.py`, `app/cameras.py`, אבל שאר המנועים ‎(‎alerts, presence, anomaly_crops, adapters, digest) שייכים ל-VM בלבד.
 
 ---
 
