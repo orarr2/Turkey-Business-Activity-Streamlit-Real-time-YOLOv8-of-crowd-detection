@@ -28,6 +28,10 @@ export const GRID_SLOTS = [
     placeholder_name: "Konya - Hükümet Meydanı",
     placeholder_hls:  tvkurHls("c77i84vbb2nj4i0fr80g"),
     placeholder_page: "https://webcamera24.com/camera/turkey/8043-sarraflar-yeralti-carsisi/",
+    // primary + fallbacks mirror app/cameras.py GRID_SLOTS. The picker in
+    // the notebook (?cams=...) matches user picks against `primary`.
+    primary:          "konya_hukumet",
+    fallbacks:        ["otogar_kavsagi", "konya_kulturpark", "konya_millet_caddesi"],
   },
   {
     slot_id:          "slot_otogar",
@@ -35,6 +39,8 @@ export const GRID_SLOTS = [
     placeholder_name: "Konya - Otogar Kavşağı",
     placeholder_hls:  tvkurHls("c77i91vbb2nj4i0fr81g"),
     placeholder_page: "https://webcamera24.com/camera/turkey/8044-otogar-kavsagi/",
+    primary:          "otogar_kavsagi",
+    fallbacks:        ["konya_millet_caddesi", "konya_hukumet", "konya_kulturpark"],
   },
   {
     slot_id:          "slot_kulturpark",
@@ -42,6 +48,8 @@ export const GRID_SLOTS = [
     placeholder_name: "Konya - Kültürpark",
     placeholder_hls:  tvkurHls("c77i6hb84cnrb6mlji3g"),
     placeholder_page: "https://webcamera24.com/camera/turkey/8058-kulturpark/",
+    primary:          "konya_kulturpark",
+    fallbacks:        ["konya_millet_caddesi", "konya_hukumet", "otogar_kavsagi"],
   },
   {
     slot_id:          "slot_millet_caddesi",
@@ -49,6 +57,8 @@ export const GRID_SLOTS = [
     placeholder_name: "Konya - Millet Caddesi / Hastane Kavşağı",
     placeholder_hls:  tvkurHls("c77i9cfbb2nj4i0fr82g"),
     placeholder_page: "https://webcamera24.com/camera/turkey/8046-millet-caddesi/",
+    primary:          "konya_millet_caddesi",
+    fallbacks:        ["konya_kulturpark", "otogar_kavsagi", "konya_hukumet"],
   },
   // konya_ince_minareli (tram view, tvkur c77ib8vbb2nj4i0fr8bg) is cataloged
   // in app/cameras.py but kept OUT of the grid - four slots is the cadence
