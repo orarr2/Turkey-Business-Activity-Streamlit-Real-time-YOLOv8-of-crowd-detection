@@ -271,39 +271,59 @@ CAMERAS = {
 # stay in CAMERAS above for anyone running from a Turkey-routed IP; if they
 # unblock again they can be put back in this list.
 #
-# Rule for the fallback chains: every slot stays within webcamera24 / tvkur,
-# and each chain lists the other three Konya cams so a token rotation on the
-# primary doesn't leave the tile empty.
+# Rule for the fallback chains (updated 2026-07 after the 48h empty-run):
+# every chain now spans MULTIPLE backends. The first three entries stay on
+# webcamera24 / tvkur so a single-camera outage swaps into a sibling that
+# reaches the same host; the last two are IBB `kamerayayin.ibb.istanbul`
+# cameras plus `konya_ince_minareli` (also tvkur but on a different stream
+# id) so a full tvkur or webcamera24 backend outage still has somewhere to
+# go. Before this change every fallback lived on the same backend, so when
+# tvkur went 404 all four grid slots died together and the report still
+# said "reporting normally".
+#
+# IBB `_yeni` entries were geo-blocked from GCP us-east1 in early July 2026
+# per the note above. They still belong at the tail of the chain: they cost
+# nothing when they fail (the picker skips them within a few rounds) and
+# unblock as soon as IBB relaxes the block or the VM is behind a TR proxy.
 GRID_SLOTS = [
     {
         "slot_id":      "slot_konya_hukumet",
         "display_area": "Konya - Hukumet",
         "primary":      "konya_hukumet",
-        "fallbacks":    ["otogar_kavsagi", "konya_kulturpark", "konya_millet_caddesi"],
+        "fallbacks":    ["otogar_kavsagi", "konya_kulturpark",
+                         "konya_millet_caddesi", "konya_ince_minareli",
+                         "taksim_yeni", "sultanahmet_1_yeni"],
     },
     {
         "slot_id":      "slot_otogar",
         "display_area": "Konya - Otogar",
         "primary":      "otogar_kavsagi",
-        "fallbacks":    ["konya_millet_caddesi", "konya_kulturpark", "konya_hukumet"],
+        "fallbacks":    ["konya_millet_caddesi", "konya_kulturpark",
+                         "konya_hukumet", "konya_ince_minareli",
+                         "beyazit_meydan_yeni", "eyup_sultan_yeni"],
     },
     {
         "slot_id":      "slot_kulturpark",
         "display_area": "Konya - Kulturpark",
         "primary":      "konya_kulturpark",
-        "fallbacks":    ["konya_millet_caddesi", "konya_hukumet", "otogar_kavsagi"],
+        "fallbacks":    ["konya_millet_caddesi", "konya_hukumet",
+                         "otogar_kavsagi", "konya_ince_minareli",
+                         "buyuk_camlica_yeni", "taksim_yeni"],
     },
     {
         "slot_id":      "slot_millet_caddesi",
         "display_area": "Konya - Millet Caddesi",
         "primary":      "konya_millet_caddesi",
-        "fallbacks":    ["konya_kulturpark", "otogar_kavsagi", "konya_hukumet"],
+        "fallbacks":    ["konya_kulturpark", "otogar_kavsagi",
+                         "konya_hukumet", "konya_ince_minareli",
+                         "sultanahmet_1_yeni", "eyup_sultan_yeni"],
     },
     # konya_ince_minareli (tram-line view) stays in CAMERAS above as a
-    # catalog option but is NOT in the grid: a fifth slot costs ~20% round
-    # time and RAM on the e2-micro, and the operator prefers the 4-camera
-    # cadence. Swap it in for one of the four if rail coverage ever
-    # outranks refresh speed.
+    # catalog option and now appears as a tail-of-chain fallback in every
+    # slot; it is NOT the primary of a dedicated slot because a fifth grid
+    # slot costs ~20% round time and RAM on the e2-micro, and the operator
+    # prefers the 4-camera cadence. Swap it in as primary of one of the
+    # four if rail coverage ever outranks refresh speed.
 ]
 
 # Backward compat for the viewer notebook / smoke tests: the four primary cams.

@@ -40,6 +40,7 @@ import datetime as dt
 import json
 import math
 import time
+import urllib.error
 from pathlib import Path
 
 import cv2
@@ -1170,8 +1171,17 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
                     _ENTITY_LAST_BOX[(cam_id, r.entity_id)] = (box, time.time())
             if len(_ENTITY_LAST_BOX) > _ENTITY_BOX_CAP:
                 _prune_entity_boxes()   # backstop; age prune runs in main()
-    except Exception as e:
-        print(f"[{ts}] {slot_id} ({cam_id}): MISS ({e})")
+    except (RuntimeError, OSError, cv2.error, urllib.error.URLError,
+            ConnectionError, TimeoutError, ValueError) as e:
+        # Narrowed from `except Exception` (2026-07): the old catch-all
+        # swallowed KeyError / AttributeError from any code inside this
+        # block and rendered them as an indistinguishable "MISS", so a
+        # programming bug looked identical to a dead stream. The set above
+        # covers the real stream failures we want to keep going through:
+        # RuntimeError("empty frame") from grab_burst, cv2 decode errors,
+        # HTTP failures inside _http_get, TCP timeouts, and int/float
+        # conversion errors from a malformed playlist.
+        print(f"[{ts}] {slot_id} ({cam_id}): MISS ({type(e).__name__}: {e})")
         counts = {name: None for name in CLASSES_OF_INTEREST}
         counts["vehicles"] = None
         ok = 0

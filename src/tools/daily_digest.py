@@ -99,16 +99,26 @@ def footfall_stats(records: list[dict]) -> list[dict]:
     cams: dict[str, dict] = {}
     for r in records:
         cam = str(r.get("cam_name") or r.get("cam_id") or "?")
-        c = cams.setdefault(cam, {"cam": cam, "samples": 0,
+        c = cams.setdefault(cam, {"cam": cam, "samples": 0, "misses": 0,
                                   "peak_person": 0, "peak_person_ts": "",
                                   "peak_vehicles": 0, "typ_kmh": 0.0,
                                   "_spd": []})
-        c["samples"] += 1
         p = r.get("person")
+        v = r.get("vehicles")
+        # A "sample" is a round that actually produced usable frames. A MISS
+        # (empty frame / decode error) still gets logged with ok=0 but must
+        # not inflate the sample count - otherwise 12h of dead streams looks
+        # identical to 12h of real data in the report.
+        is_good = (r.get("ok") == 1
+                   or isinstance(p, (int, float))
+                   or isinstance(v, (int, float)))
+        if is_good:
+            c["samples"] += 1
+        else:
+            c["misses"] += 1
         if isinstance(p, (int, float)) and p > c["peak_person"]:
             c["peak_person"] = int(p)
             c["peak_person_ts"] = str(r.get("ts") or "")
-        v = r.get("vehicles")
         if isinstance(v, (int, float)) and v > c["peak_vehicles"]:
             c["peak_vehicles"] = int(v)
         spd = (r.get("speeds") or {}).get("median_kmh")
@@ -185,10 +195,26 @@ def compose_digest(now_il: dt.datetime, window_hours: int,
     # health first - a stuck camera changes how everything below reads
     if stale_slots:
         for s in stale_slots:
-            w = (f"WARNING: camera {s['cam']} has not reported for "
-                 f"{s['age_min']} minutes")
+            reason = s.get("reason")
+            if reason:
+                w = f"WARNING: camera {s['cam']} is {reason}"
+            else:
+                w = (f"WARNING: camera {s['cam']} has not reported for "
+                     f"{s['age_min']} minutes")
             lines.append("! " + w)
             html.append(f"<p style='color:#b00'><b>{w}</b></p>")
+    elif cam_stats and all(c["peak_person"] == 0 and c["peak_vehicles"] == 0
+                           for c in cam_stats):
+        # Every camera's latest doc looks fresh yet nothing was ever
+        # detected across the window - the streams are almost certainly
+        # dead or geo-blocked upstream. Without this guard the report
+        # says "reporting normally" while every peak is 0.
+        w = (f"WARNING: {len(cam_stats)} camera(s) reporting but detected "
+             "0 people and 0 vehicles across the entire window - streams "
+             "may be dead, geo-blocked or obscured. Check the VM journal "
+             "for repeated MISS lines.")
+        lines.append("! " + w)
+        html.append(f"<p style='color:#b00'><b>{w}</b></p>")
     else:
         lines.append("All cameras reporting normally.")
         html.append("<p>All cameras reporting normally.</p>")
@@ -278,10 +304,19 @@ def fetch_window(db, window_hours: int
 def stale_from_latest(latest: list[dict],
                       now_utc: dt.datetime | None = None,
                       active_slots: set[str] | None = None) -> list[dict]:
-    """Slots whose newest sample is old. `active_slots` filters to the
-    CURRENT grid - `latest` keeps documents of cameras that once ran and
-    were since removed (observed live: the catalog-only tram camera showed
-    up as '1462 minutes stale'), and those are history, not alarms."""
+    """Slots whose newest sample is old, OR fresh but last round was a MISS.
+
+    Two failure modes surface here:
+      * traditional stale: the collector stopped writing (`ts` gone old);
+      * silent-miss: collector keeps writing but every round decodes to
+        empty frames - `ts` stays fresh but `ok=0`. Without the second
+        check the report reads "reporting normally" while every peak is 0.
+
+    `active_slots` filters to the CURRENT grid - `latest` keeps documents
+    of cameras that once ran and were since removed (observed live: the
+    catalog-only tram camera showed up as '1462 minutes stale'), and
+    those are history, not alarms.
+    """
     now_utc = now_utc or dt.datetime.now(dt.timezone.utc)
     out = []
     for d in latest:
@@ -294,10 +329,17 @@ def stale_from_latest(latest: list[dict],
         except ValueError:
             continue
         age_min = int((now_utc - t).total_seconds() // 60)
-        if age_min >= STALE_SLOT_MIN:
-            out.append({"cam": str(d.get("cam_name") or d.get("cam_id")
-                                   or d.get("slot") or "?"),
-                        "age_min": age_min})
+        traditional_stale = age_min >= STALE_SLOT_MIN
+        # ok is only set to 0 by collector.py on a MISS; a legacy record
+        # without the field is treated as "unknown" (not flagged).
+        silent_miss = d.get("ok") == 0
+        if traditional_stale or silent_miss:
+            entry = {"cam": str(d.get("cam_name") or d.get("cam_id")
+                                or d.get("slot") or "?"),
+                     "age_min": age_min}
+            if silent_miss and not traditional_stale:
+                entry["reason"] = "producing empty frames"
+            out.append(entry)
     return sorted(out, key=lambda s: -s["age_min"])
 
 

@@ -556,9 +556,25 @@ def compose_pdf(out_path: str | Path, *,
     story.append(Paragraph("Camera Status", styles["h"]))
     if stale_slots:
         for s in stale_slots:
-            story.append(Paragraph(
-                f"⚠  {s['cam']} - not reporting for {s['age_min']} minutes",
-                styles["warn"]))
+            reason = s.get("reason")
+            if reason:
+                msg = f"⚠  {s['cam']} - {reason}"
+            else:
+                msg = (f"⚠  {s['cam']} - not reporting for "
+                       f"{s['age_min']} minutes")
+            story.append(Paragraph(msg, styles["warn"]))
+    elif cam_stats and all(c["peak_person"] == 0 and c["peak_vehicles"] == 0
+                           for c in cam_stats):
+        # Silent-miss guard: every camera looks fresh but nothing was
+        # detected across the window - the streams are almost certainly
+        # dead or geo-blocked. Without this the report reads "all cameras
+        # active and reporting normally" while every peak is 0.
+        story.append(Paragraph(
+            f"⚠  {len(cam_stats)} camera(s) reporting but detected 0 people "
+            "and 0 vehicles across the entire window - streams may be dead, "
+            "geo-blocked or obscured. Check the VM journal for repeated "
+            "MISS lines.",
+            styles["warn"]))
     else:
         story.append(Paragraph("✓  All cameras active and reporting normally",
                                styles["ok"]))

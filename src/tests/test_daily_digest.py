@@ -52,8 +52,25 @@ def test_footfall_stats_peaks_and_speed():
     assert stats[0]["peak_person_ts"] == "2026-07-11T06:30:00Z"
     assert stats[0]["peak_vehicles"] == 2
     assert stats[0]["typ_kmh"] == 42.5      # median-of-medians, not the 127 outlier
-    assert stats[0]["samples"] == 3
+    # samples counts only rounds that produced usable frames - the None/None
+    # row is a MISS and lands in the misses counter instead.
+    assert stats[0]["samples"] == 2
+    assert stats[0]["misses"] == 1
     assert stats[1]["cam"] == "Otogar" and stats[1]["peak_vehicles"] == 7
+    assert stats[1]["samples"] == 1 and stats[1]["misses"] == 0
+
+
+def test_footfall_stats_all_miss_shows_zero_samples():
+    """12h of dead streams: samples must be 0, misses = round count. Without
+    the fix, samples was equal to the round count and the report couldn't
+    tell dead streams from a genuinely quiet window."""
+    rows = [{"cam_name": "Hukumet", "person": None, "vehicles": None,
+             "ts": f"2026-07-11T{h:02d}:00:00Z", "ok": 0}
+            for h in range(12)]
+    stats = footfall_stats(rows)
+    assert stats[0]["samples"] == 0
+    assert stats[0]["misses"] == 12
+    assert stats[0]["peak_person"] == 0 and stats[0]["peak_vehicles"] == 0
 
 
 def test_stale_slots_flagged():
@@ -73,6 +90,24 @@ def test_stale_slots_flagged():
     stale = stale_from_latest(latest, now_utc=now,
                               active_slots={"s1", "s2", "s3"})
     assert [s["cam"] for s in stale] == ["Stuck"]
+
+
+def test_stale_slots_flag_silent_miss():
+    """A slot with a FRESH ts but ok=0 (collector writing empty frames)
+    used to escape stale detection entirely - the report then read as
+    'all cameras reporting normally' even though every peak was 0. The
+    guard now flags it with a distinct reason so the operator can tell
+    a dead stream from a stopped collector."""
+    now = dt.datetime(2026, 7, 11, 12, 0, tzinfo=dt.timezone.utc)
+    latest = [
+        {"cam_name": "Hukumet", "slot": "s1",
+         "ts": "2026-07-11T11:58:00Z", "ok": 0},          # fresh but MISS
+        {"cam_name": "Otogar",  "slot": "s2",
+         "ts": "2026-07-11T11:59:00Z", "ok": 1},          # healthy
+    ]
+    stale = stale_from_latest(latest, now_utc=now)
+    assert [s["cam"] for s in stale] == ["Hukumet"]
+    assert stale[0]["reason"] == "producing empty frames"
 
 
 def test_training_lines_no_data():
@@ -150,3 +185,26 @@ def test_promoted_line():
                                 reviews={"frames_labeled": 25})
     assert "promoted a new detection head" in text
     assert "head_run9.pt" in text
+
+
+def test_report_warns_when_every_peak_is_zero():
+    """The bug that produced the 48h-empty run: cameras look fresh in
+    `latest`, so stale_slots is empty, but every peak is 0 across every
+    slot because every round is a MISS. The old digest said "All cameras
+    reporting normally" - a lie. The report must call out the
+    all-zero-data case explicitly."""
+    stats = footfall_stats([
+        {"cam_name": "Hukumet", "person": None, "vehicles": None,
+         "ts": "2026-07-11T11:00:00Z", "ok": 0},
+        {"cam_name": "Otogar",  "person": None, "vehicles": None,
+         "ts": "2026-07-11T11:00:00Z", "ok": 0},
+        {"cam_name": "Kulturpark", "person": None, "vehicles": None,
+         "ts": "2026-07-11T11:00:00Z", "ok": 0},
+        {"cam_name": "Millet", "person": None, "vehicles": None,
+         "ts": "2026-07-11T11:00:00Z", "ok": 0},
+    ])
+    _, text, html = compose_digest(_NOON, 12, [], stats, None, [])
+    assert "reporting normally" not in text
+    assert "0 people and 0 vehicles" in text
+    assert "streams may be dead" in text
+    assert "0 people and 0 vehicles" in html

@@ -14,6 +14,46 @@ import urllib.request
 import cv2
 import numpy as np
 
+# HLS/RTSP timeouts. Without them a stream that opens but never delivers
+# packets (CDN routing weirdness, tvkur backend hung, geo-blocking that
+# stalls the response mid-handshake) leaves `cv2.VideoCapture.read()`
+# blocked for tens of seconds. The collector runs slots serially, so one
+# stuck stream drags every other camera's round with it and the operator
+# sees "empty frame" on all four tiles.
+#
+# The env-var route works for the ffmpeg backend (the one used for HLS
+# over http): it needs to be set BEFORE the first VideoCapture so ffmpeg
+# picks it up at library init. Later, the explicit CAP_PROP_*_TIMEOUT_MSEC
+# properties nudge cases the env var doesn't cover.
+_STREAM_OPEN_TIMEOUT_MS = 8000    # give up on stalled TCP/TLS after 8s
+_STREAM_READ_TIMEOUT_MS = 8000    # give up on stalled decode after 8s
+os.environ.setdefault(
+    "OPENCV_FFMPEG_CAPTURE_OPTIONS",
+    (f"stimeout;{_STREAM_OPEN_TIMEOUT_MS * 1000}"      # microseconds
+     f"|rw_timeout;{_STREAM_READ_TIMEOUT_MS * 1000}"
+     "|reconnect;1|reconnect_streamed;1|reconnect_delay_max;5"),
+)
+
+
+def _open_cap(url_or_path: str) -> "cv2.VideoCapture":
+    """cv2.VideoCapture(url) with the timeouts applied.
+
+    A stream that never delivers packets used to block .read() for tens of
+    seconds; the collector's serial slot loop then stalled every camera.
+    hasattr guards keep this working on older OpenCV builds where the
+    CAP_PROP_*_TIMEOUT_MSEC properties don't exist.
+    """
+    cap = cv2.VideoCapture(url_or_path)
+    for name, ms in (("CAP_PROP_OPEN_TIMEOUT_MSEC", _STREAM_OPEN_TIMEOUT_MS),
+                     ("CAP_PROP_READ_TIMEOUT_MSEC", _STREAM_READ_TIMEOUT_MS)):
+        prop = getattr(cv2, name, None)
+        if prop is not None:
+            try:
+                cap.set(prop, ms)
+            except cv2.error:
+                pass
+    return cap
+
 # COCO class ids we care about for *business activity* (footfall + vehicles
 # + rail). `train` was added after a metro train crossing the frame went
 # unlabeled - the model classifies it as class 6, but without id 6 in the
@@ -231,7 +271,7 @@ def _grab_via_segment(stream_url: str, headers: dict) -> np.ndarray | None:
     with tempfile.NamedTemporaryFile(suffix=".ts", delete=False) as f:
         f.write(data); tmp = f.name
     try:
-        cap = cv2.VideoCapture(tmp)
+        cap = _open_cap(tmp)
         ok, frame = cap.read()
         cap.release()
         return frame if ok else None
@@ -251,7 +291,7 @@ def grab_frame(stream_url: str):
                 return _grab_via_segment(stream_url, headers)
             except Exception:
                 return None
-    cap = cv2.VideoCapture(stream_url)
+    cap = _open_cap(stream_url)
     try:
         ok, frame = cap.read()
         return frame if ok else None
@@ -325,7 +365,7 @@ def iter_frames(stream_url: str, max_frames: int, stride: int = 1):
             with tempfile.NamedTemporaryFile(suffix=".ts", delete=False) as f:
                 f.write(data); tmp = f.name
             try:
-                cap = cv2.VideoCapture(tmp)
+                cap = _open_cap(tmp)
                 while yielded < max_frames:
                     if idx % stride == 0:
                         ok, fr = cap.read()
@@ -345,7 +385,7 @@ def iter_frames(stream_url: str, max_frames: int, stride: int = 1):
         return
 
     # normal HLS / RTSP: stream directly
-    cap = cv2.VideoCapture(stream_url)
+    cap = _open_cap(stream_url)
     yielded = 0
     idx = 0
     try:
