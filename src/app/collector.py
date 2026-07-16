@@ -240,8 +240,12 @@ class SlotStreamPicker:
       * `record_result(ok)` — feed back whether the last sample succeeded.
 
     After `max_failures` consecutive misses we advance one step down the chain.
-    Every `retry_minutes` we retry the primary regardless of where we are; if
-    the primary works, we snap back to index 0 (primary is always preferred).
+    Every `retry_minutes` we probe the primary again; if the primary works, we
+    stay on it (primary is always preferred). If the probe MISSES and we know
+    a fallback that was delivering frames, we snap straight back to it - one
+    lost sample instead of re-walking the whole dead prefix of the chain.
+    (Konya outage math: 4 dead tvkur entries x 3 misses x ~40s/round meant
+    ~10 minutes of MISS out of every 15 before this snap-back existed.)
     """
 
     def __init__(self, slot: dict,
@@ -256,6 +260,8 @@ class SlotStreamPicker:
         self.max_failures  = max_failures
         self.retry_seconds = retry_minutes * 60
         self.last_primary_check = time.time()
+        self.last_good_idx = None      # most recent index that returned frames
+        self._probing_primary = False  # True while sampling the periodic probe
 
     def current_cam(self) -> str:
         # Periodic retry of the primary — if we drifted onto a fallback and it's
@@ -265,6 +271,7 @@ class SlotStreamPicker:
             self.idx = 0
             self.failures = 0
             self.last_primary_check = time.time()
+            self._probing_primary = True
         return self.chain[self.idx]
 
     def record_result(self, ok: bool) -> str | None:
@@ -272,13 +279,23 @@ class SlotStreamPicker:
         prev = self.chain[self.idx]
         if ok:
             self.failures = 0
+            self.last_good_idx = self.idx
+            self._probing_primary = False
             if self.chain[self.idx] == self.primary:
                 self.last_primary_check = time.time()
         else:
             self.failures += 1
-            if self.failures >= self.max_failures and self.idx < len(self.chain) - 1:
+            if (self._probing_primary and self.last_good_idx is not None
+                    and self.last_good_idx > 0):
+                # Periodic primary probe missed and a fallback was working:
+                # return to it immediately instead of re-walking the chain.
+                self.idx = self.last_good_idx
+                self.failures = 0
+                self._probing_primary = False
+            elif self.failures >= self.max_failures and self.idx < len(self.chain) - 1:
                 self.idx += 1
                 self.failures = 0
+                self._probing_primary = False
         return self.chain[self.idx] if self.chain[self.idx] != prev else None
 
 
