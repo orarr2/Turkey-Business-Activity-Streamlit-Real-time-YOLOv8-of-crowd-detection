@@ -1720,6 +1720,7 @@ def main() -> None:
     # module - no model reload, no restart, no RAM spike on the 1 GB host.
     _ADAPTER_CHECK_EVERY_ROUNDS = 30
     _round_counter = 0
+    _all_miss_rounds = 0
     try:
         while True:
             round_start = time.time()
@@ -1772,6 +1773,7 @@ def main() -> None:
                     firebase.write_grid_config(slots_meta)
                 except Exception as e:
                     print(f"  ! grid config write failed: {e}")
+            round_had_ok = False
             for slot in GRID_SLOTS:
                 cam_id = assignment[slot["slot_id"]]
                 ok = sample_slot(model, slot, cam_id, firebase, reid=reid,
@@ -1787,6 +1789,20 @@ def main() -> None:
                                  write_reid_stats=(_round_counter
                                                    % REID_STATS_EVERY_ROUNDS == 0))
                 pool.record(cam_id, ok)
+                round_had_ok = round_had_ok or ok
+            # Politeness backoff: rounds where EVERY camera missed are almost
+            # always an upstream outage or the CDN rate-limiting this IP -
+            # hammering ~4 cams x 3 requests every round from the same
+            # address is exactly how the VM got throttled by kamerayayin on
+            # 2026-07-16. Slow the scan down until something delivers again.
+            if round_had_ok:
+                _all_miss_rounds = 0
+            else:
+                _all_miss_rounds += 1
+                backoff = min(args.interval * _all_miss_rounds, 240)
+                print(f"  ! whole round missed ({_all_miss_rounds}x) - "
+                      f"backing off {backoff}s to stay polite to the CDN")
+                time.sleep(backoff)
             # Mirror the review pools (frames/crops just saved this round) up
             # to Storage so the operator's local dashboard can search and
             # review what the cameras actually captured. No-op without a
