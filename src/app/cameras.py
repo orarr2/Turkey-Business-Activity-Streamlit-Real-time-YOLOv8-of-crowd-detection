@@ -400,11 +400,12 @@ FALLBACK_POOL = [
     # tier 1 - Konya (primary grid)
     "konya_hukumet", "otogar_kavsagi", "konya_kulturpark",
     "konya_millet_caddesi",
-    # tier 2 - preferred Istanbul replacements (operator order)
-    "sultanahmet_1_yeni", "beyazit_meydan_yeni", "eyup_sultan_yeni",
-    "buyuk_camlica_yeni",
-    # tier 3 - the rest of the live catalog (commerce-relevant first)
-    "taksim_yeni", "konya_ince_minareli", "sarachane_yeni",
+    # tier 2 - preferred Istanbul replacements (operator order, 2026-07-16)
+    "taksim_yeni", "sultanahmet_1_yeni", "eyup_sultan_yeni",
+    "beyazit_meydan_yeni",
+    # tier 3 - the rest of the live catalog, walked one by one until a
+    # camera actually delivers frames
+    "buyuk_camlica_yeni", "konya_ince_minareli", "sarachane_yeni",
     "sultanahmet_2_yeni", "uskudar_yeni", "salacak_yeni",
     "kucukcekmece_yeni", "ulus_parki_yeni", "pierre_lotti_yeni",
     "emirgan_yeni", "kiz_kulesi_yeni", "hidiv_kasri_yeni", "dragos_yeni",

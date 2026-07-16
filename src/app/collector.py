@@ -275,14 +275,15 @@ class CameraPool:
 
     def assign(self, now: float | None = None) -> list[str]:
         """First n_slots eligible cameras in priority order (distinct by
-        construction). Padded with the soonest-to-recover cooldown cameras
-        when the healthy set is too small."""
+        construction). When the healthy set is too small the assignment is
+        padded with resting cameras in the SAME priority order - stable
+        across rounds, so an all-dead pool holds the grid steady on the
+        top of the ladder instead of churning tiles every round."""
         now = time.time() if now is None else now
         picked = [c for c in self.pool if self._eligible(c, now)][: self.n_slots]
         if len(picked) < self.n_slots:
-            resting = sorted((c for c in self.pool if c not in picked),
-                             key=lambda c: self.cooldown_until[c])
-            picked += resting[: self.n_slots - len(picked)]
+            picked += [c for c in self.pool
+                       if c not in picked][: self.n_slots - len(picked)]
         return picked
 
     def record(self, cam: str, ok: bool, now: float | None = None) -> None:
@@ -293,6 +294,11 @@ class CameraPool:
             self.failures[cam] = 0
             self.cooldown_until[cam] = 0.0
             self.proven_dead[cam] = False
+            return
+        if now < self.cooldown_until[cam]:
+            # Forced padding sample of a camera that is still resting: the
+            # miss is expected and must NOT push its recovery further out,
+            # or an all-dead pool would keep every cooldown sliding forever.
             return
         self.failures[cam] += 1
         # A camera that already burned through its grace once is on probation:
