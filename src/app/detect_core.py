@@ -206,13 +206,41 @@ HEADER_HOSTS = {
                                    "Origin":  "https://www.skylinewebcams.com"},
 }
 
-def _http_get(url: str, extra_headers: dict | None = None) -> bytes:
+# Manual segment downloads (the header-host path): 30s ceiling, env-tunable.
+# 15s proved too tight for kamerayayin - its playlists offer a SINGLE 1080p
+# rendition with 2.5-5.5 MB segments, and from GCP us-east1 the heavier ones
+# did not finish in 15s, so only the lightest camera (taksim) ever delivered.
+_SEGMENT_HTTP_TIMEOUT_S = int(os.environ.get("SEGMENT_HTTP_TIMEOUT_S") or 30)
+
+def _http_get(url: str, extra_headers: dict | None = None,
+              max_bytes: int | None = None) -> bytes:
+    """GET with browser-ish headers. `max_bytes` truncates the body - the
+    Konya-era trick of decoding a LIGHT rendition, recreated for hosts that
+    only serve 1080p: a frame grab needs the first ~MB of a segment (the
+    leading I-frame), not the whole 5 MB."""
     h = {"User-Agent": "Mozilla/5.0"}
     if extra_headers:
         h.update(extra_headers)
     req = urllib.request.Request(url, headers=h)
-    with urllib.request.urlopen(req, timeout=15, context=_SSL_CTX) as r:
-        return r.read()
+    with urllib.request.urlopen(req, timeout=_SEGMENT_HTTP_TIMEOUT_S,
+                                context=_SSL_CTX) as r:
+        if max_bytes is None:
+            return r.read()
+        chunks: list[bytes] = []
+        got = 0
+        while got < max_bytes:
+            c = r.read(min(262_144, max_bytes - got))
+            if not c:
+                break
+            chunks.append(c)
+            got += len(c)
+        return b"".join(chunks)
+
+# How much of a segment a short grab downloads. ~2.5 MB holds well over a
+# second of 1080p video - plenty for a single frame or a strided 2-frame
+# burst - while capping the transfer at what the lightest kamerayayin
+# camera (the only one that reliably worked) used to cost.
+_SEGMENT_BYTE_BUDGET = int(os.environ.get("SEGMENT_BYTE_BUDGET") or 2_500_000)
 
 
 _STREAM_INF_RES_RE = re.compile(r"RESOLUTION=(\d+)x(\d+)")
@@ -274,7 +302,8 @@ def _grab_via_segment(stream_url: str, headers: dict) -> np.ndarray | None:
         return None
     seg = segs[-1]
     seg_url = seg if seg.startswith("http") else base + seg
-    data = _http_get(seg_url, headers)
+    # One frame needs the segment's leading I-frame, not all 5 MB of it.
+    data = _http_get(seg_url, headers, max_bytes=_SEGMENT_BYTE_BUDGET)
     with tempfile.NamedTemporaryFile(suffix=".ts", delete=False) as f:
         f.write(data); tmp = f.name
     try:
@@ -359,6 +388,11 @@ def iter_frames(stream_url: str, max_frames: int, stride: int = 1):
         approx_frames_per_seg = 60   # 2 s @ 30 fps is a typical segment
         span = (max_frames - 1) * stride + 1
         n_segs = max(1, min(len(segs), -(-span // approx_frames_per_seg)))
+        # Short spans (the collector's 2-frame strided burst) live in the
+        # first second of a segment - cap the transfer like the Konya-era
+        # light-rendition path did. Dense spans (the notebook's stride=1
+        # dwell burst) need the whole segment.
+        budget = _SEGMENT_BYTE_BUDGET if span <= approx_frames_per_seg else None
         yielded = 0
         idx = 0
         for seg in segs[-n_segs:]:
@@ -366,7 +400,7 @@ def iter_frames(stream_url: str, max_frames: int, stride: int = 1):
                 break
             seg_url = seg if seg.startswith("http") else base + seg
             try:
-                data = _http_get(seg_url, matching_headers)
+                data = _http_get(seg_url, matching_headers, max_bytes=budget)
             except Exception:
                 continue
             with tempfile.NamedTemporaryFile(suffix=".ts", delete=False) as f:
