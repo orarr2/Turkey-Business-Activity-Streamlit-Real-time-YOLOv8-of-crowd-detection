@@ -16,6 +16,7 @@ Synced:  the tree rides pool_sync like the other pools, so the operator's
 """
 from __future__ import annotations
 
+import itertools
 import os
 import time
 from pathlib import Path
@@ -31,6 +32,7 @@ MIN_CROP_SIDE = 24
 PER_ENTITY_MIN_GAP_S = 60.0
 
 _LAST_SAVE: dict[tuple[str, int], float] = {}
+_SAVE_SEQ = itertools.count()
 
 
 def _dir(snapshots_root: str | Path = SNAPSHOTS_ROOT) -> Path:
@@ -53,7 +55,10 @@ def save_sighting(cam_id: str, entity_id: int, frame, box: dict,
         return None
     out_dir = _dir(snapshots_root) / cam_id / str(int(entity_id))
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{int(now * 1_000_000)}.jpg"
+    # Windows time.time() ticks can repeat across rapid saves; the counter
+    # suffix keeps names unique (and zero-padded so string sort stays
+    # chronological) instead of silently overwriting the previous crop.
+    out_path = out_dir / f"{int(now * 1_000_000)}_{next(_SAVE_SEQ):04d}.jpg"
     if not cv2.imwrite(str(out_path), frame[y1:y2, x1:x2],
                        [cv2.IMWRITE_JPEG_QUALITY, 85]):
         return None
@@ -94,7 +99,7 @@ def list_sightings(cam_id: str, entity_id: int,
     out = []
     for p in sorted(d.glob("*.jpg"), reverse=True):
         try:
-            us = int(p.stem)
+            us = int(p.stem.split("_")[0])
             ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(us / 1_000_000))
         except ValueError:
             ts = ""

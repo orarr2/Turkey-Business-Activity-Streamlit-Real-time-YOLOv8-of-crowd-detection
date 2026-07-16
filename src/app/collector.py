@@ -233,70 +233,75 @@ TURKEY_TZ = dt.timezone(dt.timedelta(hours=3))  # permanent UTC+3, no DST
 _DOW = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 
-class SlotStreamPicker:
-    """Per-slot circuit-breaker over an ordered fallback chain.
+class CameraPool:
+    """ONE health-tracked priority ladder shared by all slots (operator
+    spec, 2026-07-16): tier 1 the four Konya cams, tier 2 the preferred
+    Istanbul four (sultanahmet, beyazit, eyup, buyuk camlica), tier 3 the
+    rest of the live catalog. Each round the pool assigns the FIRST N
+    healthy cameras, in priority order, one per slot - so the grid always
+    runs N DISTINCT cameras (the per-slot chains this replaces let two
+    slots drift onto the same stream).
 
-      * `current_cam()` — the cam_id we should sample right now.
-      * `record_result(ok)` — feed back whether the last sample succeeded.
+    Health model per camera:
+      * fresh cameras walk in with `max_failures` grace (a transient miss
+        does not kill a scene);
+      * after `max_failures` consecutive misses the camera goes on
+        cooldown for `retry_minutes`;
+      * when cooldown expires the camera is probed again - but a camera
+        that has already proven dead re-enters cooldown after ONE miss,
+        so a dead tvkur backend costs one sample per 15 minutes, not a
+        3-miss re-walk (the July 2026 outage burned ~10 min of every 15
+        that way);
+      * a success fully rehabilitates the camera.
 
-    After `max_failures` consecutive misses we advance one step down the chain.
-    Every `retry_minutes` we probe the primary again; if the primary works, we
-    stay on it (primary is always preferred). If the probe MISSES and we know
-    a fallback that was delivering frames, we snap straight back to it - one
-    lost sample instead of re-walking the whole dead prefix of the chain.
-    (Konya outage math: 4 dead tvkur entries x 3 misses x ~40s/round meant
-    ~10 minutes of MISS out of every 15 before this snap-back existed.)
+    If fewer than N cameras are healthy the assignment is padded with the
+    least-recently-failed cooldown cameras: every slot keeps sampling
+    SOMETHING, which is also how dead cameras get re-discovered.
     """
 
-    def __init__(self, slot: dict,
+    def __init__(self, pool: list[str], n_slots: int,
                  max_failures: int = FALLBACK_MAX_FAILURES,
                  retry_minutes: int = FALLBACK_RETRY_MINUTES):
-        self.slot_id       = slot["slot_id"]
-        self.display_area  = slot["display_area"]
-        self.chain         = [slot["primary"]] + list(slot["fallbacks"])
-        self.primary       = slot["primary"]
-        self.idx           = 0
-        self.failures      = 0
+        self.pool          = list(pool)
+        self.n_slots       = n_slots
         self.max_failures  = max_failures
         self.retry_seconds = retry_minutes * 60
-        self.last_primary_check = time.time()
-        self.last_good_idx = None      # most recent index that returned frames
-        self._probing_primary = False  # True while sampling the periodic probe
+        self.failures      = {c: 0 for c in self.pool}       # consecutive misses
+        self.cooldown_until = {c: 0.0 for c in self.pool}    # epoch; 0 = eligible
+        self.proven_dead   = {c: False for c in self.pool}   # failed a full grace once
 
-    def current_cam(self) -> str:
-        # Periodic retry of the primary — if we drifted onto a fallback and it's
-        # been long enough, put us back at the top of the chain so the next
-        # sample tests the primary again.
-        if self.idx > 0 and (time.time() - self.last_primary_check) >= self.retry_seconds:
-            self.idx = 0
-            self.failures = 0
-            self.last_primary_check = time.time()
-            self._probing_primary = True
-        return self.chain[self.idx]
+    def _eligible(self, cam: str, now: float) -> bool:
+        return now >= self.cooldown_until[cam]
 
-    def record_result(self, ok: bool) -> str | None:
-        """Return the new active cam_id if it changed this call, else None."""
-        prev = self.chain[self.idx]
+    def assign(self, now: float | None = None) -> list[str]:
+        """First n_slots eligible cameras in priority order (distinct by
+        construction). Padded with the soonest-to-recover cooldown cameras
+        when the healthy set is too small."""
+        now = time.time() if now is None else now
+        picked = [c for c in self.pool if self._eligible(c, now)][: self.n_slots]
+        if len(picked) < self.n_slots:
+            resting = sorted((c for c in self.pool if c not in picked),
+                             key=lambda c: self.cooldown_until[c])
+            picked += resting[: self.n_slots - len(picked)]
+        return picked
+
+    def record(self, cam: str, ok: bool, now: float | None = None) -> None:
+        now = time.time() if now is None else now
+        if cam not in self.failures:      # cam outside the pool (manual runs)
+            return
         if ok:
-            self.failures = 0
-            self.last_good_idx = self.idx
-            self._probing_primary = False
-            if self.chain[self.idx] == self.primary:
-                self.last_primary_check = time.time()
-        else:
-            self.failures += 1
-            if (self._probing_primary and self.last_good_idx is not None
-                    and self.last_good_idx > 0):
-                # Periodic primary probe missed and a fallback was working:
-                # return to it immediately instead of re-walking the chain.
-                self.idx = self.last_good_idx
-                self.failures = 0
-                self._probing_primary = False
-            elif self.failures >= self.max_failures and self.idx < len(self.chain) - 1:
-                self.idx += 1
-                self.failures = 0
-                self._probing_primary = False
-        return self.chain[self.idx] if self.chain[self.idx] != prev else None
+            self.failures[cam] = 0
+            self.cooldown_until[cam] = 0.0
+            self.proven_dead[cam] = False
+            return
+        self.failures[cam] += 1
+        # A camera that already burned through its grace once is on probation:
+        # a single miss sends it straight back to cooldown.
+        strikes = 1 if self.proven_dead[cam] else self.max_failures
+        if self.failures[cam] >= strikes:
+            self.failures[cam] = 0
+            self.proven_dead[cam] = True
+            self.cooldown_until[cam] = now + self.retry_seconds
 
 
 class CamObservationLog:
@@ -1556,8 +1561,16 @@ def main() -> None:
 
     model = load_model(args.weights)
 
-    # Build one picker per slot.
-    pickers = {s["slot_id"]: SlotStreamPicker(s) for s in GRID_SLOTS}
+    # ONE shared camera pool for all slots: Konya first, then the preferred
+    # Istanbul four, then the rest of the catalog - always N distinct cams.
+    from app.cameras import FALLBACK_POOL
+    pool = CameraPool(FALLBACK_POOL, n_slots=len(GRID_SLOTS))
+    slot_ids = [s["slot_id"] for s in GRID_SLOTS]
+    assignment = dict(zip(slot_ids, pool.assign()))
+    print("fallback pool: "
+          f"{len(FALLBACK_POOL)} cameras, {pool.max_failures} misses to rest a "
+          f"camera for {pool.retry_seconds // 60:.0f} min; probation cams rest "
+          "after a single miss.")
 
     reid = None
     if not args.no_reid:
@@ -1631,17 +1644,17 @@ def main() -> None:
     legacy_slot_of_primary = {s["primary"]: s["slot_id"] for s in GRID_SLOTS}
 
     print("Restoring analysis state from Firestore...")
-    _restore_state(firebase, trackers, profile, set(pickers), all_cam_ids,
+    _restore_state(firebase, trackers, profile, set(slot_ids), all_cam_ids,
                    legacy_slot_of_primary)
 
     # Publish the initial grid config so the dashboard renders immediately.
-    slots_meta = [_slot_metadata(s, pickers[s["slot_id"]].current_cam()) for s in GRID_SLOTS]
+    slots_meta = [_slot_metadata(s, assignment[s["slot_id"]]) for s in GRID_SLOTS]
     firebase.write_grid_config(slots_meta)
 
-    print(f"Collector started. {len(GRID_SLOTS)} slot(s):")
+    print(f"Collector started. {len(GRID_SLOTS)} slot(s) over one shared pool:")
+    print("  priority: " + " -> ".join(FALLBACK_POOL))
     for slot in GRID_SLOTS:
-        chain = " -> ".join([slot["primary"], *slot["fallbacks"]])
-        print(f"  {slot['slot_id']:20s} = {chain}")
+        print(f"  {slot['slot_id']:20s} starts on {assignment[slot['slot_id']]}")
     print(f"interval={args.interval}s, imgsz={args.imgsz}, burst={args.burst}, "
           f"reid={'on' if reid else 'off'}, conf={args.conf}, "
           f"snapshots={'on' if save_snapshots else 'off'}")
@@ -1738,9 +1751,23 @@ def main() -> None:
                         reload_review_overrides()
                 except Exception as e:
                     print(f"  ! static-position learn failed: {e}")
+            # One pool decision per round: the first N healthy cameras in
+            # priority order, one per slot, never a duplicate.
+            round_cams = dict(zip(slot_ids, pool.assign()))
+            moved = [sid for sid in slot_ids
+                     if round_cams[sid] != assignment.get(sid)]
+            assignment = round_cams
+            if moved:
+                for sid in moved:
+                    print(f"  * {sid}: fallback -> {assignment[sid]}")
+                slots_meta = [_slot_metadata(s, assignment[s["slot_id"]])
+                              for s in GRID_SLOTS]
+                try:
+                    firebase.write_grid_config(slots_meta)
+                except Exception as e:
+                    print(f"  ! grid config write failed: {e}")
             for slot in GRID_SLOTS:
-                picker = pickers[slot["slot_id"]]
-                cam_id = picker.current_cam()
+                cam_id = assignment[slot["slot_id"]]
                 ok = sample_slot(model, slot, cam_id, firebase, reid=reid,
                                  conf=args.conf, anomaly=trackers,
                                  profile=profile, presence=presence,
@@ -1753,15 +1780,7 @@ def main() -> None:
                                  returning_cooldown_sec = returning_cooldown_sec,
                                  write_reid_stats=(_round_counter
                                                    % REID_STATS_EVERY_ROUNDS == 0))
-                changed = picker.record_result(ok)
-                if changed is not None:
-                    print(f"  * {slot['slot_id']}: fallback -> {changed}")
-                    slots_meta = [_slot_metadata(s, pickers[s["slot_id"]].current_cam())
-                                  for s in GRID_SLOTS]
-                    try:
-                        firebase.write_grid_config(slots_meta)
-                    except Exception as e:
-                        print(f"  ! grid config write failed: {e}")
+                pool.record(cam_id, ok)
             # Mirror the review pools (frames/crops just saved this round) up
             # to Storage so the operator's local dashboard can search and
             # review what the cameras actually captured. No-op without a

@@ -162,6 +162,109 @@ CAMERAS = {
         "embed": None,
         "type": "park/vista",
     },
+    # --- Remaining kamerayayin.ibb.istanbul cameras (all HTTP 200 on
+    # 2026-07-16). Tier-3 fallbacks for the collector: when Konya (tvkur)
+    # AND the four preferred Istanbul cams are down, the pool keeps walking
+    # this list so no slot ever settles on an empty frame. ---
+    "sarachane_yeni": {
+        "name": "Sarachane (live)",
+        "city": "Istanbul",
+        "kind": "hls",
+        "url": "https://kamerayayin.ibb.istanbul/turistikcam/sarachane.stream/playlist.m3u8",
+        "page": "https://istanbuluseyret.ibb.gov.tr/sarachane-yeni/",
+        "embed": None,
+        "type": "civic square",
+    },
+    "sultanahmet_2_yeni": {
+        "name": "Sultanahmet 2 (live)",
+        "city": "Istanbul",
+        "kind": "hls",
+        "url": "https://kamerayayin.ibb.istanbul/turistikcam/sultanahmet2.stream/playlist.m3u8",
+        "page": "https://istanbuluseyret.ibb.gov.tr/sultanahmet-2-yeni/",
+        "embed": None,
+        "type": "tourist square",
+    },
+    "uskudar_yeni": {
+        "name": "Uskudar (live)",
+        "city": "Istanbul",
+        "kind": "hls",
+        "url": "https://kamerayayin.ibb.istanbul/turistikcam/uskudar.stream/playlist.m3u8",
+        "page": "https://istanbuluseyret.ibb.gov.tr/uskudar-yeni/",
+        "embed": None,
+        "type": "square/transport",
+    },
+    "salacak_yeni": {
+        "name": "Salacak (live)",
+        "city": "Istanbul",
+        "kind": "hls",
+        "url": "https://kamerayayin.ibb.istanbul/turistikcam/salacak.stream/playlist.m3u8",
+        "page": "https://istanbuluseyret.ibb.gov.tr/salacak-yeni/",
+        "embed": None,
+        "type": "waterfront promenade",
+    },
+    "kucukcekmece_yeni": {
+        "name": "Kucukcekmece (live)",
+        "city": "Istanbul",
+        "kind": "hls",
+        "url": "https://kamerayayin.ibb.istanbul/turistikcam/kucukcekmece.stream/playlist.m3u8",
+        "page": "https://istanbuluseyret.ibb.gov.tr/kucukcekmece-yeni/",
+        "embed": None,
+        "type": "lakeside park",
+    },
+    "ulus_parki_yeni": {
+        "name": "Ulus Parki (live)",
+        "city": "Istanbul",
+        "kind": "hls",
+        "url": "https://kamerayayin.ibb.istanbul/turistikcam/ulusparki.stream/playlist.m3u8",
+        "page": "https://istanbuluseyret.ibb.gov.tr/ulus-parki-yeni/",
+        "embed": None,
+        "type": "park/vista",
+    },
+    "pierre_lotti_yeni": {
+        "name": "Pierre Lotti (live)",
+        "city": "Istanbul",
+        "kind": "hls",
+        "url": "https://kamerayayin.ibb.istanbul/turistikcam/pierreloti.stream/playlist.m3u8",
+        "page": "https://istanbuluseyret.ibb.gov.tr/pierre-lotti-yeni/",
+        "embed": None,
+        "type": "hilltop cafe/vista",
+    },
+    "emirgan_yeni": {
+        "name": "Emirgan (live)",
+        "city": "Istanbul",
+        "kind": "hls",
+        "url": "https://kamerayayin.ibb.istanbul/turistikcam/emirgan.stream/playlist.m3u8",
+        "page": "https://istanbuluseyret.ibb.gov.tr/emirgan-yeni/",
+        "embed": None,
+        "type": "park",
+    },
+    "kiz_kulesi_yeni": {
+        "name": "Kiz Kulesi (live)",
+        "city": "Istanbul",
+        "kind": "hls",
+        "url": "https://kamerayayin.ibb.istanbul/turistikcam/kizkulesi.stream/playlist.m3u8",
+        "page": "https://istanbuluseyret.ibb.gov.tr/kiz-kulesi-yeni/",
+        "embed": None,
+        "type": "waterfront landmark",
+    },
+    "hidiv_kasri_yeni": {
+        "name": "Hidiv Kasri (live)",
+        "city": "Istanbul",
+        "kind": "hls",
+        "url": "https://kamerayayin.ibb.istanbul/turistikcam/hidivkasri.stream/playlist.m3u8",
+        "page": "https://istanbuluseyret.ibb.gov.tr/hidiv-kasri-yeni/",
+        "embed": None,
+        "type": "palace grounds",
+    },
+    "dragos_yeni": {
+        "name": "Dragos (live)",
+        "city": "Istanbul",
+        "kind": "hls",
+        "url": "https://kamerayayin.ibb.istanbul/turistikcam/dragos.stream/playlist.m3u8",
+        "page": "https://istanbuluseyret.ibb.gov.tr/dragos-yeni/",
+        "embed": None,
+        "type": "coastal vista",
+    },
     "kadikoy": {
         "name": "Kadikoy",
         "city": "Istanbul",
@@ -285,45 +388,60 @@ CAMERAS = {
 # per the note above. They still belong at the tail of the chain: they cost
 # nothing when they fail (the picker skips them within a few rounds) and
 # unblock as soon as IBB relaxes the block or the VM is behind a TR proxy.
+# One GLOBAL priority ladder, shared by all four slots (operator spec,
+# 2026-07-16). The collector's CameraPool walks it top-down and assigns the
+# first four cameras that are currently delivering frames - one per slot,
+# never the same camera twice:
+#   tier 1: the four Konya cams (webcamera24/tvkur) - the original grid;
+#   tier 2: the four preferred Istanbul kamerayayin cams, in this order;
+#   tier 3: every remaining kamerayayin camera from the catalog, so the
+#           grid NEVER settles on an empty frame while anything is live.
+FALLBACK_POOL = [
+    # tier 1 - Konya (primary grid)
+    "konya_hukumet", "otogar_kavsagi", "konya_kulturpark",
+    "konya_millet_caddesi",
+    # tier 2 - preferred Istanbul replacements (operator order)
+    "sultanahmet_1_yeni", "beyazit_meydan_yeni", "eyup_sultan_yeni",
+    "buyuk_camlica_yeni",
+    # tier 3 - the rest of the live catalog (commerce-relevant first)
+    "taksim_yeni", "konya_ince_minareli", "sarachane_yeni",
+    "sultanahmet_2_yeni", "uskudar_yeni", "salacak_yeni",
+    "kucukcekmece_yeni", "ulus_parki_yeni", "pierre_lotti_yeni",
+    "emirgan_yeni", "kiz_kulesi_yeni", "hidiv_kasri_yeni", "dragos_yeni",
+]
+
+def _pool_fallbacks(primary: str) -> list[str]:
+    return [c for c in FALLBACK_POOL if c != primary]
+
 GRID_SLOTS = [
     {
         "slot_id":      "slot_konya_hukumet",
         "display_area": "Konya - Hukumet",
         "primary":      "konya_hukumet",
-        "fallbacks":    ["otogar_kavsagi", "konya_kulturpark",
-                         "konya_millet_caddesi", "konya_ince_minareli",
-                         "taksim_yeni", "sultanahmet_1_yeni"],
+        "fallbacks":    _pool_fallbacks("konya_hukumet"),
     },
     {
         "slot_id":      "slot_otogar",
         "display_area": "Konya - Otogar",
         "primary":      "otogar_kavsagi",
-        "fallbacks":    ["konya_millet_caddesi", "konya_kulturpark",
-                         "konya_hukumet", "konya_ince_minareli",
-                         "beyazit_meydan_yeni", "eyup_sultan_yeni"],
+        "fallbacks":    _pool_fallbacks("otogar_kavsagi"),
     },
     {
         "slot_id":      "slot_kulturpark",
         "display_area": "Konya - Kulturpark",
         "primary":      "konya_kulturpark",
-        "fallbacks":    ["konya_millet_caddesi", "konya_hukumet",
-                         "otogar_kavsagi", "konya_ince_minareli",
-                         "buyuk_camlica_yeni", "taksim_yeni"],
+        "fallbacks":    _pool_fallbacks("konya_kulturpark"),
     },
     {
         "slot_id":      "slot_millet_caddesi",
         "display_area": "Konya - Millet Caddesi",
         "primary":      "konya_millet_caddesi",
-        "fallbacks":    ["konya_kulturpark", "otogar_kavsagi",
-                         "konya_hukumet", "konya_ince_minareli",
-                         "sultanahmet_1_yeni", "eyup_sultan_yeni"],
+        "fallbacks":    _pool_fallbacks("konya_millet_caddesi"),
     },
     # konya_ince_minareli (tram-line view) stays in CAMERAS above as a
-    # catalog option and now appears as a tail-of-chain fallback in every
-    # slot; it is NOT the primary of a dedicated slot because a fifth grid
-    # slot costs ~20% round time and RAM on the e2-micro, and the operator
-    # prefers the 4-camera cadence. Swap it in as primary of one of the
-    # four if rail coverage ever outranks refresh speed.
+    # catalog option and a tier-3 pool entry; it is NOT the primary of a
+    # dedicated slot because a fifth grid slot costs ~20% round time and
+    # RAM on the e2-micro, and the operator prefers the 4-camera cadence.
 ]
 
 # Backward compat for the viewer notebook / smoke tests: the four primary cams.
