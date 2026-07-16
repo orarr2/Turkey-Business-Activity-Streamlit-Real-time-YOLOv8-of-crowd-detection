@@ -25,8 +25,15 @@ import numpy as np
 # over http): it needs to be set BEFORE the first VideoCapture so ffmpeg
 # picks it up at library init. Later, the explicit CAP_PROP_*_TIMEOUT_MSEC
 # properties nudge cases the env var doesn't cover.
-_STREAM_OPEN_TIMEOUT_MS = 8000    # give up on stalled TCP/TLS after 8s
-_STREAM_READ_TIMEOUT_MS = 8000    # give up on stalled decode after 8s
+# 20s default, env-tunable. 8s proved too tight in production: kamerayayin
+# segments range 2.5-5.5 MB per stream, and from GCP us-east1 the heavier
+# ones (beyazit 4.3MB, buyuk camlica 5.4MB) do not finish downloading in
+# 8s - so the VM decoded ONLY the lightest stream (taksim, 2.5MB) and
+# every other Istanbul camera MISSed with an empty frame. 20s still bounds
+# a genuinely-hung stream (the reason these timeouts exist) while letting
+# heavy-but-alive segments through.
+_STREAM_OPEN_TIMEOUT_MS = int(os.environ.get("STREAM_OPEN_TIMEOUT_MS") or 20000)
+_STREAM_READ_TIMEOUT_MS = int(os.environ.get("STREAM_READ_TIMEOUT_MS") or 20000)
 os.environ.setdefault(
     "OPENCV_FFMPEG_CAPTURE_OPTIONS",
     (f"stimeout;{_STREAM_OPEN_TIMEOUT_MS * 1000}"      # microseconds
