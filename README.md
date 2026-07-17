@@ -23,8 +23,8 @@ not be trusted as "now".
 ## What the model sees
 
 Live frames from the four grid cameras, annotated by the exact pipeline the
-collector runs (`yolov8s`, `imgsz 640` on the shipped systemd unit or `960`
-on hosts with more RAM, `conf 0.30`): green boxes are people, orange are
+collector runs (`yolov8n`, `imgsz 512` on the shipped systemd unit,
+`conf 0.30`): green boxes are people, orange are
 vehicles, magenta is a train, each with its confidence. The dashboard shows
 this view live under every tile ("Model view"), refreshed with every sample —
 including night scenes like these, where detection is hardest.
@@ -124,15 +124,16 @@ see [`docs/firebase_setup.md`](src/docs/firebase_setup.md).
 
 ## What the model predicts
 
-**Detector - YOLOv8s (Ultralytics)** loaded once per process with
-[`load_model("yolov8s.pt")`](src/app/detect_core.py). Small variant is the
-shipped default: nano's recall on wide overhead street shots was too low
-(distant/static vehicles silently dropped, upright road furniture mis-fired
-as `person`, edge-cropped cars mis-classified as `bicycle`). Small clears
-those three failure modes; CPU cost is ~3x nano and the shipped systemd unit
-pairs it with `--imgsz 640` to fit the e2-micro's 1 GB budget. Swap to
-`yolov8n.pt` (fastest) or `yolov8m.pt` (highest recall, needs more RAM) via
-`--weights`.
+**Two detectors, one pipeline.** The 24/7 cloud collector runs **`yolov8n`**
+(nano) at `imgsz 512`, pinned in the shipped systemd unit
+([`--weights yolov8n.pt`](src/deploy/gcp-vm/collector.service)) - it is the
+heaviest model that fits the e2-micro's 1 GB budget without OOM. The **local
+notebook** (`turkey_business_activity.ipynb`) instead loads **`yolo26m`**
+(YOLO26, medium - the 2026 generation, NMS-free), the strong accuracy
+reference: on one live frame nano found 2 people / 9 vehicles while YOLO26-m
+found 12 people, 19 vehicles and 5 motorcycles nano missed. Change either via
+`MODEL_WEIGHTS` (notebook) or `--weights` (collector); `ultralytics`
+auto-downloads the weights on first use.
 
 Each call returns boxes + class ids + confidences for the **COCO classes the project
 cares about** ([`CLASSES_OF_INTEREST`](src/app/detect_core.py:18)):
@@ -171,8 +172,9 @@ for transparency.
 notebook + local runs use it) because these wide street shots shrink a
 distant pedestrian or car to a few pixels, and at 640 the model undercounts.
 The shipped systemd unit for the Always Free e2-micro (1 GB) pins
-`--imgsz 640` instead - not for accuracy but for RSS: yolov8s at 960 would
-overshoot the host's memory. Drop `--imgsz 640` on any host with more RAM
+`--imgsz 512` instead - not for accuracy but for RSS: even yolov8n at 960
+would overshoot the host's memory once the OSNet re-ID embedder is loaded.
+Raise `--imgsz` on any host with more RAM
 (e2-small = 2 GB and up) to recover the last ~10-15% of distant-object
 recall. Default confidence is `--conf 0.30`, with per-class overrides in
 [`DEFAULT_PER_CLASS_CONF`](src/app/detect_core.py) - `person` is 0.35 to

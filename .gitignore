@@ -49,3 +49,6 @@ admin.ipynb
 **/admin.ipynb
 src/data/labels_export/
 src/web/snapshots/
+
+# local-only yolov8n twin of the notebook (mirrors the VM model; not shared)
+turkey_business_activity_yolov8n.ipynb

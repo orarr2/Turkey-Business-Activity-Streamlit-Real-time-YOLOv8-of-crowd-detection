@@ -23,8 +23,12 @@ Environment=FIREBASE_STORAGE_BUCKET=__STORAGE_BUCKET__
 # the model - it's a one-shot ~5 MB download and safe to skip if you're
 # happy with the color-signature baseline.
 Environment=REID_MODEL=__INSTALL_DIR__/src/data/osnet_x0_25_msmt17.onnx
-ExecStart=__INSTALL_DIR__/src/.venv/bin/python -m app.collector --interval 40 --imgsz 512 --burst 2 --burst-stride 13
-# --interval 40s: 5 slots x 3 writes/round - the effective cadence is bounded
+ExecStart=__INSTALL_DIR__/src/.venv/bin/python -m app.collector --weights yolov8n.pt --interval 40 --imgsz 512 --burst 2 --burst-stride 13
+# --weights yolov8n.pt: the e2-micro (1 GB) runs the NANO model. Pinned
+# explicitly (2026-07-17) - the argparse default is yolov8s, which is heavier
+# and rides closer to MemoryMax on this host, so leaving it implicit risked
+# an OOM. The strong models (YOLO26-m etc.) live in the LOCAL notebook.
+# --interval 40s: 4 slots x 2 writes/round - the effective cadence is bounded
 # by the ROUND time on this host, not by the flag.
 #
 # --imgsz 512 --burst 2 --burst-stride 13 (2026-07, the 5-camera + OSNet era):
