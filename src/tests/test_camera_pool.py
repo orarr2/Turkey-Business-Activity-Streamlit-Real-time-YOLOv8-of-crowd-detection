@@ -8,6 +8,12 @@ Four DISTINCT cameras every round, dead cameras rest on a cooldown,
 probation probes cost one sample, an all-dead pool holds STEADY on the
 top of the ladder (no tile churn), and forced samples of resting cameras
 never push their recovery further out.
+
+2026-07-17 revision: tvkur (Konya) cams are fast-fail probes - ONE miss
+rests them even on first contact, and an all-tvkur miss round is exempt
+from the politeness backoff, so the whole Konya sweep costs a single
+round (well under the operator's 2-minute ceiling) before the ladder
+reaches the Istanbul tier.
 """
 import time
 
@@ -158,3 +164,43 @@ def test_record_ignores_unknown_camera():
     pool = make_pool()
     pool.record("not_in_pool", False, now=1000)
     assert pool.assign(now=1000) == KONYA
+
+
+def test_fast_fail_cameras_rest_after_one_miss():
+    """Operator spec 2026-07-17: a dead Konya backend costs ONE round, so
+    the very next assignment is already the Istanbul tier."""
+    pool = make_pool(fast_fail=KONYA)
+    now = 1000
+    for cam in KONYA:
+        pool.record(cam, False, now=now)
+    assert pool.assign(now=now + 1) == IBB4
+
+
+def test_fast_fail_does_not_touch_other_tiers():
+    pool = make_pool(fast_fail=KONYA)
+    now = 1000
+    for cam in KONYA:
+        pool.record(cam, False, now=now)
+    # One miss on an IBB cam must NOT rest it - full 3-strike grace stays.
+    pool.record("taksim_yeni", False, now=now + 1)
+    assert pool.assign(now=now + 2)[0] == "taksim_yeni"
+
+
+def test_recovered_fast_fail_cam_is_still_one_strike():
+    pool = make_pool(fast_fail=KONYA)
+    now = 1000
+    pool.record("konya_hukumet", False, now=now)          # rests immediately
+    later = now + pool.retry_seconds + 1
+    pool.record("konya_hukumet", True, now=later)         # revived
+    assert pool.assign(now=later + 1)[0] == "konya_hukumet"
+    pool.record("konya_hukumet", False, now=later + 2)    # one miss again
+    assert pool.assign(now=later + 3)[0] != "konya_hukumet"
+
+
+def test_all_fast_fail_round_detection():
+    """The main loop skips the politeness backoff exactly for rounds made
+    of nothing but low-risk tvkur probes."""
+    pool = make_pool(fast_fail=KONYA)
+    assert pool.all_fast_fail(KONYA)
+    assert not pool.all_fast_fail(KONYA[:3] + ["taksim_yeni"])
+    assert not pool.all_fast_fail([])

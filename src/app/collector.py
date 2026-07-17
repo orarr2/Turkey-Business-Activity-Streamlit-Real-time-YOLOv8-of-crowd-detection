@@ -253,6 +253,11 @@ class CameraPool:
         so a dead tvkur backend costs one sample per 15 minutes, not a
         3-miss re-walk (the July 2026 outage burned ~10 min of every 15
         that way);
+      * `fast_fail` cameras skip the grace entirely: ONE miss rests them
+        even on first contact. Operator spec 2026-07-17 - the tvkur
+        (Konya) cams are cheap, low-risk probes (the host never throttled
+        this project, and a playlist-level 404 is a definitive "channel
+        gone"), so the whole Konya sweep must cost one round, not three;
       * a success fully rehabilitates the camera.
 
     If fewer than N cameras are healthy the assignment is padded with the
@@ -262,11 +267,13 @@ class CameraPool:
 
     def __init__(self, pool: list[str], n_slots: int,
                  max_failures: int = FALLBACK_MAX_FAILURES,
-                 retry_minutes: int = FALLBACK_RETRY_MINUTES):
+                 retry_minutes: int = FALLBACK_RETRY_MINUTES,
+                 fast_fail=()):
         self.pool          = list(pool)
         self.n_slots       = n_slots
         self.max_failures  = max_failures
         self.retry_seconds = retry_minutes * 60
+        self.fast_fail     = set(fast_fail) & set(self.pool)
         self.failures      = {c: 0 for c in self.pool}       # consecutive misses
         self.cooldown_until = {c: 0.0 for c in self.pool}    # epoch; 0 = eligible
         self.proven_dead   = {c: False for c in self.pool}   # failed a full grace once
@@ -303,12 +310,22 @@ class CameraPool:
             return
         self.failures[cam] += 1
         # A camera that already burned through its grace once is on probation:
-        # a single miss sends it straight back to cooldown.
-        strikes = 1 if self.proven_dead[cam] else self.max_failures
+        # a single miss sends it straight back to cooldown. fast_fail cams
+        # (tvkur) never get grace in the first place.
+        strikes = (1 if (self.proven_dead[cam] or cam in self.fast_fail)
+                   else self.max_failures)
         if self.failures[cam] >= strikes:
             self.failures[cam] = 0
             self.proven_dead[cam] = True
             self.cooldown_until[cam] = now + self.retry_seconds
+
+    def all_fast_fail(self, cams) -> bool:
+        """True when EVERY camera in `cams` is a low-risk fast-fail probe.
+        The main loop uses this to skip the politeness backoff for rounds
+        that never touched a rate-limited CDN (an all-Konya probe round
+        must not delay the ladder's descent to the Istanbul tier)."""
+        cams = list(cams)
+        return bool(cams) and all(c in self.fast_fail for c in cams)
 
 
 class CamObservationLog:
@@ -1573,14 +1590,23 @@ def main() -> None:
 
     # ONE shared camera pool for all slots: Konya first, then the preferred
     # Istanbul four, then the rest of the catalog - always N distinct cams.
+    # tvkur (Konya) cameras ride the fast-fail lane: one miss rests them,
+    # so a dead Konya backend costs ONE round (<1 min) before the ladder
+    # reaches the Istanbul tier - not three 3-strike rounds with growing
+    # backoff (~6 min). The IBB cams keep the full grace: their misses can
+    # be transient, and probing THEM aggressively is what got the VM
+    # throttled on 2026-07-16.
     from app.cameras import FALLBACK_POOL
-    pool = CameraPool(FALLBACK_POOL, n_slots=len(GRID_SLOTS))
+    tvkur_cams = [c for c in FALLBACK_POOL
+                  if "tvkur" in (CAMERAS.get(c, {}).get("url") or "")]
+    pool = CameraPool(FALLBACK_POOL, n_slots=len(GRID_SLOTS),
+                      fast_fail=tvkur_cams)
     slot_ids = [s["slot_id"] for s in GRID_SLOTS]
     assignment = dict(zip(slot_ids, pool.assign()))
     print("fallback pool: "
           f"{len(FALLBACK_POOL)} cameras, {pool.max_failures} misses to rest a "
-          f"camera for {pool.retry_seconds // 60:.0f} min; probation cams rest "
-          "after a single miss.")
+          f"camera for {pool.retry_seconds // 60:.0f} min; probation cams and "
+          f"{len(pool.fast_fail)} low-risk tvkur cams rest after a single miss.")
 
     reid = None
     if not args.no_reid:
@@ -1673,7 +1699,7 @@ def main() -> None:
           f"confirm={args.anomaly_confirm} consecutive) | "
           f"hour-of-week profile: {'on' if profile else 'off'} | "
           f"budget warn: >{ANOMALY_BUDGET_PER_DAY}/cam/day")
-    print(f"fallback: {FALLBACK_MAX_FAILURES} misses to advance, "
+    print(f"fallback: {FALLBACK_MAX_FAILURES} misses to advance (tvkur: 1), "
           f"retry primary every {FALLBACK_RETRY_MINUTES} min.")
 
     writes_per_round = len(GRID_SLOTS) * 2
@@ -1799,8 +1825,13 @@ def main() -> None:
             # hammering ~4 cams x 3 requests every round from the same
             # address is exactly how the VM got throttled by kamerayayin on
             # 2026-07-16. Slow the scan down until something delivers again.
+            # All-tvkur rounds are exempt: those are the cheap dead-channel
+            # probes (zero IBB traffic), and sleeping after them only delays
+            # the ladder's descent to the Istanbul tier.
             if round_had_ok:
                 _all_miss_rounds = 0
+            elif pool.all_fast_fail(round_cams.values()):
+                pass
             else:
                 _all_miss_rounds += 1
                 backoff = min(args.interval * _all_miss_rounds, 240)

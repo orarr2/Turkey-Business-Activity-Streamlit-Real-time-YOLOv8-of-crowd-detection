@@ -69,12 +69,15 @@ sees the accumulated history, and Firestore's TTL policy prunes the last 24h to
 keep the DB small. Anomaly / returning-visitor snapshots go to Firebase Storage
 (also 24h lifecycle).
 
-Cameras are grouped into **4 grid slots** (2 Konya, 2 Istanbul). Each slot has a
-primary cam and a fallback chain within the same source site
-(webcamera24/tvkur for Konya; istanbuluseyret.ibb.gov.tr for Istanbul). If the
-primary fails 3 samples in a row the collector switches to the next cam in the
-chain and updates `config/grid` — the dashboard re-renders that tile with the
-new active cam. Every 15 min it retries the primary.
+Cameras fill **4 grid slots** from ONE shared priority ladder (`CameraPool`,
+21 cameras): tier 1 is the four Konya cams (webcamera24/tvkur), tier 2 the four
+preferred Istanbul cams (Taksim, Sultanahmet, Eyup Sultan, Beyazit Meydani),
+tier 3 the rest of the live catalog — every round runs the first 4 healthy
+cameras, always distinct. A camera that misses 3 samples in a row rests for
+15 min and the ladder advances; tvkur cams are low-risk fast-fail probes that
+rest after a SINGLE miss, so a dead Konya backend costs one round before the
+Istanbul tier takes over. Each assignment change updates `config/grid` — the
+dashboard re-renders that tile with the new active cam.
 
 ---
 
