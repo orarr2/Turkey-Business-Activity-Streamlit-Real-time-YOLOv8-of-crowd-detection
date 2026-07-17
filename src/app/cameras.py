@@ -51,6 +51,7 @@ Example (uncomment and tune per scene):
   # "line": [[0.10, 0.60], [0.90, 0.55]],
   # "loiter_person_sec": 240,
 """
+from __future__ import annotations
 
 # Header set IBB's nginx accepts. ffmpeg/OpenCV honor this via OPENCV_FFMPEG_CAPTURE_OPTIONS.
 IBB_HEADERS = {
@@ -357,6 +358,164 @@ CAMERAS = {
         "embed": "https://www.skylinewebcams.com/en/embed/turkey/giresun/giresun/gazi-street.html",
         "type": "commercial street (geo-restricted)",
     },
+
+    # ================= Multi-country street/traffic cameras =================
+    # Added 2026-07-17 for the country-generic collector. All resolve to a
+    # YouTube Live via yt-dlp's ANDROID innertube client (the web client
+    # started returning "page needs to be reloaded" on live streams). Every
+    # one was verified end-to-end (resolve -> segment -> cv2 decode) on
+    # 2026-07-17. `country` groups them into the collector's country ladder;
+    # `tz` (where present) overrides the country default for the digest's
+    # hour-of-week profile and day/night gate. YouTube manifests carry an
+    # `expire=` timestamp - detect_core.resolve_stream caches per camera and
+    # re-resolves shortly before expiry.
+    #
+    # --- Thailand (street / beach-road / traffic) ---
+    "th_sukhumvit": {
+        "name": "Sukhumvit Rd (Bangkok)", "city": "Bangkok", "country": "thailand",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=Q71sLS8h9a4",
+        "page": "https://webcamera24.com/camera/thailand/sukhumvit-street/",
+        "embed": "https://www.youtube.com/embed/Q71sLS8h9a4?autoplay=1&mute=1",
+    },
+    "th_chaweng_hooters": {
+        "name": "Chaweng Beach Rd (Koh Samui)", "city": "Koh Samui", "country": "thailand",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=VR-x3HdhKLQ",
+        "page": "https://webcamera24.com/camera/thailand/7108-hooters-cam-chaweng-live-street-webcam-stream-p-hd/",
+        "embed": "https://www.youtube.com/embed/VR-x3HdhKLQ?autoplay=1&mute=1",
+    },
+    "th_nanai_road": {
+        "name": "Nanai Rd (Patong)", "city": "Patong", "country": "thailand",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=WSm_r0eNl1E",
+        "page": "https://webcamera24.com/camera/thailand/nanai-road-cam/",
+        "embed": "https://www.youtube.com/embed/WSm_r0eNl1E?autoplay=1&mute=1",
+    },
+    "th_patong_sainamyen": {
+        "name": "Sainamyen Rd (Patong)", "city": "Patong", "country": "thailand",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=_nvG0c9keWI",
+        "page": "https://webcamera24.com/camera/thailand/patong-sainamyen-rd-cam/",
+        "embed": "https://www.youtube.com/embed/_nvG0c9keWI?autoplay=1&mute=1",
+    },
+    "th_petchaburi_traffic": {
+        "name": "Petchaburi Rd traffic (Bangkok)", "city": "Bangkok", "country": "thailand",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=a_bUVExv_Cg",
+        "page": "https://webcamera24.com/camera/thailand/petchaburi-road-traffic-cam/",
+        "embed": "https://www.youtube.com/embed/a_bUVExv_Cg?autoplay=1&mute=1",
+    },
+    "th_green_mango": {
+        "name": "Soi Green Mango (Chaweng)", "city": "Koh Samui", "country": "thailand",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=DwKCna1mumk",
+        "page": "https://webcamera24.com/camera/thailand/7098-hush-bar-soi-green-mango-chaweng-live-street-webcam-stream-p-hd/",
+        "embed": "https://www.youtube.com/embed/DwKCna1mumk?autoplay=1&mute=1",
+    },
+
+    # --- Japan (crossings / downtown streets) ---
+    "jp_shinsaibashi": {
+        "name": "Shinsaibashi (Osaka)", "city": "Osaka", "country": "japan",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=aVAO2wSUsPo",
+        "page": "https://webcamera24.com/camera/japan/shinsaibashi-cam/",
+        "embed": "https://www.youtube.com/embed/aVAO2wSUsPo?autoplay=1&mute=1",
+    },
+    "jp_kabukicho_crossing": {
+        "name": "Kabukicho Crossing (Tokyo)", "city": "Tokyo", "country": "japan",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=ErHJBXTmm2Q",
+        "page": "https://webcamera24.com/camera/japan/kabukicho-crossing/",
+        "embed": "https://www.youtube.com/embed/ErHJBXTmm2Q?autoplay=1&mute=1",
+    },
+    "jp_kabukicho_shinjuku": {
+        "name": "Kabukicho (Shinjuku, Tokyo)", "city": "Tokyo", "country": "japan",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=DjdUEyjx8GM",
+        "page": "https://webcamera24.com/camera/japan/kabukicho-shinjuku-cam/",
+        "embed": "https://www.youtube.com/embed/DjdUEyjx8GM?autoplay=1&mute=1",
+    },
+    "jp_cross_space": {
+        "name": "Cross Space (Shinjuku)", "city": "Tokyo", "country": "japan",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=Zhmmh7l6KEw",
+        "page": "https://webcamera24.com/camera/japan/cross-space-shinjuku/",
+        "embed": "https://www.youtube.com/embed/Zhmmh7l6KEw?autoplay=1&mute=1",
+    },
+    "jp_shibuya": {
+        "name": "Shibuya (Tokyo)", "city": "Tokyo", "country": "japan",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=ocQygJpZnhU",
+        "page": "https://webcamera24.com/camera/japan/shibuya/",
+        "embed": "https://www.youtube.com/embed/ocQygJpZnhU?autoplay=1&mute=1",
+    },
+    "jp_seibu_shinjuku": {
+        "name": "Seibu-Shinjuku Station (Tokyo)", "city": "Tokyo", "country": "japan",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=lA6TaaMGgDo",
+        "page": "https://webcamera24.com/camera/japan/seibu-shinjuku-station-cam/",
+        "embed": "https://www.youtube.com/embed/lA6TaaMGgDo?autoplay=1&mute=1",
+    },
+    "jp_tenjin": {
+        "name": "Tenjin Watanabe-dori (Fukuoka)", "city": "Fukuoka", "country": "japan",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=p326sZfmwHM",
+        "page": "https://webcamera24.com/camera/japan/tenjin-watanabe-dori-avenue/",
+        "embed": "https://www.youtube.com/embed/p326sZfmwHM?autoplay=1&mute=1",
+    },
+    "jp_kyoto_station": {
+        "name": "Kyoto Station Bus Terminal", "city": "Kyoto", "country": "japan",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=v9rQqa_VTEY",
+        "page": "https://webcamera24.com/camera/japan/kyoto-station-bus-terminal-cam/",
+        "embed": "https://www.youtube.com/embed/v9rQqa_VTEY?autoplay=1&mute=1",
+    },
+
+    # --- USA (Times Square / downtowns / main streets). tz set per camera:
+    # this bench spans Eastern, Central and Pacific. ---
+    "us_north_conway": {
+        "name": "North Conway (NH)", "city": "North Conway", "country": "usa",
+        "tz": "America/New_York",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=H8bFFw-0ZQE",
+        "page": "https://webcamera24.com/camera/usa/north-conway/",
+        "embed": "https://www.youtube.com/embed/H8bFFw-0ZQE?autoplay=1&mute=1",
+    },
+    "us_boston_common": {
+        "name": "Boston Common (MA)", "city": "Boston", "country": "usa",
+        "tz": "America/New_York",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=sWF5RQ_OzpM",
+        "page": "https://webcamera24.com/camera/usa/boston-common-cam/",
+        "embed": "https://www.youtube.com/embed/sWF5RQ_OzpM?autoplay=1&mute=1",
+    },
+    "us_times_square": {
+        "name": "Times Square (NYC)", "city": "New York", "country": "usa",
+        "tz": "America/New_York",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=z-jYdOIKcTQ",
+        "page": "https://webcamera24.com/camera/usa/times-square-manhattan/",
+        "embed": "https://www.youtube.com/embed/z-jYdOIKcTQ?autoplay=1&mute=1",
+    },
+    "us_bellevue_2nd": {
+        "name": "Bellevue 2nd St (WA)", "city": "Bellevue", "country": "usa",
+        "tz": "America/Los_Angeles",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=to8iWyVHNM4",
+        "page": "https://webcamera24.com/camera/usa/bellevue-2ndstreet-station-cam/",
+        "embed": "https://www.youtube.com/embed/to8iWyVHNM4?autoplay=1&mute=1",
+    },
+    "us_church_st_burlington": {
+        "name": "Church St (Burlington, VT)", "city": "Burlington", "country": "usa",
+        "tz": "America/New_York",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=zl1woMXGGmQ",
+        "page": "https://webcamera24.com/camera/usa/church-street-burlington/",
+        "embed": "https://www.youtube.com/embed/zl1woMXGGmQ?autoplay=1&mute=1",
+    },
+    "us_houston_downtown": {
+        "name": "Houston Downtown (TX)", "city": "Houston", "country": "usa",
+        "tz": "America/Chicago",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=wUQc3RoLAPs",
+        "page": "https://webcamera24.com/camera/usa/houston-downtown/",
+        "embed": "https://www.youtube.com/embed/wUQc3RoLAPs?autoplay=1&mute=1",
+    },
+    "us_apex_main": {
+        "name": "Main St (Apex, NC)", "city": "Apex", "country": "usa",
+        "tz": "America/New_York",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=xaHSBtKtWTs",
+        "page": "https://webcamera24.com/camera/usa/main-street-apex-town/",
+        "embed": "https://www.youtube.com/embed/xaHSBtKtWTs?autoplay=1&mute=1",
+    },
+    "us_putnam_square": {
+        "name": "Putnam County Sq (Cookeville, TN)", "city": "Cookeville", "country": "usa",
+        "tz": "America/Chicago",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=z8HYmP_gOhY",
+        "page": "https://webcamera24.com/camera/usa/putnam-county-square-live/",
+        "embed": "https://www.youtube.com/embed/z8HYmP_gOhY?autoplay=1&mute=1",
+    },
 }
 
 # Live dashboard grid, in display order. Each slot has a primary camera and an
@@ -388,62 +547,120 @@ CAMERAS = {
 # per the note above. They still belong at the tail of the chain: they cost
 # nothing when they fail (the picker skips them within a few rounds) and
 # unblock as soon as IBB relaxes the block or the VM is behind a TR proxy.
-# One GLOBAL priority ladder, shared by all four slots (operator spec,
-# 2026-07-16). The collector's CameraPool walks it top-down and assigns the
-# first four cameras that are currently delivering frames - one per slot,
-# never the same camera twice:
-#   tier 1: the four Konya cams (webcamera24/tvkur) - the original grid;
-#   tier 2: the four preferred Istanbul kamerayayin cams, in this order;
-#   tier 3: every remaining kamerayayin camera from the catalog, so the
-#           grid NEVER settles on an empty frame while anything is live.
-FALLBACK_POOL = [
-    # tier 1 - Konya (primary grid)
-    "konya_hukumet", "otogar_kavsagi", "konya_kulturpark",
-    "konya_millet_caddesi",
-    # tier 2 - preferred Istanbul replacements (operator order, 2026-07-16)
-    "taksim_yeni", "sultanahmet_1_yeni", "eyup_sultan_yeni",
-    "beyazit_meydan_yeni",
-    # tier 3 - the rest of the live catalog, walked one by one until a
-    # camera actually delivers frames
+# ===================== Country priority ladders =========================
+# 2026-07-17: the collector became country-generic. The grid always runs
+# FOUR cameras from ONE country; each country has its own priority ladder
+# (the CameraPool walks it top-down, assigning the first four cameras that
+# are currently delivering frames). A country is only abandoned for the
+# next one when its WHOLE ladder is exhausted (every camera resting or its
+# host blocked) - a single dead camera just backfills from deeper in the
+# same country's bench. Country order below IS the fallback order; the
+# CountryDirector re-probes higher-priority countries shortly before each
+# report and switches back if one has recovered.
+#
+# Turkey ladder (operator's revised order 2026-07-17): IBB first (the
+# original target, geo-blocked from GCP since early July but the primary
+# subject), then the four Konya cams, then the Turkish tail (rest of the
+# IBB catalog + the Konya tram-line view). Konya `tvkur` cams are the
+# fast-fail lane (see collector.CameraPool): one miss rests them.
+TURKEY_IBB = [
+    "taksim_yeni", "sultanahmet_1_yeni", "eyup_sultan_yeni", "beyazit_meydan_yeni",
+]
+TURKEY_KONYA = [
+    "konya_hukumet", "otogar_kavsagi", "konya_kulturpark", "konya_millet_caddesi",
+]
+TURKEY_TAIL = [
     "buyuk_camlica_yeni", "konya_ince_minareli", "sarachane_yeni",
-    "sultanahmet_2_yeni", "uskudar_yeni", "salacak_yeni",
-    "kucukcekmece_yeni", "ulus_parki_yeni", "pierre_lotti_yeni",
-    "emirgan_yeni", "kiz_kulesi_yeni", "hidiv_kasri_yeni", "dragos_yeni",
+    "sultanahmet_2_yeni", "uskudar_yeni", "salacak_yeni", "kucukcekmece_yeni",
+    "ulus_parki_yeni", "pierre_lotti_yeni", "emirgan_yeni", "kiz_kulesi_yeni",
+    "hidiv_kasri_yeni", "dragos_yeni",
+]
+TURKEY_POOL = TURKEY_IBB + TURKEY_KONYA + TURKEY_TAIL
+
+# Foreign ladders: the operator's four per country first (verified live
+# 2026-07-17), then the spares discovered from the same webcamera24 country
+# listing (street / traffic / crossing views), deepest bench so a dead
+# camera backfills without leaving the country.
+THAILAND_POOL = [
+    "th_sukhumvit", "th_chaweng_hooters", "th_nanai_road", "th_patong_sainamyen",
+    "th_petchaburi_traffic", "th_green_mango",
+]
+JAPAN_POOL = [
+    "jp_shinsaibashi", "jp_kabukicho_crossing", "jp_kabukicho_shinjuku", "jp_cross_space",
+    "jp_shibuya", "jp_seibu_shinjuku", "jp_tenjin", "jp_kyoto_station",
+]
+USA_POOL = [
+    "us_north_conway", "us_boston_common", "us_times_square", "us_bellevue_2nd",
+    "us_church_st_burlington", "us_houston_downtown", "us_apex_main", "us_putnam_square",
 ]
 
-def _pool_fallbacks(primary: str) -> list[str]:
-    return [c for c in FALLBACK_POOL if c != primary]
+# Ordered country ladder. `tz` is the DEFAULT timezone for the country's
+# reports/day-night gate; a camera may override it with its own "tz"
+# (the US bench spans Eastern/Central/Pacific).
+COUNTRIES = {
+    "turkey":   {"display": "Turkey",   "flag": "TR", "tz": "Europe/Istanbul", "pool": TURKEY_POOL},
+    "thailand": {"display": "Thailand", "flag": "TH", "tz": "Asia/Bangkok",    "pool": THAILAND_POOL},
+    "japan":    {"display": "Japan",    "flag": "JP", "tz": "Asia/Tokyo",      "pool": JAPAN_POOL},
+    "usa":      {"display": "USA",      "flag": "US", "tz": "America/New_York", "pool": USA_POOL},
+}
+COUNTRY_ORDER = list(COUNTRIES)
 
-GRID_SLOTS = [
-    {
-        "slot_id":      "slot_konya_hukumet",
-        "display_area": "Konya - Hukumet",
-        "primary":      "konya_hukumet",
-        "fallbacks":    _pool_fallbacks("konya_hukumet"),
-    },
-    {
-        "slot_id":      "slot_otogar",
-        "display_area": "Konya - Otogar",
-        "primary":      "otogar_kavsagi",
-        "fallbacks":    _pool_fallbacks("otogar_kavsagi"),
-    },
-    {
-        "slot_id":      "slot_kulturpark",
-        "display_area": "Konya - Kulturpark",
-        "primary":      "konya_kulturpark",
-        "fallbacks":    _pool_fallbacks("konya_kulturpark"),
-    },
-    {
-        "slot_id":      "slot_millet_caddesi",
-        "display_area": "Konya - Millet Caddesi",
-        "primary":      "konya_millet_caddesi",
-        "fallbacks":    _pool_fallbacks("konya_millet_caddesi"),
-    },
-    # konya_ince_minareli (tram-line view) stays in CAMERAS above as a
-    # catalog option and a tier-3 pool entry; it is NOT the primary of a
-    # dedicated slot because a fifth grid slot costs ~20% round time and
-    # RAM on the e2-micro, and the operator prefers the 4-camera cadence.
-]
+
+def country_pool(country: str) -> list[str]:
+    """The ordered camera ladder for one country (validated against CAMERAS)."""
+    return [c for c in COUNTRIES[country]["pool"] if c in CAMERAS]
+
+
+def camera_timezone(cam_id: str) -> str:
+    """Camera's own tz if set, else its country default, else Istanbul."""
+    cam = CAMERAS.get(cam_id, {})
+    if cam.get("tz"):
+        return cam["tz"]
+    ctry = cam.get("country")
+    if ctry and ctry in COUNTRIES:
+        return COUNTRIES[ctry]["tz"]
+    return "Europe/Istanbul"
+
+
+# Stamp every catalog entry with its own id (needed by the resolve cache in
+# detect_core) and a country. The foreign cameras carry an explicit country;
+# every other catalog entry predates the country field and is Turkish. Done
+# once at import so every consumer - collector, notebook, digest - sees it.
+for _cid, _cam in CAMERAS.items():
+    _cam.setdefault("id", _cid)
+    _cam.setdefault("country", "turkey")
+
+# Back-compat: the old single global ladder is Turkey's ladder. Modules that
+# still import FALLBACK_POOL (tests, host breaker) get Turkey unchanged.
+FALLBACK_POOL = TURKEY_POOL
+
+
+def _pool_fallbacks(primary: str, pool: list[str] | None = None) -> list[str]:
+    pool = pool if pool is not None else FALLBACK_POOL
+    return [c for c in pool if c != primary]
+
+
+def build_grid_slots(country: str = "turkey") -> list[dict]:
+    """Four generic grid slots for a country. slot_id stays generic
+    (slot_1..slot_4) so the Firestore grid schema and the dashboard are
+    country-agnostic; the human label comes from the active camera at
+    runtime (see collector._slot_metadata)."""
+    pool = country_pool(country)
+    primaries = (pool + pool)[:4]              # pad if a country has < 4 cams
+    slots = []
+    for i, primary in enumerate(primaries, 1):
+        slots.append({
+            "slot_id":      f"slot_{i}",
+            "display_area": f"Slot {i}",
+            "primary":      primary,
+            "fallbacks":    _pool_fallbacks(primary, pool),
+        })
+    return slots
+
+
+# Default grid = the top-priority country (Turkey). The collector rebuilds
+# these when the active country changes.
+GRID_SLOTS = build_grid_slots("turkey")
 
 # Backward compat for the viewer notebook / smoke tests: the four primary cams.
 GRID_CAMERAS = [s["primary"] for s in GRID_SLOTS]

@@ -129,17 +129,25 @@ class FirebaseStore:
             "per_class":       stats.get("per_class") or {},
         })
 
-    def write_grid_config(self, slots_meta: list[dict]) -> None:
+    def write_grid_config(self, slots_meta: list[dict],
+                          country: str | None = None) -> None:
         """Publish which cam is currently active in each slot.
 
         `slots_meta` is a list of dicts, one per slot, with at least:
           slot_id, primary, active_cam, active_cam_name, active_embed,
-          active_hls, display_area.
+          active_hls, display_area, country.
+        `country` names which country the grid is currently watching (the
+        collector is country-generic: it runs 4 cameras from ONE country
+        and rotates when that country goes dark). The dashboard/report use
+        it to label the active region.
         """
-        self.db.collection(self.config).document("grid").set({
+        doc = {
             "updated_at": dt.datetime.now(dt.timezone.utc),
             "slots":      slots_meta,
-        })
+        }
+        if country is not None:
+            doc["country"] = country
+        self.db.collection(self.config).document("grid").set(doc)
 
     # ---- read/persist paths used by the collector's analysis state ---------
 

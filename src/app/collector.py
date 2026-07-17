@@ -39,6 +39,7 @@ import bisect
 import datetime as dt
 import json
 import math
+import os
 import time
 import urllib.error
 from pathlib import Path
@@ -56,6 +57,7 @@ from app.detect_core import (
     detect_burst,
     draw_boxes,
     grab_burst,
+    invalidate_resolved,
     last_grab_error,
     last_grab_http,
     load_model,
@@ -138,11 +140,13 @@ NIGHT_START_HOUR = 20
 NIGHT_END_HOUR = 6
 
 
-def is_night(luma: float | None, now_utc: dt.datetime) -> bool:
+def is_night(luma: float | None, now_utc: dt.datetime, tz=None) -> bool:
     """Night = local-clock night OR a genuinely dark frame (tunnel-dark
     daytime failure counts too). Drives the per-class gate bump and the
-    record's is_night analysis tag."""
-    h = now_utc.astimezone(TURKEY_TZ).hour
+    record's is_night analysis tag. `tz` is the CAMERA's timezone (a US
+    Pacific street and an Istanbul square hit 20:00 hours apart); defaults
+    to Turkey/UTC+3 for back-compat when the caller has no camera tz."""
+    h = now_utc.astimezone(tz or TURKEY_TZ).hour
     if h >= NIGHT_START_HOUR or h < NIGHT_END_HOUR:
         return True
     return luma is not None and luma < NIGHT_MEAN_GRAY
@@ -233,6 +237,46 @@ def check_scene_anomalies(cam_id: str, counts: dict, boxes: list[dict],
 
 TURKEY_TZ = dt.timezone(dt.timedelta(hours=3))  # permanent UTC+3, no DST
 _DOW = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+# Per-camera timezone for the day/night gate and the hour-of-week profile.
+# The country-generic grid (2026-07-17) runs cameras from Thailand, Japan,
+# and a US bench that spans Eastern/Central/Pacific - bucketing all of them
+# under Istanbul's clock would smear every "normal for this hour" baseline
+# and fire the night gate at the wrong local hours. Resolve each camera's
+# tz (its own "tz", else its country default) to a tzinfo, preferring the
+# stdlib zoneinfo (correct DST) and falling back to a fixed-offset table
+# when the tz database is absent (bare Windows without `tzdata`).
+_FIXED_OFFSETS = {
+    "Europe/Istanbul": 3, "Asia/Bangkok": 7, "Asia/Tokyo": 9,
+    "America/New_York": -5, "America/Chicago": -6, "America/Los_Angeles": -8,
+}
+_TZ_CACHE: dict = {}
+
+
+def _tzinfo(name: str):
+    if name in _TZ_CACHE:
+        return _TZ_CACHE[name]
+    tz = None
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(name)
+    except Exception:
+        off = _FIXED_OFFSETS.get(name)
+        if off is not None:
+            tz = dt.timezone(dt.timedelta(hours=off))
+    tz = tz or TURKEY_TZ
+    _TZ_CACHE[name] = tz
+    return tz
+
+
+def cam_tzinfo(cam_id: str):
+    """tzinfo for a camera, via cameras.camera_timezone (its own tz or its
+    country default). Cheap and cached; safe on unknown ids (-> Turkey)."""
+    try:
+        from app.cameras import camera_timezone
+        return _tzinfo(camera_timezone(cam_id))
+    except Exception:
+        return TURKEY_TZ
 
 
 class CameraPool:
@@ -434,6 +478,115 @@ class HostBreaker:
             del self.rest_until[host]
             return "reopened"
         return None
+
+
+class CountryDirector:
+    """Country-generic grid controller (operator spec, 2026-07-17).
+
+    The grid always runs FOUR cameras from ONE country. Each country owns
+    its own CameraPool (priority ladder over that country's cameras) and
+    HostBreaker (per-host 403/429 circuit breaker). Countries are tried in
+    a fixed priority order; the director stays on a country as long as it
+    can field live cameras, backfilling a dead camera from deeper in the
+    SAME country's bench, and only advances to the next country when the
+    active one is fully dark (`min_live` live cameras, default 1).
+
+    Recovery: a country higher in the order than the active one is re-probed
+    shortly before each scheduled report; if it delivers, the grid switches
+    back to it (Turkey is the project's subject - the point is to spend the
+    maximum time on it and only visit Thailand/Japan/USA while it is down).
+
+    Pure control logic - the actual frame grabs happen in the main loop,
+    which feeds results back through record(). Fully unit-testable offline.
+    """
+
+    def __init__(self, countries: dict, order: list[str], n_slots: int,
+                 fast_fail_host_substr: str = "tvkur", min_live: int = 1,
+                 max_failures: int = FALLBACK_MAX_FAILURES,
+                 retry_minutes: int = FALLBACK_RETRY_MINUTES,
+                 breaker_threshold: int = 4, breaker_rest_minutes: int = 20):
+        from urllib.parse import urlparse
+        self.order = [c for c in order if c in countries and countries[c]]
+        if not self.order:
+            raise ValueError("CountryDirector needs at least one non-empty country")
+        self.n_slots = n_slots
+        self.min_live = min_live
+        self.pools: dict = {}
+        self.breakers: dict = {}
+        for country in self.order:
+            cams = list(countries[country])
+            fast = [c for c in cams
+                    if fast_fail_host_substr in (CAMERAS.get(c, {}).get("url") or "")]
+            self.pools[country] = CameraPool(
+                cams, n_slots=n_slots, max_failures=max_failures,
+                retry_minutes=retry_minutes, fast_fail=fast)
+            host_of = {c: (urlparse(CAMERAS.get(c, {}).get("url") or "").hostname or "?")
+                       for c in cams}
+            self.breakers[country] = HostBreaker(
+                host_of, threshold=breaker_threshold,
+                rest_minutes=breaker_rest_minutes)
+        self.active = self.order[0]
+
+    # ---- per-round assignment -------------------------------------------
+    def assign(self, now: float) -> tuple[str, list[str]]:
+        """(active_country, [4 cam_ids]) for this round, honoring the active
+        country's host breaker."""
+        pool, br = self.pools[self.active], self.breakers[self.active]
+        return self.active, pool.assign(now=now, blocked=br.blocked_cams(now))
+
+    def record(self, cam: str, ok: bool, http: int | None, now: float,
+               country: str | None = None) -> str | None:
+        """Feed one sample result into a country's pool + breaker (defaults
+        to the active country). Returns the breaker event, if any."""
+        country = country or self.active
+        pool, br = self.pools[country], self.breakers[country]
+        pool.record(cam, ok, now=now)
+        event = br.note(cam, ok, http, now=now)
+        if event == "tripped":
+            pool.forgive(br.cams_of(br.host_of[cam]))
+        elif event == "rearmed":
+            pool.forgive([cam])
+        return event
+
+    # ---- liveness + advancement -----------------------------------------
+    def live_count(self, country: str, now: float) -> int:
+        """Cameras currently eligible (not resting) AND not host-blocked."""
+        pool, br = self.pools[country], self.breakers[country]
+        blocked = br.blocked_cams(now)
+        return sum(1 for c in pool.pool
+                   if pool._eligible(c, now) and c not in blocked)
+
+    def maybe_advance(self, now: float) -> tuple[str, str] | None:
+        """If the active country is dark (< min_live live cameras), rotate to
+        the next country in priority order that has live cameras. Returns
+        (from, to) on a switch, else None. If nobody has live cameras the
+        active country is kept (the grid holds steady rather than churning)."""
+        if self.live_count(self.active, now) >= self.min_live:
+            return None
+        start = self.order.index(self.active)
+        for step in range(1, len(self.order) + 1):
+            cand = self.order[(start + step) % len(self.order)]
+            if cand == self.active:
+                continue
+            if self.live_count(cand, now) >= self.min_live:
+                prev, self.active = self.active, cand
+                return prev, cand
+        return None
+
+    def countries_above(self, country: str | None = None) -> list[str]:
+        """Higher-priority countries than the active one, best-first - the
+        recovery-probe candidates for the pre-report check."""
+        idx = self.order.index(country or self.active)
+        return self.order[:idx]
+
+    def switch_to(self, country: str) -> None:
+        """Force the active country (used after a successful recovery probe).
+        Forgives that country's accumulated strikes so it starts clean."""
+        if country not in self.pools:
+            return
+        self.active = country
+        pool = self.pools[country]
+        pool.forgive(list(pool.pool))
 
 
 class CamObservationLog:
@@ -738,14 +891,14 @@ class HourlyProfile:
         return max(std, self.std_floor, 0.15 * mean)
 
     @staticmethod
-    def bucket_of(ts_utc: dt.datetime) -> tuple[str, str]:
-        local = ts_utc.astimezone(TURKEY_TZ)
+    def bucket_of(ts_utc: dt.datetime, tz=None) -> tuple[str, str]:
+        local = ts_utc.astimezone(tz or TURKEY_TZ)
         return f"{local.weekday()}_{local.hour}", f"{_DOW[local.weekday()]} {local.hour:02d}:00"
 
     def stats(self, key: str, metric: str,
               ts_utc: dt.datetime) -> tuple[str, str, int, float, float]:
         """(bucket, label, n, mean, std) for the bucket this timestamp falls in."""
-        bucket, label = self.bucket_of(ts_utc)
+        bucket, label = self.bucket_of(ts_utc, cam_tzinfo(key))
         cell = self._slots.get(key, {}).get(metric, {}).get(bucket)
         if not cell or cell[0] < 1:
             return bucket, label, 0, 0.0, 0.0
@@ -833,7 +986,7 @@ class HourlyProfile:
         """
         if value is None:
             return
-        bucket, _ = self.bucket_of(ts_utc)
+        bucket, _ = self.bucket_of(ts_utc, cam_tzinfo(key))
         cell = (self._slots.setdefault(key, {})
                 .setdefault(metric, {})
                 .setdefault(bucket, [0, 0.0, 0.0]))
@@ -882,7 +1035,11 @@ def _ts_filename(ts_iso: str) -> str:
 
 
 def _slot_metadata(slot: dict, active_cam: str) -> dict:
-    """Snapshot of what the dashboard needs about a slot right now."""
+    """Snapshot of what the dashboard needs about a slot right now. The
+    human label is the active CAMERA's own name (the grid is country-generic
+    now - the slot_id stays generic and the tile title follows whatever
+    camera is live), and `country` lets the dashboard/report state which
+    country the grid is currently watching."""
     cam = CAMERAS.get(active_cam, {})
     return {
         "slot_id":         slot["slot_id"],
@@ -893,8 +1050,80 @@ def _slot_metadata(slot: dict, active_cam: str) -> dict:
         "active_page":     cam.get("page"),
         "active_hls":      cam.get("url") if cam.get("kind") == "hls" else None,
         "active_kind":     cam.get("kind"),
-        "display_area":    slot["display_area"],
+        "country":         cam.get("country", "turkey"),
+        "city":            cam.get("city", ""),
+        "display_area":    cam.get("name", slot["display_area"]),
     }
+
+
+# ---- Pre-report country recovery ----------------------------------------
+# Turkey is the project's subject; the grid only visits Thailand/Japan/USA
+# while Turkey is blocked. A few minutes before each scheduled digest (and
+# periodically as a safety net) the collector re-probes higher-priority
+# countries even though their cameras are resting - so the report reflects
+# Turkey the moment its block lifts, instead of waiting out a 15-min
+# camera cooldown. Times are Israel-local (the digest timer's timezone).
+REPORT_TIMES_ISRAEL = os.environ.get("REPORT_TIMES_ISRAEL", "12:00,20:00")
+RECOVERY_PRE_REPORT_MIN = int(os.environ.get("RECOVERY_PRE_REPORT_MIN") or 5)
+RECOVERY_PERIODIC_MIN = int(os.environ.get("RECOVERY_PERIODIC_MIN") or 20)
+_RECOVERY_STATE = {"last": 0.0}
+
+
+def _minutes_to_next_report(now_ts: float, times_str: str | None = None) -> float:
+    times_str = times_str or REPORT_TIMES_ISRAEL
+    tz = _tzinfo("Asia/Jerusalem")
+    now = dt.datetime.fromtimestamp(now_ts, tz)
+    best = None
+    for t in times_str.split(","):
+        t = t.strip()
+        if not t:
+            continue
+        try:
+            hh, mm = (int(x) for x in t.split(":"))
+        except ValueError:
+            continue
+        target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if target <= now:
+            target += dt.timedelta(days=1)
+        mins = (target - now).total_seconds() / 60.0
+        best = mins if best is None else min(best, mins)
+    return best if best is not None else 1e9
+
+
+def _recovery_due(now_ts: float) -> bool:
+    """True at most once per pre-report window / periodic interval."""
+    near_report = _minutes_to_next_report(now_ts) <= RECOVERY_PRE_REPORT_MIN
+    periodic = (now_ts - _RECOVERY_STATE["last"]) >= RECOVERY_PERIODIC_MIN * 60
+    if near_report or periodic:
+        _RECOVERY_STATE["last"] = now_ts
+        return True
+    return False
+
+
+def _recover_higher_priority(director, model, args, firebase,
+                             slot_ids, now_ts: float) -> bool:
+    """Force-probe the lead cameras of each higher-priority country (best
+    first), bypassing cooldowns. On the first live frame, switch the grid
+    back to that country. Returns True on a switch."""
+    for country in director.countries_above():
+        for cam_id in director.pools[country].pool[:2]:   # top 2 cams
+            cam = CAMERAS.get(cam_id)
+            if not cam:
+                continue
+            try:
+                frames = grab_burst(resolve_stream(cam, now_ts),
+                                    n=1, stride=1)
+            except Exception:
+                frames = None
+            ok = bool(frames)
+            http = None if ok else last_grab_http()[1]
+            director.record(cam_id, ok, http, now_ts, country=country)
+            if ok:
+                director.switch_to(country)
+                print(f"  * recovery: {country} answered ({cam_id}) - "
+                      "switching the grid back to it.")
+                return True
+    return False
 
 
 def _save_anomaly_snapshot(slot_id: str, cam_id: str, ts_iso: str,
@@ -1212,8 +1441,10 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
             why = last_grab_error()
             raise RuntimeError(f"empty frame - {why}" if why else "empty frame")
         # Day/night decided BEFORE detection so the gates can react to it.
+        # Use the CAMERA's timezone: a Bangkok street and an Istanbul square
+        # cross into night at different UTC hours.
         luma = float(np.mean(cv2.cvtColor(frames[-1], cv2.COLOR_BGR2GRAY)))
-        night = is_night(luma, now_utc)
+        night = is_night(luma, now_utc, cam_tzinfo(cam_id))
         # Effective per-class gates. This is ALSO the fix for a silent bug:
         # cameras.py merges the review-driven confidence boosts into
         # cam["per_class_conf"], but the value was never handed to
@@ -1451,8 +1682,8 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
         print(f"[{ts}] {slot_id}: firebase write failed ({e})")
 
     if record.get("is_anomaly"):
-        # Operational day in Turkey local time (the profile layer's timezone).
-        local_day = now_utc.astimezone(TURKEY_TZ).date().isoformat()
+        # Operational day in the CAMERA's local time (the profile timezone).
+        local_day = now_utc.astimezone(cam_tzinfo(cam_id)).date().isoformat()
         cell = _ANOMALY_DAYCOUNT.setdefault(cam_id, [local_day, 0, False])
         if cell[0] != local_day:
             cell[:] = [local_day, 0, False]
@@ -1606,6 +1837,11 @@ def main() -> None:
                     help="YOLO input size. 960 recovers the small/distant "
                          "pedestrians and cars these wide street shots are full "
                          "of; set 640 if CPU/RAM constrained")
+    ap.add_argument("--country", default=None,
+                    help="start the grid on this country (turkey/thailand/"
+                         "japan/usa). Default: the top of the priority ladder "
+                         "(turkey). The collector still rotates to the next "
+                         "country automatically when the active one goes dark.")
     ap.add_argument("--burst", type=int, default=3,
                     help="frames per sample; the reported count is the burst median")
     ap.add_argument("--burst-stride", type=int, default=25,
@@ -1704,28 +1940,36 @@ def main() -> None:
     # backoff (~6 min). The IBB cams keep the full grace: their misses can
     # be transient, and probing THEM aggressively is what got the VM
     # throttled on 2026-07-16.
-    from app.cameras import FALLBACK_POOL
-    tvkur_cams = [c for c in FALLBACK_POOL
-                  if "tvkur" in (CAMERAS.get(c, {}).get("url") or "")]
-    pool = CameraPool(FALLBACK_POOL, n_slots=len(GRID_SLOTS),
-                      fast_fail=tvkur_cams)
+    # Country-generic grid (2026-07-17): the grid runs 4 cameras from ONE
+    # country; the CountryDirector holds a per-country priority ladder
+    # (CameraPool) and per-host circuit breaker (HostBreaker), stays on a
+    # country while it can field live cameras, and only advances to the next
+    # country when the active one is fully dark. tvkur (Konya) cams keep the
+    # fast-fail lane. `--country` pins a starting country; otherwise it
+    # begins at the top of the priority order (Turkey).
+    from app.cameras import COUNTRIES, COUNTRY_ORDER, country_pool
+    country_pools = {c: country_pool(c) for c in COUNTRY_ORDER}
+    director = CountryDirector(country_pools, COUNTRY_ORDER,
+                               n_slots=len(GRID_SLOTS))
+    if getattr(args, "country", None) and args.country in director.pools:
+        director.switch_to(args.country)
     slot_ids = [s["slot_id"] for s in GRID_SLOTS]
-    assignment = dict(zip(slot_ids, pool.assign()))
-    print("fallback pool: "
-          f"{len(FALLBACK_POOL)} cameras, {pool.max_failures} misses to rest a "
-          f"camera for {pool.retry_seconds // 60:.0f} min; probation cams and "
-          f"{len(pool.fast_fail)} low-risk tvkur cams rest after a single miss.")
-
-    # Host circuit breaker: an access block (403/429) hits every camera of
-    # a host at once - rest the WHOLE host, probe with one request, reopen
-    # the moment a probe answers. See HostBreaker for the 2026-07-17 story.
-    from urllib.parse import urlparse
-    host_of = {c: (urlparse(CAMERAS[c].get("url") or "").hostname or "?")
-               for c in FALLBACK_POOL if c in CAMERAS}
-    breaker = HostBreaker(host_of)
-    print(f"host breaker: {breaker.threshold} consecutive 403/429s rest ALL of "
-          f"a host's cameras for {breaker.rest_seconds // 60} min, then a "
+    _pool0 = director.pools[director.active]
+    print("country grid: "
+          f"{' -> '.join(COUNTRY_ORDER)} | active={director.active} "
+          f"({len(country_pools[director.active])} cams); advance to the next "
+          f"country only when the active one has < {director.min_live} live "
+          "camera.")
+    print(f"per-country pool: {_pool0.max_failures} misses rest a camera "
+          f"{_pool0.retry_seconds // 60:.0f} min; tvkur cams + probation cams "
+          "rest after a single miss.")
+    _br0 = director.breakers[director.active]
+    print(f"host breaker: {_br0.threshold} consecutive 403/429s rest ALL of "
+          f"a host's cameras for {_br0.rest_seconds // 60} min, then a "
           "single probe request decides (answer = back in rotation).")
+
+    _active_country, _assigned = director.assign(time.time())
+    assignment = dict(zip(slot_ids, _assigned))
 
     reid = None
     if not args.no_reid:
@@ -1792,8 +2036,11 @@ def main() -> None:
     returning_gap_sec       = args.returning_gap_min * 60
     returning_cooldown_sec  = args.returning_per_entity_cooldown_min * 60
 
-    # Every camera that can appear in any slot's chain owns its own baseline.
-    all_cam_ids = {c for s in GRID_SLOTS for c in [s["primary"], *s["fallbacks"]]}
+    # Every camera that can appear in ANY country's grid owns its own
+    # baseline (the grid is country-generic - a Thailand or Japan camera
+    # needs its hour-of-week profile restored/persisted too, not just
+    # Turkey's).
+    all_cam_ids = {c for pool in director.pools.values() for c in pool.pool}
     # Pre-refactor profiles were keyed by slot; a slot's learned weeks of
     # baseline belong to its PRIMARY cam.
     legacy_slot_of_primary = {s["primary"]: s["slot_id"] for s in GRID_SLOTS}
@@ -1804,10 +2051,11 @@ def main() -> None:
 
     # Publish the initial grid config so the dashboard renders immediately.
     slots_meta = [_slot_metadata(s, assignment[s["slot_id"]]) for s in GRID_SLOTS]
-    firebase.write_grid_config(slots_meta)
+    firebase.write_grid_config(slots_meta, country=director.active)
 
-    print(f"Collector started. {len(GRID_SLOTS)} slot(s) over one shared pool:")
-    print("  priority: " + " -> ".join(FALLBACK_POOL))
+    print(f"Collector started. {len(GRID_SLOTS)} slot(s), active country = "
+          f"{director.active}:")
+    print("  priority: " + " -> ".join(director.pools[director.active].pool))
     for slot in GRID_SLOTS:
         print(f"  {slot['slot_id']:20s} starts on {assignment[slot['slot_id']]}")
     print(f"interval={args.interval}s, imgsz={args.imgsz}, burst={args.burst}, "
@@ -1870,6 +2118,7 @@ def main() -> None:
     _ADAPTER_CHECK_EVERY_ROUNDS = 30
     _round_counter = 0
     _all_miss_rounds = 0
+    _active_country = director.active
     try:
         while True:
             round_start = time.time()
@@ -1907,20 +2156,42 @@ def main() -> None:
                         reload_review_overrides()
                 except Exception as e:
                     print(f"  ! static-position learn failed: {e}")
-            # One pool decision per round: the first N healthy cameras in
-            # priority order, one per slot, never a duplicate. Cameras of a
-            # breaker-tripped host stay out of the rotation entirely.
-            round_cams = dict(zip(slot_ids, pool.assign(blocked=breaker.blocked_cams())))
+            # Pre-report recovery: a few minutes before each scheduled digest,
+            # re-probe higher-priority countries even while their cameras are
+            # resting - Turkey is the subject, so the grid should jump back to
+            # it the moment its block lifts, not wait out a 15-min cooldown.
+            if _recovery_due(round_start):
+                switched = _recover_higher_priority(
+                    director, model, args, firebase, slot_ids, round_start)
+                if switched:
+                    _all_miss_rounds = 0
+            # If the active country is fully dark, advance to the next country
+            # that can field live cameras (deep same-country bench first, so
+            # this only fires when the whole country is down).
+            adv = director.maybe_advance(round_start)
+            if adv:
+                print(f"  * country: {adv[0]} is dark - switching grid to "
+                      f"{adv[1]}.")
+                _all_miss_rounds = 0
+
+            # One pool decision per round for the active country: the first N
+            # healthy cameras in priority order, one per slot, never a
+            # duplicate. Cameras of a breaker-tripped host stay out entirely.
+            active_country, _assigned = director.assign(round_start)
+            round_cams = dict(zip(slot_ids, _assigned))
+            country_changed = active_country != _active_country
+            _active_country = active_country
             moved = [sid for sid in slot_ids
                      if round_cams[sid] != assignment.get(sid)]
             assignment = round_cams
-            if moved:
+            if moved or country_changed:
                 for sid in moved:
-                    print(f"  * {sid}: fallback -> {assignment[sid]}")
+                    print(f"  * {sid}: -> {assignment[sid]} "
+                          f"({CAMERAS.get(assignment[sid], {}).get('country', '?')})")
                 slots_meta = [_slot_metadata(s, assignment[s["slot_id"]])
                               for s in GRID_SLOTS]
                 try:
-                    firebase.write_grid_config(slots_meta)
+                    firebase.write_grid_config(slots_meta, country=active_country)
                 except Exception as e:
                     print(f"  ! grid config write failed: {e}")
             round_had_ok = False
@@ -1938,30 +2209,31 @@ def main() -> None:
                                  returning_cooldown_sec = returning_cooldown_sec,
                                  write_reid_stats=(_round_counter
                                                    % REID_STATS_EVERY_ROUNDS == 0))
-                pool.record(cam_id, ok)
                 round_had_ok = round_had_ok or ok
-                # Host breaker: one 403/429 is a data point, `threshold` in
-                # a row across the host is an access block on this address.
+                if not ok:
+                    # Failed grab: drop the cached (stale) resolved URL so the
+                    # next attempt re-resolves instead of retrying dead token.
+                    invalidate_resolved(cam_id)
+                # Route the result through the active country's pool + host
+                # breaker (one 403/429 is a data point; `threshold` in a row
+                # across a host is an access block on this address).
                 _stage, _http = (None, None) if ok else last_grab_http()
-                event = breaker.note(cam_id, ok, _http)
+                _br = director.breakers[active_country]
+                event = director.record(cam_id, ok, _http, round_start,
+                                        country=active_country)
                 if event == "tripped":
-                    _host = breaker.host_of[cam_id]
-                    _cams = breaker.cams_of(_host)
-                    pool.forgive(_cams)
-                    print(f"  ! {_host}: {breaker.threshold} consecutive access "
+                    _host = _br.host_of[cam_id]
+                    print(f"  ! {_host}: {_br.threshold} consecutive access "
                           f"refusals (HTTP {_http}) - this address is blocked. "
-                          f"Resting all {len(_cams)} of its cameras for "
-                          f"{breaker.rest_seconds // 60} min, then probing with "
+                          f"Resting all {len(_br.cams_of(_host))} of its cameras "
+                          f"for {_br.rest_seconds // 60} min, then probing with "
                           "ONE request.")
                 elif event == "rearmed":
-                    # The probe's miss is the HOST's fault - keep the probe
-                    # camera itself clean so the next probe stays on schedule.
-                    pool.forgive([cam_id])
-                    print(f"  ! {breaker.host_of[cam_id]}: probe still refused "
+                    print(f"  ! {_br.host_of[cam_id]}: probe still refused "
                           f"(HTTP {_http}) - resting another "
-                          f"{breaker.rest_seconds // 60} min.")
+                          f"{_br.rest_seconds // 60} min.")
                 elif event == "reopened":
-                    print(f"  * {breaker.host_of[cam_id]}: answering again - "
+                    print(f"  * {_br.host_of[cam_id]}: answering again - "
                           "host back in rotation.")
             # Politeness backoff: rounds where EVERY camera missed are almost
             # always an upstream outage or the CDN rate-limiting this IP -
@@ -1973,7 +2245,7 @@ def main() -> None:
             # the ladder's descent to the Istanbul tier.
             if round_had_ok:
                 _all_miss_rounds = 0
-            elif pool.all_fast_fail(round_cams.values()):
+            elif director.pools[active_country].all_fast_fail(round_cams.values()):
                 pass
             else:
                 _all_miss_rounds += 1

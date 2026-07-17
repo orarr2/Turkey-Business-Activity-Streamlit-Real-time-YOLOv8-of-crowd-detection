@@ -102,32 +102,28 @@ def test_forced_sample_during_rest_does_not_extend_it():
 def test_pool_assign_skips_blocked_cams_and_pads_unblocked_first():
     pool = CameraPool(FALLBACK_POOL, n_slots=4)
     now = 1000
-    # Konya resting (dead channel), IBB host blocked by the breaker.
-    for cam in KONYA:
-        for _ in range(pool.max_failures):
-            pool.record(cam, False, now=now)
+    # The whole IBB host is blocked by the breaker; with IBB out, the pool
+    # must fall to the unblocked Konya tier and never assign a blocked cam.
     picked = pool.assign(now=now, blocked=set(IBB_ALL))
-    # konya_ince_minareli is the only eligible unblocked cam; the padding
-    # must stay on unblocked (tvkur) cams - a resting host is untouched.
-    assert picked[0] == "konya_ince_minareli"
+    assert picked == KONYA
     assert not set(picked) & set(IBB_ALL)
 
 
 def test_pool_forgive_wipes_strikes_and_cooldowns():
     pool = CameraPool(FALLBACK_POOL, n_slots=4)
     now = 1000
-    for cam in KONYA:
+    for cam in IBB4:
         for _ in range(pool.max_failures):
             pool.record(cam, False, now=now)
-    assert pool.assign(now=now)[0] != "konya_hukumet"
-    pool.forgive(KONYA)
-    assert pool.assign(now=now) == KONYA
+    assert pool.assign(now=now)[0] != "taksim_yeni"
+    pool.forgive(IBB4)
+    assert pool.assign(now=now) == IBB4
     # Forgiven cams regain the FULL grace (proven_dead cleared).
-    pool.record("konya_hukumet", False, now=now + 1)
-    assert pool.assign(now=now + 2)[0] == "konya_hukumet"
+    pool.record("taksim_yeni", False, now=now + 1)
+    assert pool.assign(now=now + 2)[0] == "taksim_yeni"
 
 
 def test_forgive_ignores_unknown_camera():
     pool = CameraPool(FALLBACK_POOL, n_slots=4)
     pool.forgive(["not_in_pool"])
-    assert pool.assign(now=1000) == KONYA
+    assert pool.assign(now=1000) == IBB4

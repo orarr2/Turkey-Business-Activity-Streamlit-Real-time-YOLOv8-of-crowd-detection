@@ -116,14 +116,61 @@ def load_model(weights: str = "yolov8s.pt"):
     return model
 
 
+# yt-dlp's default (web) client started returning "the page needs to be
+# reloaded" on live streams in 2026; the android innertube client dodges it
+# and hands back a plain googlevideo HLS manifest. Kept configurable so a
+# future client break is a one-line change, not a redeploy.
+_YT_PLAYER_CLIENTS = (os.environ.get("YT_PLAYER_CLIENTS") or "android,ios,tv").split(",")
+
+
 def resolve_youtube(url: str) -> str:
-    """Resolve a YouTube Live (or webcamera24 YouTube-backed) page to an HLS .m3u8 URL."""
+    """Resolve a YouTube Live (or webcamera24 YouTube-backed) page to an HLS
+    .m3u8 URL. Tries each configured innertube client until one yields a
+    stream, so a single client outage doesn't take the camera down."""
     import yt_dlp
 
-    opts = {"quiet": True, "no_warnings": True, "format": "best[protocol^=m3u8]/best"}
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-    return info["url"]
+    if not url.startswith("http"):                      # bare 11-char video id
+        url = f"https://www.youtube.com/watch?v={url}"
+    last = None
+    for client in _YT_PLAYER_CLIENTS:
+        opts = {"quiet": True, "no_warnings": True,
+                "format": "best[protocol^=m3u8]/best",
+                "extractor_args": {"youtube": {"player_client": [client.strip()]}}}
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+            if info.get("url"):
+                return info["url"]
+        except Exception as e:
+            last = e
+    raise RuntimeError(f"youtube: no client resolved a stream ({last})")
+
+
+# ---- Resolved-stream cache ------------------------------------------------
+# resolve_stream() is called every sampling round for every slot. For direct
+# HLS that is free, but a YouTube resolve shells out to yt-dlp (~3-5 s on the
+# e2-micro) and a webcamera24 resolve fetches+scrapes a page. Doing that four
+# times a round, every 40 s, would dominate the loop and hammer the origin.
+# The googlevideo manifest URL carries its own `expire=<unixts>`; tvkur/skyline
+# tokens rotate on a similar timescale. Cache the resolved URL per camera and
+# reuse it until shortly before it expires (or a grab fails and clears it).
+_RESOLVE_CACHE: dict = {}                                # cam_id -> (url, good_until)
+_RESOLVE_TTL_FALLBACK = int(os.environ.get("RESOLVE_TTL_FALLBACK") or 900)
+_EXPIRE_RE = re.compile(r"[?&/]expire[/=](\d{10})")
+
+
+def _expiry_of(url: str, now: float) -> float:
+    m = _EXPIRE_RE.search(url)
+    if m:
+        # Re-resolve 2 min before the manifest actually expires.
+        return int(m.group(1)) - 120
+    return now + _RESOLVE_TTL_FALLBACK
+
+
+def invalidate_resolved(cam_id: str) -> None:
+    """Drop a camera's cached stream URL - call after a failed grab so the
+    next round re-resolves instead of retrying a stale token/manifest."""
+    _RESOLVE_CACHE.pop(cam_id, None)
 
 
 # Browser-ish headers: webcamera24 and skylinewebcams both 403 bare urllib fetchers.
@@ -172,11 +219,7 @@ def resolve_webcamera24(page_url: str) -> str:
     raise RuntimeError("webcamera24: no tvkur/YouTube player found on page")
 
 
-def resolve_stream(cam: dict) -> str:
-    """Resolve any catalog camera dict to a directly-openable stream URL by `kind`.
-
-    Direct HLS is returned as-is; YouTube/skyline/webcamera24 pages are resolved live.
-    """
+def _resolve_uncached(cam: dict) -> str:
     kind = cam.get("kind", "hls")
     url = cam["url"]
     if kind == "hls":
@@ -188,6 +231,28 @@ def resolve_stream(cam: dict) -> str:
     if kind == "webcamera24":
         return resolve_webcamera24(cam.get("page", url))
     raise ValueError(f"unknown camera kind: {kind!r}")
+
+
+def resolve_stream(cam: dict, now: float | None = None) -> str:
+    """Resolve any catalog camera dict to a directly-openable stream URL by
+    `kind`. Direct HLS is returned as-is; YouTube/skyline/webcamera24 pages
+    are resolved live and CACHED per camera until the manifest nears expiry,
+    so the collector pays the yt-dlp / page-scrape cost once per token
+    lifetime rather than once per sampling round. Pass a stable `cam['id']`
+    to enable caching; without an id the resolve is always live."""
+    kind = cam.get("kind", "hls")
+    if kind == "hls":
+        return cam["url"]
+    cam_id = cam.get("id")
+    now = time.time() if now is None else now
+    if cam_id:
+        hit = _RESOLVE_CACHE.get(cam_id)
+        if hit and now < hit[1]:
+            return hit[0]
+    resolved = _resolve_uncached(cam)
+    if cam_id:
+        _RESOLVE_CACHE[cam_id] = (resolved, _expiry_of(resolved, now))
+    return resolved
 
 
 _SSL_CTX = ssl._create_unverified_context()
