@@ -93,6 +93,18 @@ def test_no_id_means_always_live(monkeypatch):
     assert len(calls) == 2
 
 
+def test_resolve_with_default_now_uses_wall_clock(monkeypatch):
+    """resolve_stream(cam) with no `now` must fall back to time.time() -
+    the notebook and any ad-hoc caller invoke it that way. (Regressed once:
+    detect_core called time.time() without importing time.)"""
+    monkeypatch.setattr(dc, "_resolve_uncached",
+                        lambda cam: "https://x/expire/9999999999/live.m3u8")
+    cam = {"id": "def_now", "kind": "youtube", "url": "u"}
+    url = dc.resolve_stream(cam)                  # no now= -> wall clock
+    assert url.endswith("live.m3u8")
+    assert "def_now" in dc._RESOLVE_CACHE
+
+
 def test_expire_regex_matches_googlevideo_shapes():
     for url, exp in [
         ("https://m.googlevideo.com/api/manifest/hls_playlist/expire/1784313381/ei/x", 1784313381),
