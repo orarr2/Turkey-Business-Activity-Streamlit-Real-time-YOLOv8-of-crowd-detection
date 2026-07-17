@@ -345,6 +345,30 @@ function buildVideoInto(st, cfg, slot) {
   st.videoWrap.insertAdjacentHTML("afterbegin", markup);
   const video = st.videoWrap.querySelector("video[data-hls]");
   if (video) attachHls(st, video, cfg);
+  const yt = st.videoWrap.querySelector('iframe[src*="youtube.com/embed"], iframe[src*="youtube-nocookie.com/embed"]');
+  if (yt) forceYouTubeLive(yt);
+}
+
+// Force a YouTube-embed tile to autoplay AND sit at the LIVE edge - the two
+// things a bare autoplay iframe does not guarantee: (1) Chrome throttles
+// several cross-origin iframes trying to autoplay at once, so some tiles stay
+// paused; (2) a live stream with DVR can start behind "now". The iframe API's
+// postMessage command channel (enabled by &enablejsapi=1 on the src) lets us
+// mute + playVideo + seek far past the buffer, which YouTube clamps to the
+// live edge. We nudge a few times because the player only accepts commands
+// once it has finished loading.
+function forceYouTubeLive(iframe) {
+  const cmd = (func, args = []) => {
+    try {
+      iframe.contentWindow.postMessage(
+        JSON.stringify({ event: "command", func, args }),
+        "https://www.youtube.com");
+    } catch (_) { /* not ready / cross-origin race - the interval retries */ }
+  };
+  const nudge = () => { cmd("mute"); cmd("playVideo"); cmd("seekTo", [1e7, true]); };
+  iframe.addEventListener("load", () => setTimeout(nudge, 700));
+  let n = 0;
+  const iv = setInterval(() => { nudge(); if (++n >= 6) clearInterval(iv); }, 2500);
 }
 
 function attachHls(st, video, cfg) {

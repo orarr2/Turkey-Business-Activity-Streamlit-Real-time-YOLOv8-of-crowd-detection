@@ -1,6 +1,7 @@
-# Turkey Business Activity - Live YOLOv8 Crowd Detection
+# Business Activity - Live Footfall
 
-Turn public live-stream cameras in Turkey into quantitative time series:
+Turn public live-stream street cameras (Turkey, Thailand, Japan, USA) into
+quantitative time series:
 
 > **live HLS stream → YOLOv8 frame inference → counts + appearance re-ID → Firestore →
 > real-time web dashboard + Jupyter analytics.**
