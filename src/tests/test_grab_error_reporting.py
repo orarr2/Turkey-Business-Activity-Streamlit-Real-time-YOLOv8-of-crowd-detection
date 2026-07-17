@@ -114,6 +114,16 @@ def test_downloaded_but_undecodable_reports_decode_stage(monkeypatch):
     assert "decode" in dc.last_grab_error()
 
 
+def test_playlist_failure_skips_the_duplicate_single_frame_retry(monkeypatch):
+    """A refused playlist refuses the single-frame retry identically -
+    grab_burst must knock ONCE, not twice (halves the request rate exactly
+    when a blocking host is counting knocks)."""
+    fetched = []
+    monkeypatch.setattr(dc, "_http_get", http_router("playlist", fetched=fetched))
+    assert dc.grab_burst(URL, n=2, stride=13) == []
+    assert len(fetched) == 1
+
+
 def test_successful_grab_leaves_no_error(monkeypatch):
     monkeypatch.setattr(dc, "_http_get", http_router(None))
     monkeypatch.setattr(dc, "_open_cap", lambda p: FakeCap(n=20))

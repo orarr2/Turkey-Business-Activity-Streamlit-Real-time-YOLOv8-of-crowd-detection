@@ -253,6 +253,8 @@ _SEGMENT_BYTE_BUDGET = int(os.environ.get("SEGMENT_BYTE_BUDGET") or 2_500_000)
 # can append it to its MISS line. Single-threaded use only (the collector
 # samples slots serially); grab_burst() resets it at the start of a grab.
 _LAST_GRAB_ERROR: str | None = None
+_LAST_GRAB_STAGE: str | None = None
+_LAST_GRAB_HTTP: int | None = None
 
 
 def last_grab_error() -> str | None:
@@ -260,15 +262,28 @@ def last_grab_error() -> str | None:
     return _LAST_GRAB_ERROR
 
 
+def last_grab_http() -> tuple[str | None, int | None]:
+    """(stage, http_status) of the most recent failed grab. The status is
+    set only when the failure was an HTTP error - it lets the collector
+    tell an ACCESS REFUSAL (403/429, the host blocking this address) from
+    a dead channel (404) or a network problem, and drive the host-level
+    circuit breaker off the real signal instead of string-matching logs."""
+    return _LAST_GRAB_STAGE, _LAST_GRAB_HTTP
+
+
 def _reset_grab_error() -> None:
-    global _LAST_GRAB_ERROR
+    global _LAST_GRAB_ERROR, _LAST_GRAB_STAGE, _LAST_GRAB_HTTP
     _LAST_GRAB_ERROR = None
+    _LAST_GRAB_STAGE = None
+    _LAST_GRAB_HTTP = None
 
 
 def _note_grab_failure(stage: str, err) -> None:
-    global _LAST_GRAB_ERROR
+    global _LAST_GRAB_ERROR, _LAST_GRAB_STAGE, _LAST_GRAB_HTTP
     detail = f"{type(err).__name__}: {err}" if isinstance(err, Exception) else str(err)
     _LAST_GRAB_ERROR = f"{stage}: {detail}"
+    _LAST_GRAB_STAGE = stage
+    _LAST_GRAB_HTTP = getattr(err, "code", None) if isinstance(err, Exception) else None
 
 
 # Playlists must be revalidated, never served stale: wowza rotates the
@@ -1102,6 +1117,12 @@ def grab_burst(stream_url: str, n: int = 3, stride: int = 25) -> list[np.ndarray
     except Exception as e:
         _note_grab_failure("burst decode", e)
     if not frames:
+        # A playlist-level failure (404 dead channel, 403 access block)
+        # will refuse the single-frame retry identically - same URL, same
+        # headers. Skipping the duplicate knock halves the request rate
+        # exactly when a blocking host is counting them.
+        if _LAST_GRAB_STAGE == "playlist":
+            return frames
         f = grab_frame(stream_url)
         if f is not None:
             frames = [f]

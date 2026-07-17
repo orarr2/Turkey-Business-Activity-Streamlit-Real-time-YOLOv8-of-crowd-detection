@@ -57,6 +57,7 @@ from app.detect_core import (
     draw_boxes,
     grab_burst,
     last_grab_error,
+    last_grab_http,
     load_model,
     night_adjusted_conf,
     resolve_stream,
@@ -281,18 +282,44 @@ class CameraPool:
     def _eligible(self, cam: str, now: float) -> bool:
         return now >= self.cooldown_until[cam]
 
-    def assign(self, now: float | None = None) -> list[str]:
+    def assign(self, now: float | None = None,
+               blocked: frozenset | set = frozenset()) -> list[str]:
         """First n_slots eligible cameras in priority order (distinct by
         construction). When the healthy set is too small the assignment is
         padded with resting cameras in the SAME priority order - stable
         across rounds, so an all-dead pool holds the grid steady on the
-        top of the ladder instead of churning tiles every round."""
+        top of the ladder instead of churning tiles every round.
+
+        `blocked` (from the host circuit breaker) removes cameras whose
+        HOST is currently refusing access: they are skipped outright and
+        used for padding only as the very last resort - a blocked host
+        must stay untouched while it rests."""
         now = time.time() if now is None else now
-        picked = [c for c in self.pool if self._eligible(c, now)][: self.n_slots]
-        if len(picked) < self.n_slots:
-            picked += [c for c in self.pool
-                       if c not in picked][: self.n_slots - len(picked)]
+        blocked = set(blocked)
+        picked = [c for c in self.pool
+                  if c not in blocked and self._eligible(c, now)][: self.n_slots]
+        for c in self.pool:                      # pad: unblocked resting cams
+            if len(picked) >= self.n_slots:
+                break
+            if c not in picked and c not in blocked:
+                picked.append(c)
+        for c in self.pool:                      # last resort: blocked cams
+            if len(picked) >= self.n_slots:
+                break
+            if c not in picked:
+                picked.append(c)
         return picked
+
+    def forgive(self, cams) -> None:
+        """Wipe per-camera strikes and cooldowns. Used when a HOST-level
+        block is identified: the individual cameras were never dead - the
+        host refused everyone - and their accumulated 15-min cooldowns
+        would otherwise outlive the block itself and stagger recovery."""
+        for c in cams:
+            if c in self.failures:
+                self.failures[c] = 0
+                self.cooldown_until[c] = 0.0
+                self.proven_dead[c] = False
 
     def record(self, cam: str, ok: bool, now: float | None = None) -> None:
         now = time.time() if now is None else now
@@ -326,6 +353,87 @@ class CameraPool:
         must not delay the ladder's descent to the Istanbul tier)."""
         cams = list(cams)
         return bool(cams) and all(c in self.fast_fail for c in cams)
+
+
+class HostBreaker:
+    """Host-level circuit breaker for access blocks (HTTP 403/429).
+
+    Per-camera strikes are the wrong tool for a WAF/geo block: on
+    2026-07-17 kamerayayin refused EVERY playlist with 403, yet the pool
+    dutifully walked 13 Istanbul cameras x 3 strikes each - dozens of
+    requests an hour knocking on a door that reputation-based blocks
+    count against this address. The breaker treats the HOST as the unit:
+
+      * `threshold` consecutive block-signature failures (403/429, any
+        stage) across a host's cameras trip it: ALL its cameras leave the
+        rotation for `rest_minutes` and their per-camera strikes are
+        forgiven (they were never dead - the host refused everyone);
+      * when the rest expires, ONE probe camera (highest priority) is
+        allowed through. A success - or any non-block failure, which
+        means the host is answering again - reopens the host instantly;
+        another 403 re-arms the rest;
+      * forced padding samples of a resting host never extend its rest
+        (same rule the pool applies to camera cooldowns).
+
+    So a blocked window costs ~3 requests/hour instead of ~120, and an
+    unblock (like the open flap observed at 21:15 the day before) is
+    caught by the very next probe.
+    """
+
+    BLOCK_CODES = frozenset({403, 429})
+
+    def __init__(self, host_of: dict, threshold: int = 4,
+                 rest_minutes: int = 20):
+        self.host_of = dict(host_of)          # cam_id -> host, priority order
+        self.threshold = threshold
+        self.rest_seconds = rest_minutes * 60
+        self.consec = {}                      # host -> consecutive refusals
+        self.rest_until = {}                  # host -> epoch (present = tripped)
+
+    def cams_of(self, host: str) -> list[str]:
+        return [c for c, h in self.host_of.items() if h == host]
+
+    def blocked_cams(self, now: float | None = None) -> set:
+        """Cameras the pool must not assign this round. While a host
+        rests, every one of its cameras is out; once the rest expires the
+        FIRST camera becomes the probe and the rest stay out until the
+        probe's verdict."""
+        now = time.time() if now is None else now
+        out = set()
+        for host, until in self.rest_until.items():
+            cams = self.cams_of(host)
+            if now < until:
+                out.update(cams)
+            else:
+                out.update(cams[1:])          # probing: free only the first
+        return out
+
+    def note(self, cam: str, ok: bool, http: int | None,
+             now: float | None = None) -> str | None:
+        """Feed one sample result; returns the event it caused, if any:
+        'tripped' / 'rearmed' / 'reopened' / None."""
+        host = self.host_of.get(cam)
+        if host is None:
+            return None
+        now = time.time() if now is None else now
+        if not ok and http in self.BLOCK_CODES:
+            self.consec[host] = self.consec.get(host, 0) + 1
+            if host in self.rest_until:
+                if now < self.rest_until[host]:
+                    return None               # forced sample during rest
+                self.rest_until[host] = now + self.rest_seconds
+                return "rearmed"              # probe refused: rest again
+            if self.consec[host] >= self.threshold:
+                self.rest_until[host] = now + self.rest_seconds
+                return "tripped"
+            return None
+        # success, or a non-block failure (404 / timeout): the host is
+        # answering - per-camera health can take it from here.
+        self.consec[host] = 0
+        if host in self.rest_until:
+            del self.rest_until[host]
+            return "reopened"
+        return None
 
 
 class CamObservationLog:
@@ -1608,6 +1716,17 @@ def main() -> None:
           f"camera for {pool.retry_seconds // 60:.0f} min; probation cams and "
           f"{len(pool.fast_fail)} low-risk tvkur cams rest after a single miss.")
 
+    # Host circuit breaker: an access block (403/429) hits every camera of
+    # a host at once - rest the WHOLE host, probe with one request, reopen
+    # the moment a probe answers. See HostBreaker for the 2026-07-17 story.
+    from urllib.parse import urlparse
+    host_of = {c: (urlparse(CAMERAS[c].get("url") or "").hostname or "?")
+               for c in FALLBACK_POOL if c in CAMERAS}
+    breaker = HostBreaker(host_of)
+    print(f"host breaker: {breaker.threshold} consecutive 403/429s rest ALL of "
+          f"a host's cameras for {breaker.rest_seconds // 60} min, then a "
+          "single probe request decides (answer = back in rotation).")
+
     reid = None
     if not args.no_reid:
         from app.reid_embed import make_embedder
@@ -1789,8 +1908,9 @@ def main() -> None:
                 except Exception as e:
                     print(f"  ! static-position learn failed: {e}")
             # One pool decision per round: the first N healthy cameras in
-            # priority order, one per slot, never a duplicate.
-            round_cams = dict(zip(slot_ids, pool.assign()))
+            # priority order, one per slot, never a duplicate. Cameras of a
+            # breaker-tripped host stay out of the rotation entirely.
+            round_cams = dict(zip(slot_ids, pool.assign(blocked=breaker.blocked_cams())))
             moved = [sid for sid in slot_ids
                      if round_cams[sid] != assignment.get(sid)]
             assignment = round_cams
@@ -1820,6 +1940,29 @@ def main() -> None:
                                                    % REID_STATS_EVERY_ROUNDS == 0))
                 pool.record(cam_id, ok)
                 round_had_ok = round_had_ok or ok
+                # Host breaker: one 403/429 is a data point, `threshold` in
+                # a row across the host is an access block on this address.
+                _stage, _http = (None, None) if ok else last_grab_http()
+                event = breaker.note(cam_id, ok, _http)
+                if event == "tripped":
+                    _host = breaker.host_of[cam_id]
+                    _cams = breaker.cams_of(_host)
+                    pool.forgive(_cams)
+                    print(f"  ! {_host}: {breaker.threshold} consecutive access "
+                          f"refusals (HTTP {_http}) - this address is blocked. "
+                          f"Resting all {len(_cams)} of its cameras for "
+                          f"{breaker.rest_seconds // 60} min, then probing with "
+                          "ONE request.")
+                elif event == "rearmed":
+                    # The probe's miss is the HOST's fault - keep the probe
+                    # camera itself clean so the next probe stays on schedule.
+                    pool.forgive([cam_id])
+                    print(f"  ! {breaker.host_of[cam_id]}: probe still refused "
+                          f"(HTTP {_http}) - resting another "
+                          f"{breaker.rest_seconds // 60} min.")
+                elif event == "reopened":
+                    print(f"  * {breaker.host_of[cam_id]}: answering again - "
+                          "host back in rotation.")
             # Politeness backoff: rounds where EVERY camera missed are almost
             # always an upstream outage or the CDN rate-limiting this IP -
             # hammering ~4 cams x 3 requests every round from the same
