@@ -141,3 +141,21 @@ def test_minutes_to_next_report_is_bounded():
     for ts in (1784313381, 1784350000, 1784300000):
         m = _minutes_to_next_report(ts, "12:00,20:00")
         assert 0 <= m <= 24 * 60
+
+
+def test_recovery_fires_only_before_report_not_periodically(monkeypatch):
+    """Operator spec 2026-07-17: higher-priority countries are re-probed ONLY
+    in the minutes before a scheduled report, never on a periodic timer - so
+    the grid stops sniffing a blocked country once it has settled on a
+    fallback."""
+    from app import collector as col
+    col._RECOVERY_STATE["last"] = 0.0
+    # Far from any report: never due, even 25 min apart (no periodic probe).
+    monkeypatch.setattr(col, "_minutes_to_next_report", lambda ts, *a: 120.0)
+    assert not col._recovery_due(1000)
+    assert not col._recovery_due(1000 + 25 * 60)
+    # Inside the pre-report window: due once, then quiet within the window.
+    col._RECOVERY_STATE["last"] = 0.0
+    monkeypatch.setattr(col, "_minutes_to_next_report", lambda ts, *a: 3.0)
+    assert col._recovery_due(5000)
+    assert not col._recovery_due(5000 + 60)

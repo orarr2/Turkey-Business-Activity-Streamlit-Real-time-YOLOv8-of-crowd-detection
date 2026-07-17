@@ -1065,7 +1065,6 @@ def _slot_metadata(slot: dict, active_cam: str) -> dict:
 # camera cooldown. Times are Israel-local (the digest timer's timezone).
 REPORT_TIMES_ISRAEL = os.environ.get("REPORT_TIMES_ISRAEL", "12:00,20:00")
 RECOVERY_PRE_REPORT_MIN = int(os.environ.get("RECOVERY_PRE_REPORT_MIN") or 5)
-RECOVERY_PERIODIC_MIN = int(os.environ.get("RECOVERY_PERIODIC_MIN") or 20)
 _RECOVERY_STATE = {"last": 0.0}
 
 
@@ -1091,12 +1090,16 @@ def _minutes_to_next_report(now_ts: float, times_str: str | None = None) -> floa
 
 
 def _recovery_due(now_ts: float) -> bool:
-    """True at most once per pre-report window / periodic interval."""
-    near_report = _minutes_to_next_report(now_ts) <= RECOVERY_PRE_REPORT_MIN
-    periodic = (now_ts - _RECOVERY_STATE["last"]) >= RECOVERY_PERIODIC_MIN * 60
-    if near_report or periodic:
-        _RECOVERY_STATE["last"] = now_ts
-        return True
+    """True at most once per pre-report window. Operator spec (2026-07-17):
+    re-probe higher-priority countries ONLY in the few minutes before a
+    scheduled report - NOT periodically. Once the grid has settled on a
+    fallback country it must not keep sniffing the blocked one every few
+    minutes; the block is re-checked twice a day, right before each report."""
+    if _minutes_to_next_report(now_ts) <= RECOVERY_PRE_REPORT_MIN:
+        # Fire once per window (guard against re-firing every round inside it).
+        if now_ts - _RECOVERY_STATE["last"] >= RECOVERY_PRE_REPORT_MIN * 60:
+            _RECOVERY_STATE["last"] = now_ts
+            return True
     return False
 
 
@@ -2243,7 +2246,17 @@ def main() -> None:
             # All-tvkur rounds are exempt: those are the cheap dead-channel
             # probes (zero IBB traffic), and sleeping after them only delays
             # the ladder's descent to the Istanbul tier.
+            _active_dark = director.live_count(active_country, round_start) == 0
+            _next_country_live = any(
+                director.live_count(c, round_start) >= director.min_live
+                for c in director.order if c != active_country)
             if round_had_ok:
+                _all_miss_rounds = 0
+            elif _active_dark and _next_country_live:
+                # The active country is dark and a lower-priority country is
+                # live - we advance NEXT round anyway. Don't crawl on the way
+                # out (blocked hosts are already resting under their breakers);
+                # this is the descent, not steady-state hammering.
                 _all_miss_rounds = 0
             elif director.pools[active_country].all_fast_fail(round_cams.values()):
                 pass
