@@ -111,6 +111,24 @@ sudo git -C /opt/turkey-footfall fetch origin main && \
   sudo systemctl restart collector
 ```
 
+> **Refreshing the VM — do NOT re-render the systemd unit.** New code is
+> picked up by `git pull` + `systemctl restart` ALONE; the unit file at
+> `/etc/systemd/system/collector.service` never needs rebuilding for a code
+> change. The installed unit carries **machine-local `Environment=` lines**
+> (`FIREBASE_CREDENTIALS`, `FIREBASE_STORAGE_BUCKET`, `REID_MODEL`) that are
+> deliberately NOT in the repo template `collector.service` (they hold your
+> paths, not the project's). Overwriting the installed unit from the template
+> (`sed ... | tee /etc/systemd/system/collector.service`) DROPS those lines
+> and the collector then crash-loops with `FileNotFoundError: Firebase
+> service-account JSON not found`. If you must change a flag (e.g. add
+> `--weights yolov8n.pt`), edit the installed unit IN PLACE:
+> ```bash
+> sudo sed -i 's#-m app.collector#-m app.collector --weights yolov8n.pt#' \
+>   /etc/systemd/system/collector.service   # only if --weights not already there
+> sudo systemctl daemon-reload && sudo systemctl restart collector
+> ```
+> — never a wholesale copy from the repo.
+
 ## Costs to watch
 
 - **VM**: `e2-micro` is **$0** on the Always Free tier (us-central1 /
