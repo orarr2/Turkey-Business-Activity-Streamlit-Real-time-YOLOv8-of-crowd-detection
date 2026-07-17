@@ -158,9 +158,18 @@ def test_compose_full_report_english():
     training = {"event": "gate", "promoted": False, "candidate": "head_run2.pt",
                 "at": "2026-07-11T10:09:52Z",
                 "reasons": ["mAP50 gain +0.00pp < required +0.50pp"]}
+    # The report is country-generic now: the subject names whichever country
+    # the grid is currently watching (config/grid.country), plus a live-grid
+    # section listing the active cameras.
+    grid = {"country": "turkey", "slots": [
+        {"active_cam_name": "Taksim Meydani", "city": "Istanbul", "country": "turkey"},
+        {"active_cam_name": "Konya - Millet Caddesi", "city": "Konya", "country": "turkey"},
+    ]}
     subject, text, html = compose_digest(_NOON, 12, groups, stats,
-                                         training, [])
-    assert subject == "Konya - Midday report 11.07"
+                                         training, [], grid=grid)
+    assert subject == "Turkey - Midday report 11.07"
+    assert "Live grid (Turkey)" in text and "Taksim Meydani" in text
+    assert "Live grid - Turkey" in html      # HTML header form
     assert "Midday report" in text
     assert "Extreme load" in text and "(x2)" in text
     assert "up to 55 people" in text
@@ -168,6 +177,13 @@ def test_compose_full_report_english():
     assert "rejected at gate" not in text
     assert "did not improve" in text and "head_run2.pt" in text
     assert "All cameras reporting normally" in text
+
+    # A different active country flips the whole report label.
+    th_grid = {"country": "thailand", "slots": [
+        {"active_cam_name": "Sukhumvit Rd", "city": "Bangkok", "country": "thailand"}]}
+    subj_th, text_th, _ = compose_digest(_NOON, 12, [], [], None, [], grid=th_grid)
+    assert subj_th == "Thailand - Midday report 11.07"
+    assert "Live grid (Thailand)" in text_th and "Sukhumvit Rd" in text_th
 
     # evening + stale camera + quiet window
     subject2, text2, _ = compose_digest(

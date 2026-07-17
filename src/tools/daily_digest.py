@@ -177,20 +177,66 @@ def _training_lines(training: dict | None,
     return lines
 
 
+# The collector is country-generic: it runs 4 cameras from ONE country and
+# rotates through a ladder when a country goes dark. The report therefore
+# names whichever country the grid is CURRENTLY watching (read from
+# config/grid.country), not a hardcoded "Konya".
+_COUNTRY_LABELS = {"turkey": "Turkey", "thailand": "Thailand",
+                   "japan": "Japan", "usa": "USA"}
+
+
+def _country_label(grid: dict | None) -> str:
+    c = str((grid or {}).get("country") or "")
+    return _COUNTRY_LABELS.get(c, c.title() if c else "Live grid")
+
+
+def _grid_cameras(grid: dict | None) -> list[dict]:
+    """The cameras the VM is running RIGHT NOW, from config/grid - each with
+    the display name, city and country the collector last published."""
+    out = []
+    for s in (grid or {}).get("slots") or []:
+        out.append({
+            "name": s.get("active_cam_name") or s.get("active_cam") or "?",
+            "city": s.get("city") or "",
+            "country": s.get("country") or "",
+        })
+    return out
+
+
 def compose_digest(now_il: dt.datetime, window_hours: int,
                    event_groups: list[dict], cam_stats: list[dict],
                    training: dict | None, stale_slots: list[dict],
                    reviews: dict | None = None,
+                   grid: dict | None = None,
                    ) -> tuple[str, str, str]:
-    """Returns (subject, plain_text, html). English throughout, phone-first."""
+    """Returns (subject, plain_text, html). English throughout, phone-first.
+    `grid` is config/grid - names the active country and the live cameras."""
     part = "Midday report" if now_il.hour < 16 else "Evening report"
-    subject = f"Konya - {part} {now_il.strftime('%d.%m')}"
+    label = _country_label(grid)
+    subject = f"{label} - {part} {now_il.strftime('%d.%m')}"
 
     lines: list[str] = [f"{part} - last {window_hours} hours", ""]
     html: list[str] = [
         '<div style="font-family:Arial,sans-serif;font-size:15px">',
         f"<h2 style='margin:0 0 12px'>{subject}</h2>",
     ]
+
+    # Which grid is the collector on right now (country-generic - it may have
+    # fallen through to another country while the primary was geo-blocked).
+    grid_cams = _grid_cameras(grid)
+    if grid_cams:
+        lines.append(f"Live grid ({label}) - {len(grid_cams)} cameras:")
+        html.append(f"<h3 style='margin:14px 0 6px'>Live grid - {label}</h3>")
+        html.append("<table cellpadding='4' style='border-collapse:collapse'>")
+        for gc in grid_cams:
+            where = f" ({gc['city']})" if gc["city"] else ""
+            lines.append(f"  - {gc['name']}{where}")
+            html.append(
+                f"<tr><td style='border-bottom:1px solid #ddd'>{gc['name']}</td>"
+                f"<td style='border-bottom:1px solid #ddd'>{gc['city']}</td>"
+                f"<td style='border-bottom:1px solid #ddd'>{gc['country']}</td></tr>")
+        html.append("</table>")
+        lines.append("")
 
     # health first - a stuck camera changes how everything below reads
     if stale_slots:
@@ -288,7 +334,7 @@ def _firestore():
 
 
 def fetch_window(db, window_hours: int
-                 ) -> tuple[list[dict], list[dict], list[dict], set[str]]:
+                 ) -> tuple[list[dict], list[dict], list[dict], set[str], dict]:
     cutoff = (dt.datetime.now(dt.timezone.utc)
               - dt.timedelta(hours=window_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
     events = [d.to_dict() for d in
@@ -298,7 +344,7 @@ def fetch_window(db, window_hours: int
     latest = [d.to_dict() for d in db.collection("latest").stream()]
     grid = (db.collection("config").document("grid").get().to_dict() or {})
     active = {str(s.get("slot_id") or "") for s in grid.get("slots") or []}
-    return events, footfall, latest, active
+    return events, footfall, latest, active, grid
 
 
 def stale_from_latest(latest: list[dict],
@@ -455,7 +501,7 @@ def _build_pdf(now_il: dt.datetime, window_hours: int,
                reviews: dict | None,
                stale_slots: list[dict], footfall_count: int,
                total_events: int,
-               out_path: Path) -> Path | None:
+               out_path: Path, grid: dict | None = None) -> Path | None:
     """Compose the PDF; returns the path or None if reportlab is missing
     (the plain-text mail still ships in that case, which is the pre-PDF
     behavior and better than silently dropping the whole run)."""
@@ -476,7 +522,8 @@ def _build_pdf(now_il: dt.datetime, window_hours: int,
         training=training, stale_slots=stale_slots,
         snapshots=snapshots, kind_labels=KIND_LABELS,
         total_events=total_events, total_samples=footfall_count,
-        training_lines=_training_lines(training, reviews))
+        training_lines=_training_lines(training, reviews),
+        country_label=_country_label(grid), grid_cameras=_grid_cameras(grid))
 
 
 def main() -> None:
@@ -491,7 +538,7 @@ def main() -> None:
     args = ap.parse_args()
 
     db = _firestore()
-    events, footfall, latest, active = fetch_window(db, args.window_hours)
+    events, footfall, latest, active, grid = fetch_window(db, args.window_hours)
     groups = aggregate_events(events)
     cam_stats = footfall_stats(footfall)
     training = fetch_last_training()
@@ -501,15 +548,16 @@ def main() -> None:
 
     subject, text, html = compose_digest(
         now_il, args.window_hours, groups, cam_stats, training, stale,
-        reviews=reviews)
+        reviews=reviews, grid=grid)
 
+    country_slug = str((grid or {}).get("country") or "grid")
     default_pdf = (Path("./daily_digest.pdf") if args.dry_run
                    else Path(tempfile.mkdtemp(prefix="digest-"))
-                        / f"konya_report_{now_il.strftime('%Y%m%d_%H%M')}.pdf")
+                        / f"{country_slug}_report_{now_il.strftime('%Y%m%d_%H%M')}.pdf")
     pdf_path = Path(args.pdf_out) if args.pdf_out else default_pdf
     built = _build_pdf(now_il, args.window_hours, groups, cam_stats,
                        training, reviews, stale, len(footfall),
-                       total_events=len(events), out_path=pdf_path)
+                       total_events=len(events), out_path=pdf_path, grid=grid)
 
     if args.dry_run:
         print(f"SUBJECT: {subject}\n\n{text}")

@@ -492,7 +492,9 @@ def compose_pdf(out_path: str | Path, *,
                 kind_labels: dict[str, str],
                 total_events: int,
                 total_samples: int,
-                training_lines: list[str] | None = None) -> Path:
+                training_lines: list[str] | None = None,
+                country_label: str = "Live grid",
+                grid_cameras: list[dict] | None = None) -> Path:
     """Compose the phone-oriented English PDF and return its path.
 
     ``snapshots`` is a list of picked GROUP dicts (from
@@ -528,10 +530,36 @@ def compose_pdf(out_path: str | Path, *,
 
     story = []
     part = "Midday Report" if now_il.hour < 16 else "Evening Report"
-    story.append(Paragraph(f"Konya - Activity Summary - {part}",
+    story.append(Paragraph(f"{country_label} - Activity Summary - {part}",
                            styles["title"]))
     story.append(Paragraph(f"{_fmt_date(now_il)}  ·  last {window_hours} hours",
                            styles["sub"]))
+
+    # Live grid: which cameras / country the collector is running RIGHT NOW.
+    # The collector is country-generic (4 cameras from one country, rotating
+    # through a ladder when a country is blocked), so this section makes the
+    # report self-describing - the reader sees exactly what was watched.
+    if grid_cameras:
+        story.append(Paragraph(f"Live grid - {country_label} "
+                               f"({len(grid_cameras)} cameras)", styles["h"]))
+        grid_rows = [["Camera", "City", "Country"]]
+        for gc in grid_cameras:
+            grid_rows.append([str(gc.get("name") or "?"),
+                              str(gc.get("city") or "-"),
+                              str(gc.get("country") or "-").title()])
+        gt = Table(grid_rows, colWidths=[9*cm, 5*cm, 4*cm])
+        gt.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+            ("FONTSIZE", (0, 0), (-1, -1), 10),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#0f172a")),
+            ("LINEBELOW", (0, 0), (-1, 0), 0.75, colors.HexColor("#94a3b8")),
+            ("LINEBELOW", (0, 1), (-1, -1), 0.4, colors.HexColor("#e2e8f0")),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(gt)
+        story.append(Spacer(1, 10))
 
     # KPI cards - two columns
     events_word = "anomaly" if total_events == 1 else "anomalies"
@@ -675,7 +703,7 @@ def compose_pdf(out_path: str | Path, *,
     doc = SimpleDocTemplate(str(out_path), pagesize=A4,
                             leftMargin=1.5*cm, rightMargin=1.5*cm,
                             topMargin=1.4*cm, bottomMargin=1.4*cm,
-                            title=f"Konya activity report {_fmt_date(now_il)}",
+                            title=f"{country_label} activity report {_fmt_date(now_il)}",
                             author="turkey-collector")
     doc.build(story)
     return out_path
