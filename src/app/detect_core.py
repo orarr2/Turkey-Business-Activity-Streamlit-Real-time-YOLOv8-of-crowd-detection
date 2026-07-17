@@ -243,6 +243,46 @@ def _http_get(url: str, extra_headers: dict | None = None,
 _SEGMENT_BYTE_BUDGET = int(os.environ.get("SEGMENT_BYTE_BUDGET") or 2_500_000)
 
 
+# ---- Grab-failure reporting ---------------------------------------------
+# Every fetch/decode problem below used to be swallowed (`except: return`),
+# so the collector journal showed one opaque "MISS (RuntimeError: empty
+# frame)" for FOUR different failure modes. During the 2026-07-16 all-miss
+# incident that mask hid the actual cause for hours: diagnosing it required
+# knowing WHICH stage (playlist / chunklist / segment / decode) died and
+# with what HTTP code. These helpers keep the LAST failure so the collector
+# can append it to its MISS line. Single-threaded use only (the collector
+# samples slots serially); grab_burst() resets it at the start of a grab.
+_LAST_GRAB_ERROR: str | None = None
+
+
+def last_grab_error() -> str | None:
+    """Stage + cause of the most recent failed grab (None after a clean one)."""
+    return _LAST_GRAB_ERROR
+
+
+def _reset_grab_error() -> None:
+    global _LAST_GRAB_ERROR
+    _LAST_GRAB_ERROR = None
+
+
+def _note_grab_failure(stage: str, err) -> None:
+    global _LAST_GRAB_ERROR
+    detail = f"{type(err).__name__}: {err}" if isinstance(err, Exception) else str(err)
+    _LAST_GRAB_ERROR = f"{stage}: {detail}"
+
+
+# Playlists must be revalidated, never served stale: wowza rotates the
+# chunklist token (chunklist_w<session>.m3u8) on restart and the segment
+# list every few seconds, so a stale edge-cached playlist chains into an
+# instant 404 one level down - four cameras failing in ~1.7s each with
+# "empty frame" is exactly what that looks like. Segments themselves are
+# immutable and stay cacheable.
+def _no_cache(headers: dict) -> dict:
+    h = dict(headers)
+    h["Cache-Control"] = "no-cache"
+    return h
+
+
 _STREAM_INF_RES_RE = re.compile(r"RESOLUTION=(\d+)x(\d+)")
 _STREAM_INF_BW_RE  = re.compile(r"BANDWIDTH=(\d+)")
 
@@ -287,7 +327,7 @@ def _pick_variant(pl: str, min_height: int = 640) -> str | None:
 def _grab_via_segment(stream_url: str, headers: dict) -> np.ndarray | None:
     """Download the most recent .ts segment with the right headers and decode it."""
     base = stream_url.rsplit("/", 1)[0] + "/"
-    pl = _http_get(stream_url, headers).decode("utf-8", "replace")
+    pl = _http_get(stream_url, _no_cache(headers)).decode("utf-8", "replace")
     if "#EXT-X-STREAM-INF" in pl:
         variant = _pick_variant(pl) or next(
             (l.strip() for l in pl.splitlines()
@@ -295,25 +335,33 @@ def _grab_via_segment(stream_url: str, headers: dict) -> np.ndarray | None:
         if not variant:
             return None
         variant_url = variant if variant.startswith("http") else base + variant
-        pl = _http_get(variant_url, headers).decode("utf-8", "replace")
+        pl = _http_get(variant_url, _no_cache(headers)).decode("utf-8", "replace")
         base = variant_url.rsplit("/", 1)[0] + "/"
     segs = [l.strip() for l in pl.splitlines() if l.strip() and not l.startswith("#")]
     if not segs:
         return None
-    seg = segs[-1]
-    seg_url = seg if seg.startswith("http") else base + seg
-    # One frame needs the segment's leading I-frame, not all 5 MB of it.
-    data = _http_get(seg_url, headers, max_bytes=_SEGMENT_BYTE_BUDGET)
-    with tempfile.NamedTemporaryFile(suffix=".ts", delete=False) as f:
-        f.write(data); tmp = f.name
-    try:
-        cap = _open_cap(tmp)
-        ok, frame = cap.read()
-        cap.release()
-        return frame if ok else None
-    finally:
-        try: os.unlink(tmp)
-        except OSError: pass
+    # Newest segment first; one already rotated off the CDN edge 404s
+    # instantly, so walk back up to two older siblings before giving up.
+    for seg in segs[::-1][:3]:
+        seg_url = seg if seg.startswith("http") else base + seg
+        try:
+            # One frame needs the segment's leading I-frame, not all 5 MB.
+            data = _http_get(seg_url, headers, max_bytes=_SEGMENT_BYTE_BUDGET)
+        except Exception as e:
+            _note_grab_failure("segment", e)
+            continue
+        with tempfile.NamedTemporaryFile(suffix=".ts", delete=False) as f:
+            f.write(data); tmp = f.name
+        try:
+            cap = _open_cap(tmp)
+            ok, frame = cap.read()
+            cap.release()
+            if ok:
+                return frame
+        finally:
+            try: os.unlink(tmp)
+            except OSError: pass
+    return None
 
 
 def grab_frame(stream_url: str):
@@ -325,7 +373,11 @@ def grab_frame(stream_url: str):
         if host in stream_url:
             try:
                 return _grab_via_segment(stream_url, headers)
-            except Exception:
+            except Exception as e:
+                # Keep the FIRST failure of this grab: iter_frames already
+                # stage-tagged it; the retry usually hits the same wall.
+                if _LAST_GRAB_ERROR is None:
+                    _note_grab_failure("single-frame grab", e)
                 return None
     cap = _open_cap(stream_url)
     try:
@@ -354,6 +406,7 @@ def iter_frames(stream_url: str, max_frames: int, stride: int = 1):
     so ByteTrack can see the consecutive frames it needs.
     """
     stride = max(1, int(stride))
+    _reset_grab_error()
     # header-required host: fetch enough segments to cover the strided span
     matching_headers = None
     for host, headers in HEADER_HOSTS.items():
@@ -364,24 +417,28 @@ def iter_frames(stream_url: str, max_frames: int, stride: int = 1):
     if matching_headers is not None:
         base = stream_url.rsplit("/", 1)[0] + "/"
         try:
-            pl = _http_get(stream_url, matching_headers).decode("utf-8", "replace")
-        except Exception:
+            pl = _http_get(stream_url, _no_cache(matching_headers)).decode("utf-8", "replace")
+        except Exception as e:
+            _note_grab_failure("playlist", e)
             return
         if "#EXT-X-STREAM-INF" in pl:
             variant = _pick_variant(pl) or next(
                 (l.strip() for l in pl.splitlines()
                  if l.strip() and not l.startswith("#")), None)
             if not variant:
+                _note_grab_failure("playlist", "master playlist lists no variant")
                 return
             variant_url = variant if variant.startswith("http") else base + variant
             try:
-                pl = _http_get(variant_url, matching_headers).decode("utf-8", "replace")
-            except Exception:
+                pl = _http_get(variant_url, _no_cache(matching_headers)).decode("utf-8", "replace")
+            except Exception as e:
+                _note_grab_failure("chunklist", e)
                 return
             base = variant_url.rsplit("/", 1)[0] + "/"
 
         segs = [l.strip() for l in pl.splitlines() if l.strip() and not l.startswith("#")]
         if not segs:
+            _note_grab_failure("chunklist", "no segments listed")
             return
         # tail segments give the freshest live view; pull ~enough to cover
         # the whole strided span ((max_frames-1)*stride + 1 source frames)
@@ -393,16 +450,27 @@ def iter_frames(stream_url: str, max_frames: int, stride: int = 1):
         # light-rendition path did. Dense spans (the notebook's stride=1
         # dwell burst) need the whole segment.
         budget = _SEGMENT_BYTE_BUDGET if span <= approx_frames_per_seg else None
+        # The newest segment can rotate off the CDN edge between the
+        # chunklist fetch and the .ts fetch (an instant 404). Keep two older
+        # siblings as a rescue path, used ONLY when the tail produced
+        # nothing at all - so dense dwell bursts keep their time order.
+        tail = segs[-n_segs:]
+        rescue = segs[:-n_segs][-2:][::-1]          # next-freshest first
         yielded = 0
         idx = 0
-        for seg in segs[-n_segs:]:
+        fetched_ok = 0
+        for pos, seg in enumerate(tail + rescue):
             if yielded >= max_frames:
                 break
+            if pos >= len(tail) and yielded:
+                break                     # rescue only a totally-empty grab
             seg_url = seg if seg.startswith("http") else base + seg
             try:
                 data = _http_get(seg_url, matching_headers, max_bytes=budget)
-            except Exception:
+            except Exception as e:
+                _note_grab_failure("segment", e)
                 continue
+            fetched_ok += 1
             with tempfile.NamedTemporaryFile(suffix=".ts", delete=False) as f:
                 f.write(data); tmp = f.name
             try:
@@ -423,6 +491,9 @@ def iter_frames(stream_url: str, max_frames: int, stride: int = 1):
             finally:
                 try: os.unlink(tmp)
                 except OSError: pass
+        if yielded == 0 and fetched_ok:
+            _note_grab_failure(
+                "decode", f"{fetched_ok} segment(s) downloaded, 0 frames decoded")
         return
 
     # normal HLS / RTSP: stream directly
@@ -442,6 +513,8 @@ def iter_frames(stream_url: str, max_frames: int, stride: int = 1):
                 if not cap.grab():
                     break
                 idx += 1
+        if yielded == 0:
+            _note_grab_failure("stream", "opened but produced no frames")
     finally:
         cap.release()
 
@@ -1014,6 +1087,7 @@ def grab_burst(stream_url: str, n: int = 3, stride: int = 25) -> list[np.ndarray
     to the single-frame grab if the iterator yields nothing. May return fewer
     than `n` frames (short segments); callers should handle 1..n.
     """
+    _reset_grab_error()
     if n <= 1:
         f = grab_frame(stream_url)
         return [] if f is None else [f]
@@ -1025,8 +1099,8 @@ def grab_burst(stream_url: str, n: int = 3, stride: int = 25) -> list[np.ndarray
             frames.append(fr)
             if len(frames) >= n:
                 break
-    except Exception:
-        pass
+    except Exception as e:
+        _note_grab_failure("burst decode", e)
     if not frames:
         f = grab_frame(stream_url)
         if f is not None:

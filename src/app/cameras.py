@@ -361,9 +361,9 @@ CAMERAS = {
 
 # Live dashboard grid, in display order. Each slot has a primary camera and an
 # ordered fallback chain: if the collector can't grab a frame from the current
-# cam N times in a row (see SlotStreamPicker in collector.py), it advances to
-# the next entry. Every FALLBACK_RETRY_MINUTES the primary is retried; if it
-# recovers, the picker snaps back.
+# cam N times in a row (see CameraPool in collector.py), the shared pool
+# advances down the priority ladder. Every FALLBACK_RETRY_MINUTES a resting
+# camera is re-probed; if it recovers, it takes its ladder spot back.
 #
 # 2026-07 update: IBB (both livestream.ibb.gov.tr and kamerayayin.ibb.istanbul)
 # tightened its geo-block to Turkey-only in early July 2026. Every IBB HLS now

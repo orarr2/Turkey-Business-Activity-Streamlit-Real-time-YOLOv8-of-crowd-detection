@@ -56,6 +56,7 @@ from app.detect_core import (
     detect_burst,
     draw_boxes,
     grab_burst,
+    last_grab_error,
     load_model,
     night_adjusted_conf,
     resolve_stream,
@@ -1049,8 +1050,8 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
     the global `conf` applies.
 
     Returns True iff a frame was grabbed and processed successfully. The
-    caller feeds this back to the SlotStreamPicker to decide whether to
-    advance the fallback chain.
+    caller feeds this back to the CameraPool to decide whether the camera
+    should rest and the ladder should advance.
     """
     slot_id = slot["slot_id"]
     now_utc = dt.datetime.now(dt.timezone.utc)
@@ -1081,7 +1082,10 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
     try:
         frames = grab_burst(resolve_stream(cam), n=burst, stride=burst_stride)
         if not frames:
-            raise RuntimeError("empty frame")
+            # Name the REAL failure stage (playlist/chunklist/segment/decode)
+            # - a bare "empty frame" masked four different root causes.
+            why = last_grab_error()
+            raise RuntimeError(f"empty frame - {why}" if why else "empty frame")
         # Day/night decided BEFORE detection so the gates can react to it.
         luma = float(np.mean(cv2.cvtColor(frames[-1], cv2.COLOR_BGR2GRAY)))
         night = is_night(luma, now_utc)
