@@ -42,8 +42,8 @@ including night scenes like these, where detection is hardest.
 ```
  ┌───────────────────────┐    ┌────────────────────────┐    ┌────────────────────┐
  │  Live cameras         │    │  Cloud collector       │    │  Firebase          │
- │  (IBB istanbuluseyret,│ ─► │  GCP e2-micro VM       │ ─► │  Firestore (24h TTL)│
- │   webcamera24 tvkur)  │    │  • fallback per slot   │    │   footfall/{auto}   │
+ │  (TR: IBB + Konya;    │ ─► │  GCP e2-micro VM       │ ─► │  Firestore (24h TTL)│
+ │   TH/JP/US: YouTube)  │    │  • country ladder grid │    │   footfall/{auto}   │
  │                       │    │  • YOLOv8n predict     │    │   latest/{slot_id}  │
  │                       │    │  • appearance re-ID    │    │   reid_stats/{slot} │
  │                       │    │  • anomaly gates       │    │   config/grid       │
@@ -69,15 +69,29 @@ sees the accumulated history, and Firestore's TTL policy prunes the last 24h to
 keep the DB small. Anomaly / returning-visitor snapshots go to Firebase Storage
 (also 24h lifecycle).
 
-Cameras fill **4 grid slots** from ONE shared priority ladder (`CameraPool`,
-21 cameras): tier 1 is the four Konya cams (webcamera24/tvkur), tier 2 the four
-preferred Istanbul cams (Taksim, Sultanahmet, Eyup Sultan, Beyazit Meydani),
-tier 3 the rest of the live catalog — every round runs the first 4 healthy
-cameras, always distinct. A camera that misses 3 samples in a row rests for
-15 min and the ladder advances; tvkur cams are low-risk fast-fail probes that
-rest after a SINGLE miss, so a dead Konya backend costs one round before the
-Istanbul tier takes over. Each assignment change updates `config/grid` — the
-dashboard re-renders that tile with the new active cam.
+The grid is **country-generic**. It always runs **4 cameras from ONE country**
+and rotates through a country priority ladder — **Turkey → Thailand → Japan →
+USA** — falling through to the next country only when the active one goes fully
+dark. Turkey is the project's subject (Istanbul IBB first, then Konya); since
+IBB is geo-blocked from Google Cloud, from the VM the grid usually falls
+through to the foreign benches (YouTube-Live-backed street/traffic cameras that
+are not geo-blocked) until Turkey's block lifts. A few minutes before each
+daily report the collector re-probes higher-priority countries so Turkey
+reclaims the grid the moment it comes back.
+
+Inside a country, a `CameraPool` walks that country's own ladder: every round
+runs the first 4 healthy cameras (always distinct), a camera that misses 3
+samples in a row rests 15 min and the grid backfills from deeper in the SAME
+country's bench, and `tvkur` (Konya) cameras are low-risk fast-fail probes that
+rest after a single miss. A `HostBreaker` rests a whole host for 20 min after 4
+consecutive access refusals (HTTP 403/429) and reopens it with a single probe —
+so a blocking CDN is knocked ~3 times an hour, not ~120. Each assignment change
+updates `config/grid` (with the active `country`) — the dashboard re-renders
+that tile with the new active cam.
+
+Report fields follow the live country and camera: the hour-of-week baseline and
+the day/night gate use each **camera's** timezone (the US bench alone spans
+Eastern, Central and Pacific).
 
 ---
 
