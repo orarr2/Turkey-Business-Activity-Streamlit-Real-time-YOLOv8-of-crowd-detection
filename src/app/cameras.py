@@ -407,6 +407,25 @@ CAMERAS = {
         "page": "https://webcamera24.com/camera/thailand/7098-hush-bar-soi-green-mango-chaweng-live-street-webcam-stream-p-hd/",
         "embed": "https://www.youtube.com/embed/DwKCna1mumk?autoplay=1&mute=1",
     },
+    # Operator additions 2026-07-17 (verified live 1080p, YouTube android-client).
+    "th_sukhumvit_soi11": {
+        "name": "Sukhumvit Soi 11 - El Gaucho (Bangkok)", "city": "Bangkok", "country": "thailand",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=UemFRPrl1hk",
+        "page": "https://www.youtube.com/watch?v=UemFRPrl1hk",
+        "embed": "https://www.youtube.com/embed/UemFRPrl1hk?autoplay=1&mute=1",
+    },
+    "th_chaweng_pancake": {
+        "name": "Chaweng - Pancake Man (Koh Samui)", "city": "Koh Samui", "country": "thailand",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=e9T0L_POAOk",
+        "page": "https://www.youtube.com/watch?v=e9T0L_POAOk",
+        "embed": "https://www.youtube.com/embed/e9T0L_POAOk?autoplay=1&mute=1",
+    },
+    "th_chaweng_murphys": {
+        "name": "Chaweng - Murphy's Irish Pub (Koh Samui)", "city": "Koh Samui", "country": "thailand",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=OBJ5Q0lWbqk",
+        "page": "https://www.youtube.com/watch?v=OBJ5Q0lWbqk",
+        "embed": "https://www.youtube.com/embed/OBJ5Q0lWbqk?autoplay=1&mute=1",
+    },
 
     # --- Japan (crossings / downtown streets) ---
     "jp_shinsaibashi": {
@@ -584,6 +603,7 @@ TURKEY_POOL = TURKEY_IBB + TURKEY_KONYA + TURKEY_TAIL
 THAILAND_POOL = [
     "th_sukhumvit", "th_chaweng_hooters", "th_nanai_road", "th_patong_sainamyen",
     "th_petchaburi_traffic", "th_green_mango",
+    "th_sukhumvit_soi11", "th_chaweng_pancake", "th_chaweng_murphys",
 ]
 JAPAN_POOL = [
     "jp_shinsaibashi", "jp_kabukicho_crossing", "jp_kabukicho_shinjuku", "jp_cross_space",

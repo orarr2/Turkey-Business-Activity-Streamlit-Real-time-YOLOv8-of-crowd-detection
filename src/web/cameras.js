@@ -21,7 +21,7 @@ const tvkurHls = (id) => `/tvkur/${id}/master.m3u8`;
 // 2026-07: the Istanbul slots (Sultanahmet + Taksim) were swapped for two
 // more Konya webcamera24/tvkur cams because IBB tightened its geo-block to
 // Turkey-only. Keep in sync with GRID_SLOTS in src/app/cameras.py.
-export const GRID_SLOTS = [
+const CLOUD_SLOTS = [
   {
     slot_id:          "slot_konya_hukumet",
     display_area:     "Konya - Hükümet",
@@ -54,6 +54,29 @@ export const GRID_SLOTS = [
   // in app/cameras.py but kept OUT of the grid - four slots is the cadence
   // budget on the free-tier VM.
 ];
+
+// Local-mode override. When the notebook's Section 7 serves this dashboard it
+// writes `web/local_grid.json` = the four cameras the user PICKED (distinct
+// `local_*` slot_ids, each with its own embed/HLS). If that file is present we
+// render THOSE instead of the cloud Konya grid - so "I picked 4, I see 4".
+// The cloud Firestore `config/grid` keys by the VM's slot ids, which do NOT
+// match `local_*`, so its onSnapshot naturally leaves these tiles alone.
+// When the file is absent (the public cloud dashboard), we fall back to the
+// cloud grid unchanged. Top-level await is fine in an ES module.
+let GRID_SLOTS = CLOUD_SLOTS;
+let LOCAL_MODE = false;
+try {
+  const r = await fetch("./local_grid.json?_=" + Date.now(), { cache: "no-store" });
+  if (r.ok) {
+    const j = await r.json();
+    if (Array.isArray(j?.slots) && j.slots.length) {
+      GRID_SLOTS = j.slots;
+      LOCAL_MODE = true;
+    }
+  }
+} catch (_) { /* no local_grid.json -> cloud grid */ }
+
+export { GRID_SLOTS, LOCAL_MODE };
 
 // Given an active_cam field from Firestore, return the correct HLS/embed URL.
 // For tvkur-backed cams we always route through the local /tvkur/ proxy so

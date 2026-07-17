@@ -27,7 +27,7 @@ const _ver = (_u.searchParams.get("v") || _u.searchParams.get("ver")
               || new URLSearchParams(location.search).get("ver") || "dev");
 const _q = "?v=" + encodeURIComponent(_ver);
 
-const { GRID_SLOTS, hlsUrlForActiveCam } = await import("./cameras.js" + _q);
+const { GRID_SLOTS, LOCAL_MODE, hlsUrlForActiveCam } = await import("./cameras.js" + _q);
 
 let firebaseConfig;
 try {
@@ -174,9 +174,11 @@ for (const slot of GRID_SLOTS) {
     currentHlsInstance: null, // hls.js instance we own; destroyed on rebuild
   };
   // Render initial placeholder video so viewers see something before
-  // config/grid arrives.
+  // config/grid arrives. In local mode the placeholder IS the picked camera
+  // (with its own embed/HLS), and no Firestore doc will replace it.
   buildVideoInto(tileState[slot.slot_id],
-    { active_hls: slot.placeholder_hls, active_page: slot.placeholder_page },
+    { active_hls: slot.placeholder_hls, active_embed: slot.placeholder_embed,
+      active_page: slot.placeholder_page },
     slot);
 }
 
@@ -313,7 +315,13 @@ function buildVideoInto(st, cfg, slot) {
     markup = `<video data-hls="${hlsUrl}" autoplay muted playsinline
                      controls controlsList="nodownload noremoteplayback"
                      preload="auto"></video>`;
-  } else if (embed && embed.includes("player.tvkur.com")) {
+  } else if (embed && (embed.includes("player.tvkur.com")
+                       || embed.includes("youtube.com/embed")
+                       || embed.includes("youtube-nocookie.com/embed"))) {
+    // Iframe players: the tvkur splash player AND YouTube embeds (the
+    // Thailand/Japan/USA street cams the local picker resolves to). YouTube's
+    // iframe autoplays muted from any origin - no proxy, no CORS, no geo-block
+    // (unlike the IBB HLS), so a locally-picked YouTube camera just plays.
     // loading="lazy" postponed the iframe request until scroll, which is
     // exactly the wrong behavior for the top row of the dashboard - one of
     // the four cams could stay dark on a short viewport. Load eagerly.
@@ -436,11 +444,22 @@ function start(cfg) {
       if (ageS != null && ageS < STALE_AGE_S) alive++;
       setLatest(st, rec);
     }
-    statusEl.innerHTML = alive === GRID_SLOTS.length
+    // LOCAL preview mode (the notebook wrote local_grid.json): the tiles show
+    // the cameras YOU picked as live video. Their COUNTS come from Firestore,
+    // written by the 24/7 cloud collector - which watches its own country
+    // ladder, not your local picks - so "no recent writes" here is EXPECTED,
+    // not a fault. Say so instead of raising a false "collector down" alarm.
+    if (LOCAL_MODE) {
+      statusEl.innerHTML = alive > 0
+        ? `<span class="live">● local preview</span> · ${GRID_SLOTS.length} picked cameras (live video) · ${alive} also live on the cloud collector`
+        : `<span class="live">● local preview</span> · ${GRID_SLOTS.length} picked cameras (live video) · counts + anomalies come from the 24/7 cloud collector (watching its own grid)`;
+    } else {
+      statusEl.innerHTML = alive === GRID_SLOTS.length
         ? `<span class="live">● live</span> · ${alive}/${GRID_SLOTS.length} slots updating`
         : alive > 0
         ? `<span class="stale">● partial</span> · ${alive}/${GRID_SLOTS.length} slots updating`
         : `<span class="down">● no recent writes</span> · is the collector running?`;
+    }
   }, (err) => statusEl.textContent = "error: " + err.message);
 
   // 4c. footfall history for the 24h window, one query for all slots.

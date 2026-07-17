@@ -52,3 +52,6 @@ src/web/snapshots/
 
 # local-only yolov8n twin of the notebook (mirrors the VM model; not shared)
 turkey_business_activity_yolov8n.ipynb
+
+# per-user local dashboard grid (the cameras picked in the notebook)
+src/web/local_grid.json
