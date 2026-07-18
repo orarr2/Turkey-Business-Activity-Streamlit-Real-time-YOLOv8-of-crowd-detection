@@ -661,6 +661,21 @@
           so a plateau is normal - a sustained rise is the real warning.
         </div>
       </div>
+      <!-- Active-learning curve: one point per TRAINING RUN (train.yml),
+           candidate mAP50 on the chronological val split. Promoted runs in
+           the accent color, rejected greyed, baseline dashed. Data:
+           /api/al-curve (local) - hidden until the first run exists. -->
+      <div id="al-curve-wrap" hidden style="margin-top:14px">
+        <h3 style="font-size:13px;margin:0 0 6px">Training runs - labels vs
+          model quality (mAP50)</h3>
+        <div style="max-width:640px"><canvas id="al-curve" height="130"></canvas></div>
+        <div class="footnote" style="margin-top:6px">
+          Each point = one fine-tuning run of the detection head on your
+          reviewed frames. Colored = promoted to the collector, grey =
+          rejected by the gate. The dashed line is the untouched base
+          model on the same validation frames.
+        </div>
+      </div>
     </div>
 
     <!-- Frame-based review UI. Canvas shows the whole frame with every

@@ -122,11 +122,13 @@ def main() -> None:
         "candidate": cand_path.name,
         "base": Path(args.base).name,
         "promoted": ok,
+        "labels_total": _count_labels(Path(args.data).parent),
         "baseline": base_metrics,
         "metrics": cand_metrics,
         "reasons": reasons,
     }
     adapters.append_history(record, adir)
+    _mirror_training_event(record)
 
     if not ok:
         print("REJECTED:")
@@ -155,6 +157,41 @@ def main() -> None:
         print(f"published {n} object(s) to Storage training/ - the VM "
               f"hot-loads it within a few rounds")
     _gh_summary(record)
+
+
+def _count_labels(export_dir: Path) -> int | None:
+    """Label files in the export (train + val) - the X axis of the WS5
+    labels-vs-quality curve. None when the layout isn't there."""
+    try:
+        n = sum(1 for split in ("train", "val")
+                for _ in (export_dir / "labels" / split).glob("*.txt"))
+        return n or None
+    except OSError:
+        return None
+
+
+def _mirror_training_event(record: dict) -> None:
+    """Best-effort copy of the gate record into Firestore `training_events`
+    (D7: one write per training run) so the HOSTED dashboard can render the
+    AL curve without the operator's disk. Quiet no-op without credentials."""
+    try:
+        import datetime as _dt
+
+        import firebase_admin
+        from firebase_admin import credentials, firestore
+        cred = os.environ.get("FIREBASE_CREDENTIALS")
+        if not cred or not Path(cred).is_file():
+            return
+        if not firebase_admin._apps:
+            firebase_admin.initialize_app(credentials.Certificate(cred))
+        doc = {**record,
+               "expire_at": _dt.datetime.now(_dt.timezone.utc)
+               + _dt.timedelta(days=30)}
+        firestore.client().collection("training_events").add(doc)
+        print("promote: mirrored gate record -> Firestore training_events")
+    except Exception as e:
+        print(f"promote: training_events mirror skipped "
+              f"({type(e).__name__}: {e})")
 
 
 def _gh_summary(record: dict) -> None:

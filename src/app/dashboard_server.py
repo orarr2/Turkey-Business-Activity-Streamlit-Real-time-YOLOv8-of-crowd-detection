@@ -234,6 +234,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/review-sample":
             self._review_sample()
             return
+        if path == "/api/al-curve":
+            self._al_curve()
+            return
         if path == "/api/review-stats":
             self._review_stats()
             return
@@ -812,6 +815,16 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         except Exception:
             pass
         self._send_json(200, result)
+
+    def _al_curve(self) -> None:
+        """GET /api/al-curve -> labels-vs-mAP points from the training-run
+        gate history (plan WS5). Cheap file read; empty points until the
+        first train.yml run lands."""
+        try:
+            from app.adapters import al_curve_payload
+            self._send_json(200, al_curve_payload())
+        except Exception as e:
+            self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
 
     def _boost_status(self) -> None:
         """Per-(cam,cls) baseline vs current conf plus review counts.

@@ -1199,3 +1199,51 @@ function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"]/g, (c) =>
       ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }
+
+// ---- Active-learning curve (plan WS5) --------------------------------------
+// One point per training run from /api/al-curve (gate history). Local-mode
+// only: on the hosted dashboard the fetch 404s and the panel stays hidden.
+let alCurveChart = null;
+async function renderAlCurve() {
+  const wrap = document.getElementById("al-curve-wrap");
+  const canvas = document.getElementById("al-curve");
+  if (!wrap || !canvas || typeof Chart === "undefined") return;
+  let data;
+  try {
+    const r = await fetch("/api/al-curve");
+    if (!r.ok) return;
+    data = await r.json();
+  } catch { return; }
+  const pts = data.points || [];
+  if (!pts.length) return;
+  wrap.hidden = false;
+  const labels = pts.map((p, i) =>
+      p.labels_total != null ? `${p.labels_total} lbl` : `run ${i + 1}`);
+  const promoted = pts.map((p) => (p.promoted ? p.map50 : null));
+  const rejected = pts.map((p) => (p.promoted ? null : p.map50));
+  const baseline = pts.map(() => data.baseline_map50);
+  if (alCurveChart) alCurveChart.destroy();
+  alCurveChart = new Chart(canvas, {
+    type: "line",
+    data: { labels, datasets: [
+      { label: "promoted", data: promoted, borderColor: "#4cc9f0",
+        backgroundColor: "#4cc9f0", spanGaps: true, pointRadius: 5 },
+      { label: "rejected", data: rejected, borderColor: "#6f7480",
+        backgroundColor: "#6f7480", spanGaps: true, pointRadius: 5,
+        pointStyle: "crossRot" },
+      { label: "base model", data: baseline, borderColor: "#e7e9ee",
+        borderDash: [6, 4], pointRadius: 0 },
+    ]},
+    options: {
+      animation: false, responsive: true,
+      scales: {
+        y: { title: { display: true, text: "mAP50 (val)" },
+             ticks: { color: "#9aa0ab" }, grid: { color: "#2a2d33" } },
+        x: { ticks: { color: "#9aa0ab" }, grid: { color: "#2a2d33" } },
+      },
+      plugins: { legend: { labels: { color: "#9aa0ab" } } },
+    },
+  });
+}
+renderAlCurve();
+setInterval(renderAlCurve, 300000);

@@ -53,6 +53,9 @@ Example (uncomment and tune per scene):
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 # Header set IBB's nginx accepts. ffmpeg/OpenCV honor this via OPENCV_FFMPEG_CAPTURE_OPTIONS.
 IBB_HEADERS = {
     "User-Agent": "Mozilla/5.0",
@@ -740,15 +743,48 @@ def _merge_confidence_boost() -> None:
         cam["per_class_conf"] = pcc
 
 
+# --- per-camera calibration merge ---------------------------------------------
+# tools/calibrate_conf.py distills the review confusion matrix into an
+# explicit conf gate per (cam, cls) at a target precision (plan WS4).
+# Runs AFTER the boost merge and OVERRIDES it per pair: a calibrated gate
+# beats a heuristic nudge; the nudge keeps covering pairs that don't have
+# 30+ verdicts yet.
+PER_CAMERA_CONF_PATH = (Path(__file__).resolve().parent.parent
+                        / "data" / "per_camera_conf.json")
+
+
+def _merge_per_camera_conf(data: dict | None = None) -> None:
+    if data is None:
+        try:
+            data = json.loads(PER_CAMERA_CONF_PATH.read_text())
+        except (OSError, ValueError):
+            return
+    for cam_id, cls_map in (data.get("cameras") or {}).items():
+        cam = CAMERAS.get(cam_id)
+        if not cam:
+            continue
+        pcc = dict(cam.get("per_class_conf") or {})
+        for cls, entry in (cls_map or {}).items():
+            try:
+                pcc[cls] = float(entry["conf"])
+            except (KeyError, TypeError, ValueError):
+                continue
+        if pcc:
+            cam["per_class_conf"] = pcc
+
+
 def reload_review_overrides() -> None:
     """Public entry point for the collector's hot-reload timer. Re-runs
-    both merges without importing/reloading the whole module."""
+    the merges without importing/reloading the whole module. Order
+    matters: calibration LAST so it overrides the boost delta per pair."""
     _merge_auto_blacklist()
     _merge_confidence_boost()
+    _merge_per_camera_conf()
 
 
 _merge_auto_blacklist()
 _merge_confidence_boost()
+_merge_per_camera_conf()
 
 
 def active_cameras():

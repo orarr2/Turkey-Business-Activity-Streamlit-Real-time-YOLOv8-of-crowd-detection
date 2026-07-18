@@ -174,6 +174,41 @@ def gate_decision(base: dict, cand: dict,
     return False, reasons
 
 
+def al_curve_payload(adapters_dir: str | Path = ADAPTERS_DIR) -> dict:
+    """Data for the dashboard's "labels vs quality" chart (plan WS5).
+
+    Reads history.jsonl gate records - one point per training run, promoted
+    or rejected (rejected renders grey). Baseline = the baseline mAP50 of
+    the most recent gate run (each run re-validates the clean base on the
+    CURRENT chronological val split, so the latest number is the honest
+    comparator for the whole curve).
+    """
+    points = []
+    baseline = None
+    for rec in read_history(adapters_dir):
+        if rec.get("event") != "gate":
+            continue
+        base_map = ((rec.get("baseline") or {}).get("map50"))
+        cand_map = ((rec.get("metrics") or {}).get("map50"))
+        if cand_map is None:
+            continue
+        if base_map is not None:
+            baseline = base_map
+        points.append({
+            "at":           rec.get("at"),
+            "adapter":      rec.get("candidate"),
+            "labels_total": rec.get("labels_total"),
+            "map50":        cand_map,
+            "promoted":     bool(rec.get("promoted")),
+        })
+    ptr = read_pointer(adapters_dir)
+    return {
+        "baseline_map50": baseline,
+        "points":         points,
+        "current":        (ptr or {}).get("file"),
+    }
+
+
 # ---- head tensors: extract / save / load / overlay (torch inside) ----------
 
 def detect_head_index(det_model) -> int:

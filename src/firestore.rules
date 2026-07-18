@@ -37,6 +37,14 @@ service cloud.firestore {
     }
     // config/grid publishes which cam is currently active in each dashboard
     // slot. Written only by the cloud collector via the Admin SDK.
+    // Training-run gate records mirrored by tools/promote_adapter.py -
+    // one write per run (admin SDK, bypasses rules). The hosted dashboard
+    // reads them for the labels-vs-mAP curve.
+    match /training_events/{doc} {
+      allow read: if true;
+      allow write: if false;
+    }
+
     match /config/{doc} {
       allow read: if true;
       allow write: if false;
