@@ -801,7 +801,12 @@ def estimate_speeds(frames_boxes: list[list[dict]], frame_shape,
         if kmh < SPEED_MIN_KMH:
             kmh = 0.0                     # parked / detection jitter
         return {"cls": cls, "kmh": round(kmh, 1), "points": len(track),
-                "box": track[-1]}
+                "box": track[-1],
+                # every box dict this track matched, in burst order - lets
+                # the caller tag the SAME vehicle in whichever frame it
+                # annotates (the representative frame is often not the one
+                # the track last matched in)
+                "boxes": list(track)}
 
     out: list[dict] = []
     for t in tracks:
@@ -838,6 +843,9 @@ def estimate_speeds(frames_boxes: list[list[dict]], frame_shape,
         used_first.add(id(best))
         entry = _speed_entry([best] + [lb] * (len(vehicle_frames) - 1))
         if entry:
+            # The padded pseudo-track repeats `lb`; the REAL sightings are
+            # exactly first + last - report those as the taggable boxes.
+            entry["boxes"] = [best, lb]
             out.append(entry)
     return out
 
@@ -1287,8 +1295,14 @@ def detect_burst(model, frames: list[np.ndarray], conf: float = 0.35,
             # Every matched vehicle carries its speed - including 0.0, which
             # the annotator renders as "parked". Unmatched single-sighting
             # vehicles stay unlabeled (no physics without a second look).
+            # The last-matched box is not necessarily in the REPRESENTATIVE
+            # frame that gets annotated, so drawn speed labels sometimes
+            # vanished while record["speeds"] stayed correct. Tag every box
+            # the track matched - object identity, no re-matching - so the
+            # vehicle carries its speed in whichever frame is annotated.
             for s in speeds:
-                s["box"]["kmh"] = s["kmh"]
+                for tb in (s.get("boxes") or (s["box"],)):
+                    tb["kmh"] = s["kmh"]
     return counts, best[1], best[2], debug
 
 

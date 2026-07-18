@@ -77,3 +77,35 @@ def test_summary_medians_over_moving_only():
     assert s["per_class"] == {"bus": 20.0, "car": 50.0} or \
            s["per_class"]["car"] in (30.0, 50.0)   # even-count median = upper
     assert summarize_speeds([]) is None
+
+
+def test_speed_label_reaches_the_representative_frame(monkeypatch):
+    """M3: detect_burst annotates the frame whose person count sits closest
+    to the median - which is often NOT the frame a track last matched in.
+    Every box the track touched must carry the kmh tag so the drawn label
+    survives whichever frame is chosen."""
+    import numpy as np
+    from app import detect_core
+
+    person = {"x1": 10.0, "y1": 10.0, "x2": 40.0, "y2": 90.0,
+              "cls": "person", "conf": 0.9}
+    canned = [
+        ({"person": 1, "vehicles": 1}, [dict(person), _box(100, 300)]),
+        ({"person": 1, "vehicles": 1}, [dict(person), _box(250, 300)]),
+        ({"person": 0, "vehicles": 1}, [_box(400, 300)]),
+    ]
+    it = iter(canned)
+    monkeypatch.setattr(detect_core, "detect_with_boxes",
+                        lambda *a, **k: next(it))
+    frames = [np.zeros(SHAPE, dtype=np.uint8)] * 3
+    counts, boxes, _frame, dbg = detect_core.detect_burst(
+        None, frames, burst_stride=25)
+    assert counts["person"] == 1          # median of 1,1,0
+    car = [b for b in boxes if b["cls"] == "car"]
+    assert car, "representative frame lost its car box"
+    # the representative frame is index 1 (person==median, latest wins) -
+    # the track last matched at index 2, so without the mirror this box
+    # carried no kmh at all
+    assert car[0]["x1"] == 250.0
+    assert "kmh" in car[0] and abs(car[0]["kmh"] - 24.3) < 0.5
+    assert dbg["speeds"]["moving"] == 1

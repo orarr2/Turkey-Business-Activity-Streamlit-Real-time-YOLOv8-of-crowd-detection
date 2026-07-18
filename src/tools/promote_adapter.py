@@ -79,7 +79,12 @@ def _storage_bucket():
     if not firebase_admin._apps:
         firebase_admin.initialize_app(credentials.Certificate(cred),
                                       {"storageBucket": bucket})
-    return storage.bucket()
+    # Pass the name EXPLICITLY: when the training_events mirror ran first
+    # it already initialized the app WITHOUT a storageBucket option, and a
+    # bare storage.bucket() then raises "bucket name not specified" - that
+    # collision silently killed the history upload on every run since the
+    # mirror shipped (runs 2-4) while run 1, which predates it, published.
+    return storage.bucket(bucket)
 
 
 def main() -> None:
@@ -221,6 +226,8 @@ def _mirror_training_event(record: dict) -> None:
         if not firebase_admin._apps:
             firebase_admin.initialize_app(credentials.Certificate(cred))
         doc = {**record,
+               "at": _dt.datetime.now(_dt.timezone.utc)
+               .strftime("%Y-%m-%dT%H:%M:%SZ"),
                "expire_at": _dt.datetime.now(_dt.timezone.utc)
                + _dt.timedelta(days=30)}
         firestore.client().collection("training_events").add(doc)

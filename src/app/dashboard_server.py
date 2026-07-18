@@ -197,6 +197,54 @@ _REVIEW_STORE_LOCK = threading.Lock()
 # on submit and the dict resets with the process.
 _LAST_SERVED_CROPS: dict[str, tuple] = {}
 
+# 60s memory cache for the cloud training_events pull (al-curve merge).
+_CLOUD_TRAIN_CACHE: dict = {"at": 0.0, "points": []}
+
+
+def _find_admin_key() -> str | None:
+    """Admin service-account json: env first, then the operator's repo root
+    (the same auto-detect the notebooks use)."""
+    key = os.environ.get("FIREBASE_CREDENTIALS")
+    if key and Path(key).is_file():
+        return key
+    for base in (ROOT.parent, ROOT):
+        hits = sorted(base.glob("*adminsdk*.json"))
+        if hits:
+            return str(hits[0])
+    return None
+
+
+def _cloud_training_points() -> list[dict]:
+    """Gate records from Firestore `training_events`, shaped like local
+    al-curve points. Cached 60s; [] whenever creds/network are absent."""
+    import time as _time
+    now = _time.time()
+    if now - _CLOUD_TRAIN_CACHE["at"] < 60:
+        return _CLOUD_TRAIN_CACHE["points"]
+    points: list[dict] = []
+    key = _find_admin_key()
+    if key:
+        import firebase_admin
+        from firebase_admin import credentials as _fbc, firestore as _fbf
+        if not firebase_admin._apps:
+            firebase_admin.initialize_app(_fbc.Certificate(key))
+        for doc in _fbf.client().collection("training_events").stream():
+            r = doc.to_dict() or {}
+            cand_map = (r.get("metrics") or {}).get("map50")
+            if r.get("event") != "gate" or cand_map is None:
+                continue
+            points.append({
+                "at":           r.get("at"),
+                "adapter":      r.get("candidate"),
+                "labels_total": r.get("labels_total"),
+                "map50":        cand_map,
+                "promoted":     bool(r.get("promoted")),
+                "baseline_map50": (r.get("baseline") or {}).get("map50"),
+                "source":       "cloud",
+            })
+    _CLOUD_TRAIN_CACHE.update(at=now, points=points)
+    return points
+
 
 def _review_store():
     global _REVIEW_STORE
@@ -822,11 +870,32 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
     def _al_curve(self) -> None:
         """GET /api/al-curve -> labels-vs-mAP points from the training-run
-        gate history (plan WS5). Cheap file read; empty points until the
-        first train.yml run lands."""
+        gate history (plan WS5).
+
+        Local history covers runs executed ON this machine; the real
+        trainer runs in GitHub Actions, so its gate records are merged in
+        from the cloud (Firestore `training_events`, mirrored one doc per
+        run) - without this the operator's curve stayed empty forever
+        while CI trained. Best-effort with a short memory cache; the
+        local file always renders even when the cloud is unreachable."""
         try:
             from app.adapters import al_curve_payload
-            self._send_json(200, al_curve_payload())
+            payload = al_curve_payload()
+            try:
+                cloud = _cloud_training_points()
+                have = {p.get("adapter") for p in payload["points"]}
+                for p in cloud:
+                    if p.get("adapter") not in have:
+                        payload["points"].append(p)
+                payload["points"].sort(key=lambda p: (p.get("at") or "",
+                                                      p.get("adapter") or ""))
+                for p in payload["points"]:
+                    if p.get("baseline_map50") is not None:
+                        payload["baseline_map50"] = p.pop("baseline_map50")
+            except Exception as ex:
+                print(f"  ! al-curve cloud merge skipped: "
+                      f"{type(ex).__name__}: {ex}")
+            self._send_json(200, payload)
         except Exception as e:
             self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
 
