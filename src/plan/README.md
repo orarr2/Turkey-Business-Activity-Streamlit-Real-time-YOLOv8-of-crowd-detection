@@ -20,6 +20,30 @@ free write quota.
 | Per-(cam,cls) threshold nudging + auto/manual blacklist | `confidence_boost`, `auto_blacklist` | yes |
 | Anomaly-profile self-rebase | `collector.HourlyProfile` | yes |
 
+## Status update (2026-07-18, WS1-WS5 shipped)
+
+* WS1 capture-time uncertainty SHIPPED: `app/uncertainty.py` (margin vs the
+  EFFECTIVE gates + optional one-pass flip via UNCERTAINTY_FLIP), persisted
+  to frame sidecars and `_uNN` crop suffixes; `frame_uncertainty` prefers it.
+* WS2 BADGE SHIPPED for crops: `app/badge.py` (OSNet direction x uncertainty
+  magnitude, hand-rolled k-means++), REVIEW_SAMPLER env + ?strategy=
+  override, review rows record sampler + uncertainty_at_selection.
+* WS3 UNBLOCKED: the whole chain was training/gating yolov8s heads while
+  the VM runs yolov8n - a promoted head could never overlay. Base is now
+  pinned to yolov8n end-to-end, the pointer records the base, loaders
+  refuse a foreign-base head loudly. Remaining for DoD: the first 2 real
+  runs + a rollback drill (operator-triggered from the Actions tab).
+* WS4 SHIPPED: `tools/calibrate_conf.py` -> `data/per_camera_conf.json`,
+  merged after the boost and overriding it per pair.
+* WS5 SHIPPED: `/api/al-curve` + Chart.js panel (promoted colored,
+  rejected greyed, baseline dashed); promote_adapter records labels_total
+  and mirrors gate records to Firestore `training_events` (rules expose it
+  read-only).
+* Also landed the same day: the muted statistical anomaly layers
+  (AnomalyTracker/HourlyProfile) were REMOVED outright, and the
+  CountryDirector now implements the operator's widest-grid rule
+  (4 -> 3 -> 2 -> 1 with full-order rescan per width).
+
 ## Status update (2026-07-11, WS3 shipped)
 
 WS3 is BUILT and wired, with the operator's kickoff decisions applied

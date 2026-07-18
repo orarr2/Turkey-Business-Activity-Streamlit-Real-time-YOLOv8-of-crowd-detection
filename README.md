@@ -90,8 +90,8 @@ so a blocking CDN is knocked ~3 times an hour, not ~120. Each assignment change
 updates `config/grid` (with the active `country`) — the dashboard re-renders
 that tile with the new active cam.
 
-Report fields follow the live country and camera: the hour-of-week baseline and
-the day/night gate use each **camera's** timezone (the US bench alone spans
+Report fields follow the live country and camera: the day/night gate uses
+each **camera's** timezone (the US bench alone spans
 Eastern, Central and Pacific).
 
 ---
@@ -219,66 +219,37 @@ Per sampling round the collector writes:
 - **`config/grid`** - one document, updated whenever a slot switches cameras.
   Lists the active_cam / embed URL / display area for each of the 4 slots.
   The dashboard subscribes to this and re-renders when a fallback happens.
-- **`config/profile_{cam_id}`** - the hour-of-week activity baseline (running
-  mean/std per `(day-of-week, hour)` bucket, per metric), keyed by PHYSICAL
-  camera so the learned week-shape belongs to the scene rather than the grid
-  tile, persisted every ~30 min and reloaded on startup.
 
-### Anomaly detection - two layers × two metrics, decided server-side
+### Anomaly detection - operational scene gates, decided server-side
 
 The collector - not the browser - decides what is anomalous; the dashboard
 renders its verdicts verbatim (`is_anomaly` + the `anomaly` map on each doc),
-so the badge, the events table and the snapshots always agree. Both **people
-and vehicles** are tracked per slot, because "business activity" on these
-streets is foot traffic *and* vehicle traffic:
+so the badge, the events table and the snapshots always agree. An anomaly is
+an OPERATIONAL event - something worth walking to the screen for - not a
+statistical outlier:
 
-1. **Rolling window** (last 30 samples ≈ 20 min) - robust z-score built on
-   **median + MAD** instead of mean/std, so outliers already inside the window
-   can't inflate the spread and mask the next event.
-   - `spike` - z ≥ 3.5 with an absolute floor (≥ 8 people / ≥ 6 vehicles) AND
-     a scene-relative floor (the move must also be ≥ 0.8× the window median,
-     so a normal group crossing a quiet street is not an "event");
-   - `drop` - z ≤ -3 while the recent median is itself busy (≥ 8 people /
-     ≥ 6 vehicles): "the street just emptied" fires, a quiet street sitting
-     at 0 stays silent.
-2. **Hour-of-week profile** ([`HourlyProfile`](src/app/collector.py)) - a
-   Welford running mean/std per `(day-of-week, hour)` bucket in Turkey local
-   time (hour buckets give day and night separate baselines by construction).
-   Once a bucket has ≥ 30 samples, values far outside it flag as
-   `contextual_spike` / `contextual_drop` - "this is not what a Wednesday
-   14:00 looks like here" - which catches slow build-ups and dead-at-rush-hour
-   cases the 20-minute window can't see.
+- **`extreme_load`** - ≥ 50 people, or a weighted vehicle load ≥ 38 (car 1,
+  truck/bus 2.5, train 3, motorcycle 0.5, bicycle 0.3);
+- **`camera_obstructed`** - one detection covering ≥ 50% of the frame at
+  confidence ≥ 0.45 (the confidence gate keeps a low-conf hallucination from
+  "obstructing" the camera);
+- **`camera_dark`** - mean luma collapsing from ≥ 90 to ≤ 25 (feed died or
+  lens covered - distinct from ordinary nightfall, which the day/night gate
+  handles).
 
-Operational gating on top of the statistics:
+Each (camera, kind) pair cools down for 30 minutes between verdicts, and the
+collector warns loudly when a camera exceeds 8 verdicts a day - that means
+miscalibrated gates, not an interesting street. Every verdict carries
+`observed` vs `expected`, and each event saves a raw + annotated snapshot
+(drawn from the detections already computed - no second model pass).
+Loitering and returning-visitor detections flow through the same `events`
+feed as their own kinds.
 
-- **Persistence** - a verdict must repeat for 2 consecutive samples
-  (`--anomaly-confirm`) before it becomes an event. A one-sample blip (a bus
-  unloading, a decode glitch) is not an operational anomaly.
-- **Scene-keyed baselines** - rolling windows are keyed `slot|cam` and hourly
-  profiles by `cam_id`. A fallback swap starts a short warmup on the new
-  camera's own history instead of scoring a quiet park against a busy
-  market's baseline (previously every swap produced a storm of fake
-  spikes/drops in both directions), and a window left unfed for 10+ minutes
-  (long fallback episode, stream outage) is cleared and re-warms rather than
-  scoring the present against a different time-of-day's regime.
-- **Adaptive learning, clip-protected** - samples feed the hourly baseline
-  (except the rare sample on which the rolling layer just CONFIRMED an event,
-  which shields still-immature buckets), clipped to mean ± 3σ once a bucket
-  is mature, with an exponentially-weighted memory (~120 samples), deduped
-  when two slots fall back onto the same camera. A one-off spike barely moves
-  the baseline, but a street that genuinely became busier is absorbed within
-  about a week and stops alerting (the previous exclude-flagged policy never
-  adapted and re-flagged the same street forever).
-- **Alert budget** - the collector warns loudly in its log when a camera
-  exceeds 8 anomaly verdicts in a day: that means miscalibrated gates, not an
-  interesting street.
-
-Every verdict carries `observed` vs `expected` (+ z and the hour bucket), each
-event saves a raw + annotated snapshot (drawn from the detections already
-computed - no second model pass), and per-scene cooldowns throttle repeats
-(5 min rolling / 30 min contextual). On startup the collector reseeds its
-rolling windows from the last hour of Firestore history and reloads the
-persisted profiles - a service restart doesn't re-warm from zero.
+An earlier statistical pair (rolling median+MAD z-window and an hour-of-week
+Welford baseline) was removed on 2026-07-18: its verdicts had been muted by
+design since the operator ruled "busier than usual" is weather, not an
+anomaly, and keeping it warm cost Firestore writes on every round plus a
+bootstrap read on every restart.
 
 ### The full decision logic - every gate, every number
 
@@ -305,41 +276,23 @@ images always match the numbers. Every sample also gets an `is_night` tag
 the include-polygon and outside every exclude-polygon. Everything downstream
 (counts, anomalies, re-ID, loitering) sees only ROI-passing detections.
 
-**Layer 1 - rolling anomaly (sudden change vs the last ~20 min).** Keyed per
-`slot|camera`; a window unfed for > 10 min is cleared (stale regime). ALL of
-these must hold, in order, for a verdict:
+**Layer 1 - scene anomalies (the only anomaly verdicts).** Evaluated on
+every successful sample by `check_scene_anomalies`, all thresholds hard
+operational gates:
 
-| # | condition (spike) | condition (drop) | default |
-|---|---|---|---|
-| 1 | window has ≥ 10 samples (warmup) | same | `warmup=10` of `window=30` |
-| 2 | count ≥ 8 people / 6 vehicles | window median ≥ 8 people / 6 vehicles | `min_value` / `drop_min_baseline` |
-| 3 | move ≥ max(5, **0.8 × window median**) | same, downward | `min_delta`, `rel_delta` |
-| 4 | robust z ≥ 3.5, where z = (count − median) / max(1.4826·MAD, **2.0**) | z ≤ −3.0 | `--anomaly-z`, `--anomaly-drop-z`, `mad_floor` |
-| 5 | the SAME verdict repeats on the **next consecutive sample** | same | `--anomaly-confirm 2` |
-| 6 | ≥ 5 min since this window's last verdict | same | `--anomaly-cooldown 300` |
+| kind | fires when | default |
+|---|---|---|
+| `extreme_load` | people ≥ 50, or weighted vehicle load ≥ 38 (car 1, truck/bus 2.5, train 3, motorcycle 0.5, bicycle 0.3) | `PERSON_EXTREME`, `VEHICLE_LOAD_EXTREME` |
+| `camera_obstructed` | one box covers ≥ 50% of the frame at conf ≥ 0.45 | `OBSTRUCT_AREA_FRAC`, `OBSTRUCT_MIN_CONF` |
+| `camera_dark` | mean luma falls from ≥ 90 to ≤ 25 between samples | `DARK_FROM`, `DARK_TO` |
 
-Median+MAD (not mean/std) means an outlier already inside the window can't
-inflate the spread and mask the next event. Passing all six ⇒ the sample is
-written with `is_anomaly: true`, an `anomaly` map (kind/metric/z/observed/
-expected), and a raw + annotated snapshot.
+Each (camera, kind) cools down 30 minutes; more than 8 verdicts per camera
+per day triggers a loud miscalibration warning in the log. (The former
+statistical layers - rolling robust-z and the hour-of-week baseline - were
+removed on 2026-07-18; their verdicts had been muted by design.)
 
-**Layer 2 - hour-of-week contextual anomaly (wrong for THIS hour).** Keyed
-per camera; one Welford accumulator `[n, mean, m2]` per (day-of-week, hour)
-bucket in Turkey local time - 168 buckets per camera per metric, persisted to
-Firestore every ~30 min. A sample flags `contextual_spike`/`contextual_drop`
-when: bucket has ≥ 30 samples; |count − bucket mean| ≥ metric `min_delta`;
-z vs spread = max(bucket std, 1.0, **0.15 × mean**) crosses ±3.5/−3.0; drop
-additionally needs bucket mean ≥ `drop_min_baseline`; 30-min cooldown per
-(camera, metric). **How the baseline learns:** every sample is fed back into
-its bucket, EXCEPT the one sample on which Layer 1 just confirmed an event
-(shields young buckets); mature buckets clip the incoming value to
-mean ± 3·spread (a wild sample moves the mean ≤ ~2%); the accumulator's n is
-capped at 120 (exponential forgetting, ~1.3 weekly occurrences of that hour),
-so a street that genuinely changed its regime is absorbed within ~a week -
-measured: 1 alert/day during that week, then silence; and two grid slots
-sitting on the same physical camera feed the bucket once, not twice (15 s
-dedup). Rolling verdicts outrank hourly ones on the record; extra verdicts
-land under `anomaly.also`.
+**Layer 2 - (removed).** Kept here as a numbered placeholder so older notes
+referencing "Layer 3/4" still line up.
 
 **Layer 3 - returning visitor (came back to the scene).** For every re-ID
 match, a saved return event requires ALL of, in order: not a new entity → has
@@ -482,7 +435,7 @@ Chart.js 4. Opens with [`python serve.py`](src/serve.py) and renders:
 - **Combined 24 h chart** stacking all four cameras' people series.
 - **Anomaly events table** - every flagged sample of the last 24 h across all
   slots: when, where, spike or drop, people or vehicles, observed vs expected
-  (with the hour-of-week norm when the contextual layer fired), and a link to
+  and a link to
   the saved snapshot. This is the collector's own log - nothing is recomputed
   client-side.
 - **Re-ID summary table** - unique entities / total sightings / regulars per
@@ -582,6 +535,36 @@ class, drag a rectangle around an object the model failed to see -
 that's the **FN signal** that finally makes recall computable.
 Verdicts land in `data/reviews.json::frame_reviews`, feed the same
 confidence-boost + auto-blacklist pipes as the crop-level flow.
+
+### Active-learning loop (labels -> fine-tuned head -> gated promotion)
+
+Every verdict does double duty: the instant heuristics above, and real
+training. The full loop, end to end:
+
+1. **Uncertainty at capture** - the collector scores every stored box
+   against the EFFECTIVE gates the burst ran with (`app/uncertainty.py`);
+   the review queue serves the least-certain frames first, and the BADGE
+   crop sampler (`REVIEW_SAMPLER=badge`) adds embedding-space diversity.
+2. **Sync** - each submit ships verdicts + reviewed frames to Storage
+   `training/` in the background (`app/training_sync.py`).
+3. **Train** - the `train-head` GitHub Actions workflow (manual Run
+   workflow button; free public-repo runner) pulls the data, exports a
+   chronological 90/10 YOLO dataset, and fine-tunes ONLY the Detect head
+   of **yolov8n** - the exact base the VM runs - backbone frozen,
+   mosaic/mixup off, ≤ 10 epochs.
+4. **Gate** - `tools/promote_adapter.py` validates base vs candidate on
+   the same val split; promotion requires mAP50 +0.5pp AND no class
+   dropping > 2pp (person/car: 0pp). Every run - promoted or rejected -
+   lands in `history.jsonl` and mirrors to Firestore `training_events`.
+5. **Deploy** - promoted heads publish to Storage; the collector polls
+   every 30 rounds and hot-swaps the Detect tensors in place (no restart).
+   `--rollback` restores the previous head in one command.
+6. **Calibrate** - `tools/calibrate_conf.py` distills the review confusion
+   matrix into per-(camera, class) confidence gates at 0.90 precision
+   (pairs with ≥ 30 verdicts), overriding the ±0.015 heuristic nudge.
+7. **Prove it** - the dashboard's "labels vs mAP50" chart (`/api/al-curve`)
+   plots every training run: promoted in color, rejected greyed, baseline
+   dashed - the improvement claim is a chart, not an anecdote.
 
 **Model-quality scoreboard** - the header carries a live one-liner
 computed from the review store:
