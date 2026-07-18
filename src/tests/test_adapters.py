@@ -165,3 +165,20 @@ def test_publish_full_vs_history_only(tmp_path):
     assert list(b2.store) == ["training/history.jsonl"]
     assert b"'promoted': false" in b2.store["training/history.jsonl"].lower() \
         or b'"promoted": false' in b2.store["training/history.jsonl"]
+
+
+def test_apply_current_refuses_foreign_base(tmp_path, capsys):
+    """A head promoted for one base model must not overlay onto another -
+    the guard fires BEFORE any torch load, so a dummy model object works."""
+    (tmp_path / "head_n.pt").write_bytes(b"n")
+    adapters.promote("head_n.pt", {"map50": 0.5}, tmp_path, base="yolov8n.pt")
+    assert adapters.read_pointer(tmp_path)["base"] == "yolov8n.pt"
+    n = adapters.apply_current(object(), tmp_path, expected_base="yolov8s.pt")
+    assert n == 0
+    out = capsys.readouterr().out
+    assert "trained for 'yolov8n.pt'" in out and "yolov8s.pt" in out
+    # legacy pointer without a base field -> guard stays out of the way
+    adapters.write_pointer({"file": "head_n.pt"}, tmp_path)
+    # (overlay itself then fails on the dummy object and is caught -> 0)
+    assert adapters.apply_current(object(), tmp_path,
+                                  expected_base="yolov8s.pt") == 0

@@ -3,7 +3,9 @@
 # What one run does, end to end, with no machine of the operator's involved:
 #   1. pull verdicts + reviewed frames the dashboard uploaded to Storage
 #   2. export them as a YOLO dataset (chronological 90/10 split)
-#   3. fine-tune ONLY the Detect head of yolov8s (backbone frozen)
+#   3. fine-tune ONLY the Detect head of yolov8n (backbone frozen) - the
+#      SAME base the VM collector is pinned to; a head trained on any other
+#      base cannot overlay onto the running model
 #   4. validate base vs candidate on the same val split; promote only if
 #      mAP50 gains >= +0.5pp with no class regressions (person/car: none)
 #   5. publish the promoted head to Storage - the VM collector hot-loads it
@@ -85,6 +87,7 @@ jobs:
         run: >
           python -m tools.train_head
           --data data/labels_export/dataset.yaml
+          --base yolov8n.pt
           --epochs "${{ github.event.inputs.epochs || '10' }}"
           --imgsz "${{ github.event.inputs.imgsz || '512' }}"
           --out-file "data/adapters/head_run${{ github.run_number }}.pt"
@@ -96,6 +99,7 @@ jobs:
           python -m tools.promote_adapter
           --candidate "data/adapters/head_run${{ github.run_number }}.pt"
           --data data/labels_export/dataset.yaml
+          --base yolov8n.pt
           --imgsz "${{ github.event.inputs.imgsz || '512' }}"
           --publish
 

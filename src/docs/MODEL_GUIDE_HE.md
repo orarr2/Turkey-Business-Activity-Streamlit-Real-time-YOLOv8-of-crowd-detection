@@ -1711,7 +1711,7 @@ systemctl enable --now collector.service
 
 ```systemd
 [Unit]
-Description=Turkey Business Activity — footfall collector
+Description=Business Activity - Live Footfall — collector
 After=network-online.target
 Wants=network-online.target
 ```

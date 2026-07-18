@@ -586,9 +586,9 @@ def compose_pdf(out_path: str | Path, *,
         for s in stale_slots:
             reason = s.get("reason")
             if reason:
-                msg = f"⚠  {s['cam']} - {reason}"
+                msg = f"[!] {s['cam']} - {reason}"
             else:
-                msg = (f"⚠  {s['cam']} - not reporting for "
+                msg = (f"[!] {s['cam']} - not reporting for "
                        f"{s['age_min']} minutes")
             story.append(Paragraph(msg, styles["warn"]))
     elif cam_stats and all(c["peak_person"] == 0 and c["peak_vehicles"] == 0
@@ -598,7 +598,7 @@ def compose_pdf(out_path: str | Path, *,
         # dead or geo-blocked. Without this the report reads "all cameras
         # active and reporting normally" while every peak is 0.
         story.append(Paragraph(
-            f"⚠  {len(cam_stats)} camera(s) reporting but detected 0 people "
+            f"[!] {len(cam_stats)} camera(s) reporting but detected 0 people "
             "and 0 vehicles across the entire window - streams may be dead, "
             "geo-blocked or obscured. Check the VM journal for repeated "
             "MISS lines.",

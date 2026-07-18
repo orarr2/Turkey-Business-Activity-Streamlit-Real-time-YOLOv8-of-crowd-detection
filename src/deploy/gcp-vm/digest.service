@@ -1,5 +1,5 @@
 [Unit]
-Description=Turkey Business Activity - situation report email
+Description=Business Activity - Live Footfall - situation report email
 After=network-online.target
 Wants=network-online.target
 

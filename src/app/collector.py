@@ -2138,7 +2138,8 @@ def main() -> None:
                     fetched = adapters.refresh_from_storage(
                         getattr(firebase, "storage", None) if firebase else None)
                     if fetched:
-                        n = adapters.apply_current(model)
+                        n = adapters.apply_current(
+                            model, expected_base=args.weights)
                         print(f"  * adapter: hot-loaded {fetched} "
                               f"({n} head tensors, no restart)")
                 except Exception as e:

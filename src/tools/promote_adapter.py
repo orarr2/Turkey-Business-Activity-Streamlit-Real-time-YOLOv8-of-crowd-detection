@@ -4,8 +4,9 @@
     python -m tools.promote_adapter --candidate ... --publish   # + upload
     python -m tools.promote_adapter --rollback                  # undo last
 
-Both models (plain yolov8s and yolov8s+candidate head) are validated on the
-SAME split: the chronological val slice tools/export_labels.py wrote. Gate
+Both models (plain base and base+candidate head, yolov8n by default - the
+VM's pinned weights) are validated on the SAME split: the chronological val
+slice tools/export_labels.py wrote. Gate
 (plan WS3): mAP50 must improve by >= +0.5pp AND no class may drop more than
 2pp - person and car may not drop at all. Every verdict (promoted or
 rejected) is appended to data/adapters/history.jsonl, so the "it rejected a
@@ -70,7 +71,9 @@ def main() -> None:
                     help="head artifact from tools/train_head.py")
     ap.add_argument("--data", default=str(_SRC_ROOT / "data" / "labels_export"
                                           / "dataset.yaml"))
-    ap.add_argument("--base", default="yolov8s.pt")
+    ap.add_argument("--base", default="yolov8n.pt",
+                    help="same base the head was trained on AND the VM runs "
+                         "(pinned in deploy/gcp-vm/collector.service)")
     ap.add_argument("--imgsz", type=int, default=512)
     ap.add_argument("--adapters-dir", default=str(adapters.ADAPTERS_DIR))
     ap.add_argument("--publish", action="store_true",
@@ -117,6 +120,7 @@ def main() -> None:
     record = {
         "event": "gate",
         "candidate": cand_path.name,
+        "base": Path(args.base).name,
         "promoted": ok,
         "baseline": base_metrics,
         "metrics": cand_metrics,
@@ -141,7 +145,8 @@ def main() -> None:
     if dest.resolve() != cand_path.resolve():
         adir.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(cand_path.read_bytes())
-    entry = adapters.promote(dest.name, cand_metrics, adir)
+    entry = adapters.promote(dest.name, cand_metrics, adir,
+                             base=Path(args.base).name)
     print(f"PROMOTED {entry['file']}:")
     for r in reasons:
         print(f"  - {r}")

@@ -1,4 +1,4 @@
-// Firebase Web SDK config for the Turkey Business Activity dashboard.
+// Firebase Web SDK config for the Business Activity - Live Footfall dashboard.
 //
 // These values are the PUBLIC identifier of the Firebase project. They ship in
 // every visitor's browser and are safe to commit — see the Firebase docs:

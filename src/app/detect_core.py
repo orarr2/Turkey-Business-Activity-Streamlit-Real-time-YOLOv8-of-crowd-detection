@@ -111,7 +111,7 @@ def load_model(weights: str = "yolov8s.pt"):
     model = YOLO(weights)
     try:
         from app import adapters
-        adapters.apply_current(model)
+        adapters.apply_current(model, expected_base=weights)
     except Exception as e:
         print(f"load_model: adapter overlay skipped ({type(e).__name__}: {e})")
     return model
@@ -556,19 +556,25 @@ def iter_frames(stream_url: str, max_frames: int, stride: int = 1):
                 f.write(data); tmp = f.name
             try:
                 cap = _open_cap(tmp)
-                while yielded < max_frames:
-                    if idx % stride == 0:
-                        ok, fr = cap.read()
-                        if not ok:
-                            break
-                        yielded += 1
-                        idx += 1
-                        yield fr
-                    else:
-                        if not cap.grab():
-                            break
-                        idx += 1
-                cap.release()
+                try:
+                    while yielded < max_frames:
+                        if idx % stride == 0:
+                            ok, fr = cap.read()
+                            if not ok:
+                                break
+                            yielded += 1
+                            idx += 1
+                            yield fr
+                        else:
+                            if not cap.grab():
+                                break
+                            idx += 1
+                finally:
+                    # Must release even when the consumer closes the generator
+                    # mid-yield (grab_burst stops after n frames) - otherwise
+                    # the capture still holds the file and the unlink below
+                    # fails on Windows, leaking one temp .ts per burst.
+                    cap.release()
             finally:
                 try: os.unlink(tmp)
                 except OSError: pass

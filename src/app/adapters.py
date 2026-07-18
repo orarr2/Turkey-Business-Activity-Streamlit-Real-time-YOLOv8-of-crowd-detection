@@ -1,7 +1,8 @@
 """Per-camera-fleet Detect-head "adapters": save, promote, overlay, hot-load.
 
 The active-learning loop (src/plan, WS3) fine-tunes ONLY the Detect head of
-yolov8s on operator-reviewed frames - the D2 replacement for LoRA: the
+the production base model (yolov8n, the VM's pinned weights) on
+operator-reviewed frames - the D2 replacement for LoRA: the
 backbone stays frozen, so the artifact is just the head's tensors (~4-6 MB)
 and loading is "load base, overlay head". No adapter file present means the
 base model runs untouched - bit-identical behavior (D6).
@@ -92,8 +93,14 @@ def read_history(adapters_dir: str | Path = ADAPTERS_DIR) -> list[dict]:
 
 
 def promote(head_file: str, metrics: dict,
-            adapters_dir: str | Path = ADAPTERS_DIR) -> dict:
-    """Point `current` at head_file (name only, must live in adapters_dir)."""
+            adapters_dir: str | Path = ADAPTERS_DIR,
+            base: str | None = None) -> dict:
+    """Point `current` at head_file (name only, must live in adapters_dir).
+
+    `base` records which base weights the head was trained/gated against
+    (e.g. "yolov8n.pt") so every loader can refuse a head that does not
+    belong to the model it is running - a v8s head silently failing to
+    overlay onto the VM's v8n was exactly the failure this prevents."""
     prev = read_pointer(adapters_dir)
     entry = {
         "file": Path(head_file).name,
@@ -101,6 +108,8 @@ def promote(head_file: str, metrics: dict,
         "metrics": metrics,
         "previous": (prev or {}).get("file"),
     }
+    if base:
+        entry["base"] = Path(base).name
     write_pointer(entry, adapters_dir)
     append_history({"event": "promoted", **entry}, adapters_dir)
     return entry
@@ -225,16 +234,30 @@ def overlay_head(det_model, head_state: dict) -> int:
     return len(head_state)
 
 
-def apply_current(yolo_model, adapters_dir: str | Path = ADAPTERS_DIR) -> int:
+def apply_current(yolo_model, adapters_dir: str | Path = ADAPTERS_DIR,
+                  expected_base: str | None = None) -> int:
     """Overlay the promoted head onto a loaded YOLO model, if one exists.
     Returns tensor count (0 = no adapter / not applicable). Never raises -
     a broken artifact must not take the collector down; it logs and the
-    base model keeps running (D6)."""
+    base model keeps running (D6).
+
+    `expected_base` is the weights name of the model being overlaid (the
+    collector passes its --weights). When the pointer records which base it
+    was trained against and the two disagree, the overlay is refused with a
+    loud, actionable line instead of failing on a tensor-shape mismatch."""
     import os
     if os.environ.get("ADAPTERS_DISABLE") == "1":
         return 0
     ptr = read_pointer(adapters_dir)
     if not ptr:
+        return 0
+    ptr_base = ptr.get("base")
+    if expected_base and ptr_base \
+            and Path(str(expected_base)).name != str(ptr_base):
+        print(f"adapters: promoted head was trained for '{ptr_base}' but "
+              f"this process runs '{Path(str(expected_base)).name}' - "
+              f"skipping overlay (retrain with --base "
+              f"{Path(str(expected_base)).name})")
         return 0
     head_path = Path(adapters_dir) / ptr["file"]
     if not head_path.is_file():
