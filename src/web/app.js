@@ -292,9 +292,10 @@ function buildVideoInto(st, cfg, slot) {
     st.currentHlsInstance = null;
   }
   // Idle slot: the collector narrowed the grid because no country can
-  // field this many live cameras right now. Show the honest state
-  // instead of a dead player (preserve the KPI overlay like below).
-  if (!cfg.active_cam) {
+  // field this many live cameras right now (explicit idle flag from
+  // config/grid - local picker slots carry no active_cam field and must
+  // NOT match). Show the honest state instead of a dead player.
+  if (cfg.idle) {
     for (const el of Array.from(st.videoWrap.children)) {
       if (el !== st.overlay) el.remove();
     }
@@ -559,7 +560,7 @@ function applyGridConfig(cfg) {
                        slotCfg.display_area);
       buildVideoInto(st, slotCfg, st.slot);
     }
-    if (slotCfg.idle || !slotCfg.active_cam) {
+    if (slotCfg.idle) {
       // Grid narrowed: this slot is deliberately idle, not "on fallback".
       st.fallbackBadge.textContent = "standby";
       st.fallbackBadge.title =
