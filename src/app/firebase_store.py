@@ -19,17 +19,6 @@ switch doesn't fragment the dashboard's history:
                              active_embed, active_hls, display_area}, ... ] }
                       The dashboard subscribes to this and re-renders when a
                       fallback happens.
-  config/profile_{cam_id}
-                      hour-of-week activity baseline per PHYSICAL CAMERA
-                      (Welford mean/std per (dow, hour) bucket, per metric).
-                      Keyed by cam - not slot - so the learned week-shape
-                      belongs to the scene and survives fallback swaps.
-                      Written by the collector every ~30 min, loaded on
-                      startup so the contextual anomaly check survives
-                      restarts. (Legacy profile_{slot_id} docs from before
-                      the scene-keyed refactor are ignored; cams re-bootstrap
-                      from history once and re-persist under their own key.)
-
 Anomalous samples additionally carry an `anomaly` map:
   { kind: spike|drop|contextual_spike|contextual_drop, metric: person|vehicles,
     window: rolling|hourly, z, observed, expected, bucket? }
@@ -153,8 +142,8 @@ class FirebaseStore:
 
     def recent_history(self, since_iso: str, limit_docs: int = 2000) -> list[dict]:
         """History docs with ts >= since_iso, ascending. Single range query on
-        `ts` - no composite index needed. Used on startup to reseed rolling
-        anomaly windows and (once) bootstrap the hour-of-week profiles."""
+        `ts` - no composite index needed. Used on startup to reseed the
+        camera observation log for the returning-visitor gates."""
         col = self.db.collection(self.history)
         try:
             from google.cloud.firestore_v1.base_query import FieldFilter
@@ -163,20 +152,6 @@ class FirebaseStore:
             q = col.where("ts", ">=", since_iso)
         q = q.order_by("ts").limit(limit_docs)
         return [d.to_dict() for d in q.stream()]
-
-    def load_slot_profile(self, key: str) -> dict | None:
-        """Read the persisted hour-of-week profile for a key (None if absent).
-
-        The collector passes cam_ids since the scene-keyed refactor; the name
-        keeps the historical "slot" wording for API compatibility.
-        """
-        snap = self.db.collection(self.config).document(f"profile_{key}").get()
-        return snap.to_dict() if snap.exists else None
-
-    def save_slot_profile(self, key: str, payload: dict) -> None:
-        """Overwrite the persisted hour-of-week profile for a key (cam_id)."""
-        doc = {**payload, "updated_at": dt.datetime.now(dt.timezone.utc)}
-        self.db.collection(self.config).document(f"profile_{key}").set(doc)
 
     def upload_snapshot(self, path: str, jpeg_bytes: bytes) -> str | None:
         """Upload JPEG bytes to Storage at `snapshots/{path}`. Return public URL.

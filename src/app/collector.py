@@ -6,19 +6,13 @@ camera (with fallback), runs YOLO on a short frame burst (median count), updates
 the re-ID registry, and writes the result to Firestore (keyed by slot_id, not
 cam_id). The HTML dashboard subscribes via onSnapshot and updates in real time.
 
-Anomaly detection, two layers x two metrics (people AND vehicles):
-  * rolling window (median + MAD robust z): sudden spikes, and drops below a
-    busy baseline - "the street just emptied / flooded vs 20 minutes ago";
-  * hour-of-week profile (Welford mean/std per (dow, hour), Turkey local time):
-    contextual anomalies - "this is not what a Wednesday 14:00 looks like
-    here". Persisted to Firestore so restarts keep the learned baseline.
-Operational gating on top of the statistics: verdicts must persist for
-`--anomaly-confirm` consecutive samples, the move must be large relative to
-the scene's own baseline (not just in absolute terms), and both layers are
-keyed to the PHYSICAL CAMERA - a fallback swap starts a short warmup on the
-new scene instead of comparing two different streets against each other.
-Both layers restore their state from Firestore on startup, so a service
-restart doesn't re-warm from zero.
+Anomaly detection is OPERATIONAL, not statistical: check_scene_anomalies
+flags extreme load (crowd/vehicle surges past hard gates), an obstructed
+lens and a feed gone dark, each with per-camera cooldowns and a daily
+budget warning. (An earlier rolling-z + hour-of-week baseline pair was
+removed 2026-07-18: its verdicts had been muted since the operator ruled
+"busier than usual" is weather, not an anomaly - it only cost Firestore
+writes.)
 
     python -m app.collector --interval 20
 
@@ -109,21 +103,6 @@ RETURNING_MAX_UNOBSERVED_FRAC  = 0.5
 # entity's new box overlaps its previous box above this IoU, it never left.
 RETURNING_STATIC_IOU           = 0.5
 
-# ---- Anomaly metrics ---------------------------------------------------------
-# "Business activity" on these cameras is foot traffic AND vehicle traffic, so
-# the collector tracks the two series independently, each with gates scaled to
-# its typical magnitude. A spike of buses at the otogar is exactly as
-# reportable as a crowd at the market.
-#
-# Gates are deliberately conservative for OPERATIONAL use: an event must be
-# large in absolute terms (min_value/min_delta), large RELATIVE to the scene's
-# own baseline (rel_delta x median), and must persist for `confirm_samples`
-# consecutive samples. A single family stepping off a bus is not an event; a
-# crowd that is still there 40 s later is.
-ANOMALY_METRICS = {
-    "person":   dict(min_value=8, min_delta=5.0, drop_min_baseline=8.0),
-    "vehicles": dict(min_value=6, min_delta=4.0, drop_min_baseline=6.0),
-}
 # How many anomaly verdicts per physical camera per day is "normal operations".
 # Beyond this the collector logs a loud warning - the gates are miscalibrated
 # for that scene and the operator should know before trusting the feed.
@@ -664,372 +643,6 @@ class CamObservationLog:
         return min(unobserved, window_sec)
 
 
-def _median(xs) -> float:
-    s = sorted(xs)
-    m = len(s)
-    return float(s[m // 2]) if m % 2 else (s[m // 2 - 1] + s[m // 2]) / 2.0
-
-
-def robust_stats(xs) -> tuple[float, float]:
-    """(median, MAD-based spread). 1.4826*MAD estimates std for normal data,
-    but unlike mean/std it barely moves when a few outliers sit in the window -
-    so one previous spike in the history can no longer mask the next one, and
-    a single decode glitch can no longer trigger a false alarm."""
-    med = _median(xs)
-    mad = _median([abs(x - med) for x in xs])
-    return med, 1.4826 * mad
-
-
-class AnomalyTracker:
-    """Rolling-window detector for ONE metric using robust (median/MAD) z-scores.
-
-    Verdict kinds:
-      'spike' - value far ABOVE the recent window (crowd surge, gathering);
-      'drop'  - value far BELOW a busy window (street suddenly emptied). Only
-                fires when the recent median is itself substantial
-                (drop_min_baseline), so a quiet street going to zero is silent.
-
-    Keys are "{slot_id}|{cam_id}": the window belongs to the PHYSICAL SCENE.
-    Keying by slot alone (the old behavior) meant a fallback swap compared a
-    quiet park against a busy market's baseline and flagged a storm of fake
-    drops/spikes in both directions; a swap now simply starts a short warmup
-    on the new camera's own window.
-
-    Gates, all of which must pass:
-      * value >= min_value (absolute - tiny scenes can't alarm);
-      * |delta| >= max(min_delta, rel_delta * median) - the move must be large
-        relative to the scene's own level, so a group of 6 on a street whose
-        median is 2 no longer counts as an "event";
-      * robust |z| >= z_spike / z_drop with spread floored at mad_floor
-        (near-constant windows have MAD 0; without a real floor any +2 change
-        scores an absurd z);
-      * the same verdict kind must repeat for `confirm_samples` CONSECUTIVE
-        samples - a one-sample blip (bus unloading, decode glitch) is not an
-        operational event;
-    then a per-key cooldown throttles repeats.
-    """
-
-    def __init__(self, metric: str = "person", window: int = 30, warmup: int = 10,
-                 z_spike: float = 3.5, z_drop: float = 3.0,
-                 min_value: float = 5, min_delta: float = 5.0,
-                 rel_delta: float = 0.8, confirm_samples: int = 2,
-                 drop_min_baseline: float = 8.0, mad_floor: float = 2.0,
-                 cooldown_sec: float = 300, stale_after_sec: float = 600,
-                 **legacy):
-        # Pre-robust kwarg names still arrive from older callers/notebooks.
-        if "z_threshold" in legacy:
-            z_spike = legacy.pop("z_threshold")
-        if "min_people" in legacy:
-            min_value = legacy.pop("min_people")
-        legacy.pop("spike_only", None)   # drops now have their own gates
-        legacy.pop("min_std", None)      # superseded by mad_floor
-        if legacy:
-            raise TypeError(f"unknown AnomalyTracker kwargs: {sorted(legacy)}")
-        self.metric            = metric
-        self.window            = window
-        self.warmup            = warmup
-        self.z_spike           = z_spike
-        self.z_drop            = z_drop
-        self.min_value         = min_value
-        self.min_delta         = min_delta
-        self.rel_delta         = rel_delta
-        self.confirm_samples   = max(1, int(confirm_samples))
-        self.drop_min_baseline = drop_min_baseline
-        self.mad_floor         = mad_floor
-        self.cooldown_sec      = cooldown_sec
-        # A window that hasn't been fed for this long describes a different
-        # regime (the slot was on a fallback for hours, the stream was down
-        # over a day/night transition). It is cleared and re-warms instead of
-        # scoring the present against a stale past.
-        self.stale_after_sec   = stale_after_sec
-        self._history: dict[str, list[float]] = {}
-        self._last_flagged: dict[str, float] = {}
-        self._last_push: dict[str, float] = {}
-        # key -> (candidate kind, consecutive samples it has persisted)
-        self._pending: dict[str, tuple[str, int]] = {}
-
-    def seed(self, key: str, values) -> int:
-        """Preload the rolling window from persisted history (restart recovery)
-        without evaluating any of the values. Returns how many were kept."""
-        vals = [float(v) for v in values if v is not None][-self.window:]
-        self._history[key] = vals
-        return len(vals)
-
-    def push_and_check(self, key: str, value: float | None) -> tuple[bool, dict]:
-        if value is None:
-            return False, {"reason": "no_sample"}
-        hist = self._history.setdefault(key, [])
-        now_push  = time.time()
-        last_push = self._last_push.get(key)
-        self._last_push[key] = now_push
-        stale = (last_push is not None
-                 and now_push - last_push > self.stale_after_sec)
-        if stale and hist:
-            # e.g. the slot spent hours on a fallback and just returned to
-            # this camera: the stored window is another time-of-day's regime.
-            hist.clear()
-            self._pending.pop(key, None)
-        debug: dict = {"metric": self.metric, "window_size": len(hist),
-                       "value": float(value)}
-        if stale:
-            debug["window_was_stale"] = True
-        try:
-            if len(hist) < self.warmup:
-                self._pending.pop(key, None)
-                return False, {**debug, "reason": "warmup"}
-            med, spread = robust_stats(hist)
-            spread = max(spread, self.mad_floor)
-            delta = value - med
-            z = delta / spread
-            # Both the absolute AND the scene-relative move floors must pass.
-            eff_min_delta = max(self.min_delta, self.rel_delta * med)
-            debug.update({"median": round(med, 2), "spread": round(spread, 2),
-                          "delta": round(delta, 2), "z": round(z, 2),
-                          "min_delta_effective": round(eff_min_delta, 2)})
-            kind = None
-            if (delta > 0 and value >= self.min_value
-                    and delta >= eff_min_delta and z >= self.z_spike):
-                kind = "spike"
-            elif (delta < 0 and med >= self.drop_min_baseline
-                    and -delta >= eff_min_delta and z <= -self.z_drop):
-                kind = "drop"
-            if kind is None:
-                self._pending.pop(key, None)
-                return False, {**debug, "reason": "within_norm"}
-            # Persistence gate: the SAME verdict kind must hold for
-            # confirm_samples consecutive samples before it becomes an event.
-            prev_kind, streak = self._pending.get(key, (kind, 0))
-            streak = streak + 1 if prev_kind == kind else 1
-            if streak < self.confirm_samples:
-                self._pending[key] = (kind, streak)
-                return False, {**debug, "reason": "pending_confirmation",
-                               "candidate_kind": kind, "streak": streak,
-                               "needed": self.confirm_samples}
-            self._pending.pop(key, None)
-            now  = time.time()
-            last = self._last_flagged.get(key, 0.0)
-            if now - last < self.cooldown_sec:
-                return False, {**debug, "reason": "cooldown", "suppressed_kind": kind,
-                               "cooldown_remaining": round(self.cooldown_sec - (now - last), 1)}
-            self._last_flagged[key] = now
-            return True, {**debug, "reason": "anomaly", "kind": kind,
-                          "expected": round(med, 1)}
-        finally:
-            hist.append(float(value))
-            if len(hist) > self.window:
-                hist.pop(0)
-
-
-class HourlyProfile:
-    """Hour-of-week baseline per (camera, metric): what is NORMAL here on a
-    Wednesday at 14:00?
-
-    The rolling window only remembers the last ~20 minutes, so a slow build-up
-    to an abnormal level - or a street inexplicably dead at rush hour - passes
-    it silently. This profile keeps a running mean/std (Welford) for each of
-    the 7x24 hour buckets in Turkey local time (UTC+3) and flags values far
-    outside the bucket's history once the bucket has enough samples to trust
-    (min_samples). Verdict kinds: 'contextual_spike' / 'contextual_drop'.
-    Buckets are hour-of-week, so day/night regimes get separate baselines by
-    construction (the `is_night` tag on records stays for offline analysis).
-
-    Keys are cam_ids (the physical scene), persisted to Firestore
-    (config/profile_{cam_id}) so restarts don't lose days of learned baseline.
-
-    Learning uses CLIPPED updates (see update()): the old exclude-flagged
-    policy meant a street that legitimately became busier never re-entered its
-    own baseline and kept flagging forever - a measured, self-reinforcing
-    false-positive loop. Clipping lets the bucket converge to a genuine new
-    regime over days while a short spike still can't drag it.
-    """
-
-    # Self-healing rebase: when the DETECTOR itself changes regime (a
-    # confidence threshold tuned looser by reviews, a higher imgsz, a better
-    # model), every count jumps and every hour bucket's old mean is simply
-    # wrong - the profile then cries "spike" on ordinary traffic for the
-    # weeks the clipped updates need to converge. That exact failure was
-    # observed live: 13+ "hourly spike vehicles observed 8-15 expected ~2-3"
-    # events per day. When a (cam, metric) pair accumulates REBASE_AFTER
-    # spike verdicts (including cooldown-suppressed ones) inside
-    # REBASE_WINDOW_SEC, the pair's buckets get their effective sample count
-    # cut to REBASE_N: new samples then land ~4x harder and the baseline
-    # re-converges within a day instead of weeks. A real once-a-day spike
-    # can't trigger this; sustained systematic disagreement does.
-    REBASE_WINDOW_SEC = 24 * 3600
-    REBASE_AFTER = 8
-    REBASE_N = 30
-
-    def __init__(self, min_samples: int = 30, z_spike: float = 3.5,
-                 z_drop: float = 3.0, std_floor: float = 1.0,
-                 cooldown_sec: float = 1800, clip_z: float = 3.0,
-                 n_max: int = 120):
-        self.min_samples  = min_samples
-        self.z_spike      = z_spike
-        self.z_drop       = z_drop
-        self.std_floor    = std_floor
-        self.cooldown_sec = cooldown_sec
-        self.clip_z       = clip_z
-        # Effective memory of a bucket. Without a cap, a new sample's weight
-        # (1/n) decays forever and an old bucket can no longer learn anything;
-        # capping n turns the accumulator into an exponentially-weighted
-        # Welford with a ~n_max-sample time constant. 120 ~= 1.3 occurrences
-        # of an hour-of-week bucket at a 40s interval: measured to silence a
-        # genuine regime change within ~a week (1 alert/day meanwhile) while
-        # a single wild sample still moves the mean by only ~2%.
-        self.n_max        = max(min_samples, n_max)
-        # key (cam_id) -> metric -> "dow_hour" -> [n, mean, m2]  (Welford)
-        self._slots: dict[str, dict[str, dict[str, list[float]]]] = {}
-        self._last_flagged: dict[tuple[str, str], float] = {}
-        # (key, metric) -> recent spike-verdict epochs / last rebase epoch
-        self._spike_times: dict[tuple[str, str], list[float]] = {}
-        self._last_rebase: dict[tuple[str, str], float] = {}
-
-    def _spread(self, mean: float, std: float) -> float:
-        """One spread definition for BOTH scoring and clip bounds - if these
-        ever diverge, values get clipped by a different envelope than the one
-        they're scored against and the baseline drifts from the detector."""
-        return max(std, self.std_floor, 0.15 * mean)
-
-    @staticmethod
-    def bucket_of(ts_utc: dt.datetime, tz=None) -> tuple[str, str]:
-        local = ts_utc.astimezone(tz or TURKEY_TZ)
-        return f"{local.weekday()}_{local.hour}", f"{_DOW[local.weekday()]} {local.hour:02d}:00"
-
-    def stats(self, key: str, metric: str,
-              ts_utc: dt.datetime) -> tuple[str, str, int, float, float]:
-        """(bucket, label, n, mean, std) for the bucket this timestamp falls in."""
-        bucket, label = self.bucket_of(ts_utc, cam_tzinfo(key))
-        cell = self._slots.get(key, {}).get(metric, {}).get(bucket)
-        if not cell or cell[0] < 1:
-            return bucket, label, 0, 0.0, 0.0
-        n, mean, m2 = cell
-        std = math.sqrt(m2 / n) if n > 1 else 0.0
-        return bucket, label, int(n), mean, std
-
-    def check(self, key: str, metric: str, ts_utc: dt.datetime,
-              value: float | None, *, min_delta: float,
-              drop_min_baseline: float) -> tuple[bool, dict]:
-        """Evaluate `value` against its hour-of-week bucket (does NOT update the
-        bucket - call update() afterwards so a value never scores itself).
-        `key` is the physical cam_id since the scene-keyed refactor."""
-        bucket, label, n, mean, std = self.stats(key, metric, ts_utc)
-        debug: dict = {"metric": metric, "bucket": label, "bucket_n": n,
-                       "bucket_mean": round(mean, 2), "bucket_std": round(std, 2)}
-        if value is None:
-            return False, {**debug, "reason": "no_sample"}
-        if n < self.min_samples:
-            return False, {**debug, "reason": "bucket_warmup"}
-        # Floor the spread: tiny-count buckets are near-deterministic and a
-        # +2 change would otherwise score as a huge z.
-        spread = self._spread(mean, std)
-        delta = value - mean
-        z = delta / spread
-        debug.update({"z": round(z, 2), "delta": round(delta, 2)})
-        kind = None
-        if delta > 0 and delta >= min_delta and z >= self.z_spike:
-            kind = "contextual_spike"
-        elif (delta < 0 and mean >= drop_min_baseline
-                and -delta >= min_delta and z <= -self.z_drop):
-            kind = "contextual_drop"
-        if kind is None:
-            return False, {**debug, "reason": "within_norm"}
-        now  = time.time()
-        cool_key = (key, metric)
-        # Feed the rebase detector on EVERY spike verdict - suppressed ones
-        # included, because during a detector regime change the cooldown
-        # hides most of the evidence that the baseline is systematically off.
-        if kind == "contextual_spike":
-            times = self._spike_times.setdefault(cool_key, [])
-            times.append(now)
-            cutoff = now - self.REBASE_WINDOW_SEC
-            self._spike_times[cool_key] = times = [t for t in times if t >= cutoff]
-            if (len(times) >= self.REBASE_AFTER
-                    and now - self._last_rebase.get(cool_key, float("-inf"))
-                        >= self.REBASE_WINDOW_SEC):
-                self._rebase(key, metric)
-                self._last_rebase[cool_key] = now
-                self._spike_times[cool_key] = []
-                debug["rebased"] = True
-                print(f"  * profile rebase: {key}/{metric} - "
-                      f"{self.REBASE_AFTER}+ spikes in 24h means the baseline "
-                      f"is stale (detector regime change); bucket weights cut "
-                      f"to {self.REBASE_N} for fast re-convergence")
-        last = self._last_flagged.get(cool_key, 0.0)
-        if now - last < self.cooldown_sec:
-            return False, {**debug, "reason": "cooldown", "suppressed_kind": kind}
-        self._last_flagged[cool_key] = now
-        return True, {**debug, "reason": "anomaly", "kind": kind,
-                      "expected": round(mean, 1)}
-
-    def _rebase(self, key: str, metric: str) -> None:
-        """Cut every bucket's effective sample count to REBASE_N so incoming
-        samples carry ~4x their previous weight. m2 is scaled by the same
-        factor (m2 is a SUM of squared deviations, proportional to n) so the
-        bucket's std - and therefore its clip envelope - is preserved."""
-        for cell in self._slots.get(key, {}).get(metric, {}).values():
-            n = cell[0]
-            if n > self.REBASE_N:
-                cell[2] *= self.REBASE_N / n
-                cell[0] = self.REBASE_N
-
-    def update(self, key: str, metric: str, ts_utc: dt.datetime,
-               value: float | None) -> None:
-        """Feed a sample into its hour-of-week bucket (`key` = cam_id).
-
-        Once a bucket is mature (n >= min_samples) the value is CLIPPED to
-        mean +/- clip_z * spread before entering the accumulator. A one-off
-        spike therefore barely moves the baseline, but a persistent regime
-        change keeps pushing the mean toward itself every sample and the
-        bucket converges within days - instead of the old behavior where
-        flagged samples were excluded outright and a legitimately-busier
-        street stayed "anomalous" forever.
-        """
-        if value is None:
-            return
-        bucket, _ = self.bucket_of(ts_utc, cam_tzinfo(key))
-        cell = (self._slots.setdefault(key, {})
-                .setdefault(metric, {})
-                .setdefault(bucket, [0, 0.0, 0.0]))
-        n, mean, m2 = cell
-        if n >= self.min_samples:
-            std = math.sqrt(m2 / n) if n > 1 else 0.0
-            spread = self._spread(mean, std)
-            lo, hi = mean - self.clip_z * spread, mean + self.clip_z * spread
-            value = min(max(value, lo), hi)
-        if cell[0] >= self.n_max:
-            # Cap the effective sample count: shed one sample's worth of
-            # weight so the incoming value always carries >= 1/n_max.
-            f = (self.n_max - 1) / cell[0]
-            cell[2] *= f
-            cell[0] = self.n_max - 1
-        cell[0] += 1
-        d = value - cell[1]
-        cell[1] += d / cell[0]
-        cell[2] += d * (value - cell[1])
-
-    # ---- persistence -------------------------------------------------------
-
-    def to_payload(self, key: str) -> dict:
-        metrics = {}
-        for metric, buckets in self._slots.get(key, {}).items():
-            metrics[metric] = {b: {"n": c[0], "mean": c[1], "m2": c[2]}
-                               for b, c in buckets.items()}
-        return {"slot": key, "tz": "UTC+3", "metrics": metrics}
-
-    def load_payload(self, key: str, payload: dict) -> int:
-        """Merge a persisted payload back in. Returns #buckets loaded."""
-        loaded = 0
-        for metric, buckets in (payload.get("metrics") or {}).items():
-            dst = self._slots.setdefault(key, {}).setdefault(metric, {})
-            for b, c in (buckets or {}).items():
-                try:
-                    dst[b] = [int(c["n"]), float(c["mean"]), float(c["m2"])]
-                    loaded += 1
-                except (KeyError, TypeError, ValueError):
-                    continue
-        return loaded
-
-
 def _ts_filename(ts_iso: str) -> str:
     return ts_iso.replace("-", "").replace(":", "").replace("T", "_")[:15]
 
@@ -1292,13 +905,6 @@ def _passes_returning_gates(r, gap_min_sec: float, sim_min: float,
     return True, "save"
 
 
-def _window_key(slot_id: str, cam_id: str) -> str:
-    """Rolling-window key: the physical scene as seen from a grid slot. The
-    ONE place this format lives - sample_slot and _restore_state must agree
-    or restarts silently seed windows nobody reads."""
-    return f"{slot_id}|{cam_id}"
-
-
 # Process-wide state for the returning gates and operator warnings.
 # _OBS_LOG starts blind and is backfilled from Firestore history on startup
 # (_restore_state), so a restart doesn't suppress long-gap returns for hours;
@@ -1307,10 +913,6 @@ _OBS_LOG = CamObservationLog()
 _ENTITY_LAST_BOX: dict[tuple[str, int], tuple[dict, float]] = {}
 _ENTITY_BOX_CAP = 20_000
 _RETURNING_LAST_SAVE: dict[str, dict] = {}   # slot_id -> {eid: last_save_ts}
-# Two slots that fell back onto the same cam would double-feed its hourly
-# profile every round; (cam_id, metric) -> wall-clock of last accepted feed.
-_PROFILE_LAST_FEED: dict[tuple[str, str], float] = {}
-PROFILE_FEED_MIN_GAP_S = 15.0
 # cam_id -> [turkey-local-date, count, warned] for the daily budget warning.
 # In-memory: a restart resets the count, so treat the warning as a floor -
 # the dashboard's "(N in 24h)" badge is the authoritative daily number.
@@ -1382,8 +984,6 @@ def _handle_loiter(firebase, alerts: AlertSink | None, slot: dict,
 
 def sample_slot(model, slot: dict, cam_id: str, firebase,
                 reid: ReidStore | None = None, conf: float = 0.30,
-                anomaly=None,
-                profile: HourlyProfile | None = None,
                 presence: PresenceTracker | None = None,
                 alerts: AlertSink | None = None,
                 imgsz: int | None = DEFAULT_IMGSZ,
@@ -1399,9 +999,8 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
 
     Detection runs on a short frame burst and keeps the median count (see
     detect_core.detect_burst), so a single noisy frame can no longer move the
-    number the dashboard shows. `anomaly` accepts either one AnomalyTracker
-    (legacy people-only callers) or a {metric: tracker} dict; `profile` adds
-    the hour-of-week contextual check on top of the rolling window.
+    number the dashboard shows. Anomalies are decided by
+    check_scene_anomalies (extreme load / obstruction / darkness).
 
     A camera can carry its own calibrated "conf" (see cameras.py); otherwise
     the global `conf` applies.
@@ -1422,14 +1021,6 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
         print(f"[{ts}] {slot_id}: unknown cam_id {cam_id!r}, skipping")
         return False
     cam_conf = cam.get("conf", conf)
-
-    trackers: dict[str, AnomalyTracker] | None
-    if anomaly is None:
-        trackers = None
-    elif isinstance(anomaly, AnomalyTracker):
-        trackers = {anomaly.metric: anomaly}
-    else:
-        trackers = anomaly
 
     if _returning_last_save is None:
         _returning_last_save = _RETURNING_LAST_SAVE.setdefault(slot_id, {})
@@ -1610,40 +1201,9 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
             except Exception as e:
                 print(f"  ! live view save failed for {slot_id}: {e}")
 
-    # Anomaly gating keyed by the PHYSICAL SCENE. Rolling windows use
-    # "{slot_id}|{cam_id}" (fresh short warmup after a fallback swap instead of
-    # comparing two different streets against each other); hourly profiles use
-    # cam_id so the learned week-shape belongs to the camera, and two slots
-    # that fall back onto the same cam share one baseline + cooldown (no
-    # duplicate alerts for the same scene).
-    # The statistical layers (rolling z + hour-of-week profile) keep LEARNING
-    # here - their windows, baselines and self-rebase stay warm - but their
-    # spike/drop verdicts no longer flag anything: the operator ruled that
-    # "busier than this hour usually is" is weather, not an anomaly. What
-    # counts as an anomaly is decided by check_scene_anomalies (extreme
-    # load / camera obstructed / camera gone dark); returning visitors and
-    # prolonged presence continue to flow through the events feed.
-    if trackers is not None and ok:
-        wkey = _window_key(slot_id, cam_id)
-        for metric, tracker in trackers.items():
-            value = counts.get(metric)
-            flagged, _dbg = tracker.push_and_check(wkey, value)
-            if profile is not None:
-                gates = ANOMALY_METRICS.get(metric, ANOMALY_METRICS["person"])
-                profile.check(cam_id, metric, now_utc, value,
-                              min_delta=gates["min_delta"],
-                              drop_min_baseline=gates["drop_min_baseline"])
-                # Feed the bucket unless the rolling layer confirmed an
-                # outlier this very sample (shields immature buckets); the
-                # wall-clock dedup stops two slots that fell back onto the
-                # same cam from double-feeding the bucket each round.
-                feed_key = (cam_id, metric)
-                now_wall = time.time()
-                if (not flagged and now_wall - _PROFILE_LAST_FEED.get(feed_key, 0.0)
-                        >= PROFILE_FEED_MIN_GAP_S):
-                    _PROFILE_LAST_FEED[feed_key] = now_wall
-                    profile.update(cam_id, metric, now_utc, value)
-
+    # What counts as an anomaly is decided by check_scene_anomalies below
+    # (extreme load / camera obstructed / camera gone dark); returning
+    # visitors and prolonged presence flow through the events feed.
     if ok:
         scene = check_scene_anomalies(cam_id, counts, boxes,
                                       frame.shape if frame is not None else None,
@@ -1712,7 +1272,6 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
 # "one-off slot" so the record still lands in Firestore under a stable key.
 def sample_once(model, cam_id: str, cam: dict, firebase,
                 reid: ReidStore | None = None, conf: float = 0.35,
-                anomaly: AnomalyTracker | None = None,
                 save_snapshots: bool = True,
                 slot_id: str | None = None,
                 **kwargs) -> bool:
@@ -1721,7 +1280,7 @@ def sample_once(model, cam_id: str, cam: dict, firebase,
             "primary":      cam_id,
             "fallbacks":    []}
     return sample_slot(model, slot, cam_id, firebase, reid=reid, conf=conf,
-                       anomaly=anomaly, save_snapshots=save_snapshots, **kwargs)
+                       save_snapshots=save_snapshots, **kwargs)
 
 
 def _parse_ts(ts_iso) -> dt.datetime | None:
@@ -1731,100 +1290,31 @@ def _parse_ts(ts_iso) -> dt.datetime | None:
         return None
 
 
-def _restore_state(firebase, trackers: dict[str, AnomalyTracker],
-                   profile: HourlyProfile | None, slot_ids: set[str],
-                   cam_ids: set[str],
-                   legacy_slot_of_primary: dict[str, str] | None = None) -> None:
+def _restore_state(firebase, slot_ids: set[str]) -> None:
     """Rebuild in-memory analysis state from Firestore after a (re)start.
 
-    1. Rolling windows: RECENT footfall docs (within the trackers' staleness
-       horizon - older samples describe another regime and would be cleared
-       on the first push anyway) reseed each (slot, cam) window.
-    2. Camera observation log: every ok sample's timestamp is replayed so the
-       returning-visitor gate knows the cameras WERE being watched before the
-       restart - otherwise long-gap returns are suppressed for hours after
-       every service bounce.
-    3. Hourly profiles: persisted per-CAMERA profile docs are loaded; a
-       primary cam with no cam-keyed doc falls back to its slot's legacy
-       pre-refactor doc (weeks of learned baseline beat a 24h bootstrap),
-       and only then to bootstrapping from the last 24h of history. Empty
-       bootstrap results are NOT saved - persisting a {} profile would make
-       the cam permanently "missing" and re-trigger the 10k-doc bootstrap
-       read on every restart.
+    Camera observation log: every ok sample's timestamp is replayed so the
+    returning-visitor gate knows the cameras WERE being watched before the
+    restart - otherwise long-gap returns are suppressed for hours after
+    every service bounce.
     """
     now = dt.datetime.now(dt.timezone.utc)
-    stale_s = max(t.stale_after_sec for t in trackers.values()) if trackers else 600
     try:
         since = (now - dt.timedelta(hours=1)).isoformat()
         docs = firebase.recent_history(since, limit_docs=600)
-        window_since = (now - dt.timedelta(seconds=stale_s)).isoformat()
-        by_key: dict[str, list[dict]] = {}
         obs_epochs: dict[str, list[float]] = {}
         for d in docs:
             if not (d.get("ok") and d.get("slot") in slot_ids and d.get("cam_id")):
                 continue
-            t = _parse_ts(d.get("ts"))
-            if t is not None:
-                obs_epochs.setdefault(d["cam_id"], []).append(t.timestamp())
-            if (d.get("ts") or "") >= window_since:
-                by_key.setdefault(_window_key(d["slot"], d["cam_id"]), []).append(d)
+            ts = _parse_ts(d.get("ts"))
+            if ts is not None:
+                obs_epochs.setdefault(d["cam_id"], []).append(ts.timestamp())
         for cid, epochs in obs_epochs.items():
             _OBS_LOG.seed(cid, epochs)
         if obs_epochs:
             print(f"  observation log seeded for {len(obs_epochs)} cam(s)")
-        for key, rows in by_key.items():
-            rows.sort(key=lambda r: r.get("ts") or "")
-            for metric, tracker in trackers.items():
-                kept = tracker.seed(key, [r.get(metric) for r in rows])
-                if kept:
-                    print(f"  restored {kept} samples -> {key}/{metric} window")
     except Exception as e:
-        print(f"  ! rolling-window restore skipped ({e})")
-
-    if profile is None:
-        return
-    legacy_slot_of_primary = legacy_slot_of_primary or {}
-    missing: list[str] = []
-    for cid in sorted(cam_ids):
-        payload = None
-        try:
-            payload = firebase.load_slot_profile(cid)
-            if not payload and cid in legacy_slot_of_primary:
-                payload = firebase.load_slot_profile(legacy_slot_of_primary[cid])
-        except Exception as e:
-            print(f"  ! profile load failed for {cid} ({e})")
-        if payload and profile.load_payload(cid, payload):
-            print(f"  loaded hourly profile for cam {cid}")
-        else:
-            missing.append(cid)
-    if not missing:
-        return
-    try:
-        since = (now - dt.timedelta(hours=24)).isoformat()
-        docs = firebase.recent_history(since, limit_docs=10_000)
-        n = 0
-        for d in docs:
-            cid = d.get("cam_id")
-            if not d.get("ok") or cid not in missing:
-                continue
-            ts = _parse_ts(d.get("ts"))
-            if ts is None:
-                continue
-            for metric in trackers:
-                profile.update(cid, metric, ts, d.get(metric))
-            n += 1
-        print(f"  bootstrapped hourly profile for {', '.join(missing)} "
-              f"from {n} history docs")
-        for cid in missing:
-            payload = profile.to_payload(cid)
-            if not payload.get("metrics"):
-                continue   # nothing learned - don't persist an empty doc
-            try:
-                firebase.save_slot_profile(cid, payload)
-            except Exception as e:
-                print(f"  ! profile save failed for {cid} ({e})")
-    except Exception as e:
-        print(f"  ! profile bootstrap skipped ({e})")
+        print(f"  ! observation-log restore skipped ({e})")
 
 
 def main() -> None:
@@ -1870,26 +1360,6 @@ def main() -> None:
                     help="delete every file under web/snapshots/{anomalies,returning}/* "
                          "before starting (local mode only; Storage cleanup uses the "
                          "lifecycle rule)")
-    ag = ap.add_argument_group("anomaly gating (rolling window, robust z on median+MAD)")
-    ag.add_argument("--anomaly-z",          type=float, default=3.5,
-                    help="robust z a spike must reach")
-    ag.add_argument("--anomaly-drop-z",     type=float, default=3.0,
-                    help="robust |z| a drop must reach (below a busy baseline)")
-    ag.add_argument("--anomaly-window",     type=int,   default=30)
-    ag.add_argument("--anomaly-min-people", type=int,
-                    default=ANOMALY_METRICS["person"]["min_value"])
-    ag.add_argument("--anomaly-min-delta",  type=float,
-                    default=ANOMALY_METRICS["person"]["min_delta"])
-    ag.add_argument("--anomaly-cooldown",   type=float, default=300.0)
-    ag.add_argument("--anomaly-confirm", type=int, default=2,
-                    help="consecutive abnormal samples required before flagging")
-    pg = ap.add_argument_group("hour-of-week contextual baseline")
-    pg.add_argument("--no-profile", action="store_true",
-                    help="disable the hour-of-week contextual anomaly check")
-    pg.add_argument("--profile-min-samples", type=int, default=30,
-                    help="bucket samples required before contextual checks fire")
-    pg.add_argument("--profile-save-min", type=float, default=30.0,
-                    help="minutes between profile persists to Firestore")
     rg = ap.add_argument_group("returning-visitor gating")
     rg.add_argument("--returning-gap-min",       type=float,
                     default=RETURNING_GAP_SEC / 60.0,
@@ -1989,34 +1459,6 @@ def main() -> None:
         except Exception as e:
             print(f"reid: prune failed ({e})")
 
-    # CLI overrides flow INTO ANOMALY_METRICS so both detection layers (the
-    # rolling trackers here and profile.check inside sample_slot, which reads
-    # the same dict) see identical gates - previously --anomaly-min-delta
-    # silently applied to the rolling layer only.
-    ANOMALY_METRICS["person"]["min_value"] = args.anomaly_min_people
-    ANOMALY_METRICS["person"]["min_delta"] = args.anomaly_min_delta
-
-    # One rolling tracker per metric; gates scale to each metric's magnitude.
-    trackers: dict[str, AnomalyTracker] = {}
-    for metric, gates in ANOMALY_METRICS.items():
-        trackers[metric] = AnomalyTracker(
-            metric            = metric,
-            window            = args.anomaly_window,
-            z_spike           = args.anomaly_z,
-            z_drop            = args.anomaly_drop_z,
-            min_value         = gates["min_value"],
-            min_delta         = gates["min_delta"],
-            drop_min_baseline = gates["drop_min_baseline"],
-            cooldown_sec      = args.anomaly_cooldown,
-            confirm_samples   = args.anomaly_confirm,
-        )
-
-    profile = None if args.no_profile else HourlyProfile(
-        min_samples = args.profile_min_samples,
-        z_spike     = args.anomaly_z,
-        z_drop      = args.anomaly_drop_z,
-    )
-
     presence = None if args.no_loiter else PresenceTracker(
         person_sec  = args.loiter_person_min * 60,
         vehicle_sec = args.loiter_vehicle_min * 60,
@@ -2039,18 +1481,8 @@ def main() -> None:
     returning_gap_sec       = args.returning_gap_min * 60
     returning_cooldown_sec  = args.returning_per_entity_cooldown_min * 60
 
-    # Every camera that can appear in ANY country's grid owns its own
-    # baseline (the grid is country-generic - a Thailand or Japan camera
-    # needs its hour-of-week profile restored/persisted too, not just
-    # Turkey's).
-    all_cam_ids = {c for pool in director.pools.values() for c in pool.pool}
-    # Pre-refactor profiles were keyed by slot; a slot's learned weeks of
-    # baseline belong to its PRIMARY cam.
-    legacy_slot_of_primary = {s["primary"]: s["slot_id"] for s in GRID_SLOTS}
-
     print("Restoring analysis state from Firestore...")
-    _restore_state(firebase, trackers, profile, set(slot_ids), all_cam_ids,
-                   legacy_slot_of_primary)
+    _restore_state(firebase, set(slot_ids))
 
     # Publish the initial grid config so the dashboard renders immediately.
     slots_meta = [_slot_metadata(s, assignment[s["slot_id"]]) for s in GRID_SLOTS]
@@ -2064,10 +1496,7 @@ def main() -> None:
     print(f"interval={args.interval}s, imgsz={args.imgsz}, burst={args.burst}, "
           f"reid={'on' if reid else 'off'}, conf={args.conf}, "
           f"snapshots={'on' if save_snapshots else 'off'}")
-    print(f"anomaly metrics: {', '.join(trackers)} | rolling robust-z "
-          f"(spike>={args.anomaly_z}, drop<=-{args.anomaly_drop_z}, "
-          f"confirm={args.anomaly_confirm} consecutive) | "
-          f"hour-of-week profile: {'on' if profile else 'off'} | "
+    print(f"anomalies: scene gates (extreme load / obstruction / dark) | "
           f"budget warn: >{ANOMALY_BUDGET_PER_DAY}/cam/day")
     print(f"fallback: {FALLBACK_MAX_FAILURES} misses to advance (tvkur: 1), "
           f"retry primary every {FALLBACK_RETRY_MINUTES} min.")
@@ -2086,25 +1515,8 @@ def main() -> None:
         print("  within the daily free-tier write quota - Firestore cost $0.")
     print("Ctrl+C to stop.\n")
 
-    profile_save_s   = max(60.0, args.profile_save_min * 60)
     reid_prune_s     = 6 * 3600
-    last_profile_save = time.time()
     last_reid_prune   = time.time()
-
-    def _persist_profiles() -> None:
-        if profile is None:
-            return
-        for cid in all_cam_ids:
-            payload = profile.to_payload(cid)
-            if not payload.get("metrics"):
-                # Never write an empty profile: it would shadow nothing useful
-                # and (worse, after a transient load failure) could clobber a
-                # good persisted baseline with {}.
-                continue
-            try:
-                firebase.save_slot_profile(cid, payload)
-            except Exception as e:
-                print(f"  ! profile save failed for {cid} ({e})")
 
     # Hot-reload cadence for review-driven camera overrides. Every N rounds
     # the collector re-reads data/blacklist_auto.json + data/confidence_boost.json
@@ -2202,8 +1614,7 @@ def main() -> None:
             for slot in GRID_SLOTS:
                 cam_id = assignment[slot["slot_id"]]
                 ok = sample_slot(model, slot, cam_id, firebase, reid=reid,
-                                 conf=args.conf, anomaly=trackers,
-                                 profile=profile, presence=presence,
+                                 conf=args.conf, presence=presence,
                                  alerts=alerts, imgsz=args.imgsz,
                                  burst=args.burst, burst_stride=args.burst_stride,
                                  save_snapshots=save_snapshots,
@@ -2283,9 +1694,6 @@ def main() -> None:
                              if stats.get("pending") else ""))
             except Exception as e:
                 print(f"  ! pool sync failed: {e}")
-            if profile is not None and time.time() - last_profile_save >= profile_save_s:
-                _persist_profiles()
-                last_profile_save = time.time()
             if reid is not None and time.time() - last_reid_prune >= reid_prune_s:
                 try:
                     removed = reid.prune(max_age_hours=args.reid_prune_hours)
@@ -2310,7 +1718,6 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nStopped.")
     finally:
-        _persist_profiles()   # don't lose up to 30 min of learned baseline
         if reid is not None:
             reid.close()
 
