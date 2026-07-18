@@ -98,8 +98,10 @@ def footfall_stats(records: list[dict]) -> list[dict]:
     """
     cams: dict[str, dict] = {}
     for r in records:
-        cam = str(r.get("cam_name") or r.get("cam_id") or "?")
-        c = cams.setdefault(cam, {"cam": cam, "samples": 0, "misses": 0,
+        cam_id = str(r.get("cam_id") or r.get("cam_name") or "?")
+        cam = str(r.get("cam_name") or cam_id)
+        c = cams.setdefault(cam_id, {"cam": cam, "cam_id": cam_id,
+                                  "samples": 0, "misses": 0,
                                   "peak_person": 0, "peak_person_ts": "",
                                   "peak_vehicles": 0, "typ_kmh": 0.0,
                                   "_spd": []})
@@ -128,6 +130,16 @@ def footfall_stats(records: list[dict]) -> list[dict]:
         spds = sorted(c.pop("_spd"))
         c["typ_kmh"] = spds[len(spds) // 2] if spds else 0.0
     return sorted(cams.values(), key=lambda c: c["peak_person"], reverse=True)
+
+
+def _cam_country(cam_id) -> str | None:
+    """Country of a physical camera, from the catalog; None when unknown
+    (keeps the digest importable in minimal test envs)."""
+    try:
+        from app.cameras import CAMERAS
+        return (CAMERAS.get(str(cam_id)) or {}).get("country")
+    except Exception:
+        return None
 
 
 def _fmt_ts(ts_iso: str) -> str:
@@ -272,13 +284,16 @@ def compose_digest(now_il: dt.datetime, window_hours: int,
         html.append("<table cellpadding='4' style='border-collapse:collapse'>")
         for g in event_groups:
             t = _fmt_ts(g["last_ts"])
-            row = (f"{g['label']} - {g['cam']}"
+            ctry = _cam_country(g.get("cam"))
+            tag = (f" [{ctry}]"
+                   if ctry and ctry != (grid or {}).get("country") else "")
+            row = (f"{g['label']} - {g['cam']}{tag}"
                    + (f" (x{g['count']})" if g["count"] > 1 else "")
                    + f", latest {t}")
             lines.append("  - " + row)
             html.append(
                 f"<tr><td style='border-bottom:1px solid #ddd'>{g['label']}</td>"
-                f"<td style='border-bottom:1px solid #ddd'>{g['cam']}</td>"
+                f"<td style='border-bottom:1px solid #ddd'>{g['cam']}{tag}</td>"
                 f"<td style='border-bottom:1px solid #ddd'>x{g['count']}</td>"
                 f"<td style='border-bottom:1px solid #ddd'>{t}</td></tr>")
         html.append("</table>")
@@ -287,13 +302,26 @@ def compose_digest(now_il: dt.datetime, window_hours: int,
         html.append("<p>Quiet - no anomalies in this window.</p>")
     lines.append("")
 
-    lines.append("Activity peaks:")
-    html.append("<h3 style='margin:14px 0 6px'>Activity peaks</h3>")
-    if cam_stats:
+    # Peaks: only cameras that DELIVERED frames. The collector's ladder
+    # walk probes dead cameras across every country and each probe writes
+    # an ok=0 doc - listing those as zero-rows buried the real story under
+    # 20+ lines of noise (operator complaint, 2026-07-18). Cameras from
+    # countries other than the active one (earlier legs of this window)
+    # get their own compact table instead of silently mixing in.
+    visible = [c for c in cam_stats if c.get("samples", 0) > 0]
+    dark = len(cam_stats) - len(visible)
+    active_c = (grid or {}).get("country")
+    act_rows = [c for c in visible
+                if _cam_country(c.get("cam_id")) in (active_c, None)]
+    other_rows = [c for c in visible if c not in act_rows]
+
+    def _peaks_table(rows, title):
+        lines.append(f"{title}:")
+        html.append(f"<h3 style='margin:14px 0 6px'>{title}</h3>")
         html.append("<table cellpadding='4' style='border-collapse:collapse'>"
                     "<tr><th align='left'>Camera</th><th>Peak people</th>"
                     "<th>Peak vehicles</th><th>Typical traffic</th></tr>")
-        for c in cam_stats:
+        for c in rows:
             when = f" at {_fmt_ts(c['peak_person_ts'])}" if c["peak_person_ts"] else ""
             spd = (f"~{c['typ_kmh']:.0f} km/h typical"
                    if c["typ_kmh"] > 0 else "-")
@@ -304,9 +332,22 @@ def compose_digest(now_il: dt.datetime, window_hours: int,
                         f"<td align='center'>{c['peak_vehicles']}</td>"
                         f"<td align='center'>{spd}</td></tr>")
         html.append("</table>")
-    else:
+
+    if act_rows:
+        _peaks_table(act_rows, f"Activity peaks - {label}")
+    if other_rows:
+        _peaks_table(other_rows,
+                     "Earlier in this window (before the grid settled here)")
+    if not visible:
+        lines.append("Activity peaks:")
         lines.append("  No footfall samples in this window - check the VM journal.")
-        html.append("<p>No footfall samples in this window - check the VM journal.</p>")
+        html.append("<h3 style='margin:14px 0 6px'>Activity peaks</h3>"
+                    "<p>No footfall samples in this window - check the VM journal.</p>")
+    if dark:
+        note = (f"{dark} more camera(s) were probed but delivered no frames "
+                f"(dead / geo-blocked) - omitted above.")
+        lines.append("  " + note)
+        html.append(f"<p style='color:#777;font-size:13px'>{note}</p>")
     lines.append("")
 
     lines.append("Learning:")

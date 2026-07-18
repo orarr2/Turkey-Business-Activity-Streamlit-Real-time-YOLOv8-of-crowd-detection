@@ -100,7 +100,7 @@ def compute(review_store) -> dict:
             rec = per_cls.setdefault(cls, {"tp": 0, "fp": 0, "fn": 0})
             if verdict == "correct":
                 correct += 1; rec["tp"] += 1
-            elif verdict == "wrong" or verdict.startswith("relabel:"):
+            elif verdict in ("wrong", "object") or verdict.startswith("relabel:"):
                 # relabel = real object, wrong class: a precision miss for
                 # the class the model CLAIMED (which is what per_cls keys on).
                 wrong += 1; rec["fp"] += 1
@@ -195,7 +195,7 @@ def learning_curve(review_store, batch_size: int = 5) -> list[dict]:
         signals = mistakes = 0
         for v in (fr.box_verdicts or {}).values():
             signals += 1
-            if v == "wrong" or v.startswith("relabel:"):
+            if v in ("wrong", "object") or v.startswith("relabel:"):
                 mistakes += 1
         miss = len(fr.missed_detections or ())
         signals += miss

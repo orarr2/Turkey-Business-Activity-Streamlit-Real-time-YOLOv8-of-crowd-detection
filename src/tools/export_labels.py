@@ -18,7 +18,8 @@ layout, ready for a fine-tune run on any machine with a GPU (or Colab):
 
 Label mapping per reviewed box:
   correct          -> keep the model's class
-  wrong            -> DROP the annotation (false positive; teaches background)
+  wrong / object   -> DROP the annotation (false positive / static thing;
+                      both teach background)
   relabel:<cls>    -> keep the box with the operator's class
   (no verdict)     -> keep the model's class as a weak label, unless
                       ``--reviewed-boxes-only`` - dropping an unverified real
@@ -45,7 +46,7 @@ _SRC_ROOT = Path(__file__).resolve().parent.parent
 
 # NATIVE COCO ids, not a compact 0..6 remap. This is what makes the
 # head-adapter loop work: training against nc=80 keeps the Detect head the
-# EXACT shape of stock yolov8s, so (a) the fine-tune starts from the
+# EXACT shape of the stock base model (yolov8n), so (a) the fine-tune starts from the
 # pretrained head instead of a random 7-class one - which matters enormously
 # on tiny operator-labeled datasets - and (b) the emitted head tensors
 # overlay cleanly onto the base model at inference (a 7-class head is
@@ -120,7 +121,7 @@ def collect_examples(reviews_path: Path, snapshots_root: Path,
         for b in meta.get("boxes") or []:
             v = verdicts.get(str(b.get("id")))
             cls = b.get("cls") or "?"
-            if v == "wrong":
+            if v in ("wrong", "object"):
                 dropped += 1
                 continue
             if isinstance(v, str) and v.startswith("relabel:"):
@@ -212,7 +213,7 @@ def main() -> None:
     print(f"  verdicts: {totals['kept']} kept · {totals['dropped']} dropped · "
           f"{totals['relabeled']} relabeled · {totals['weak']} weak · "
           f"{totals['added_fn']} operator-added")
-    print("  train: yolo detect train model=yolov8s.pt "
+    print("  train: yolo detect train model=yolov8n.pt "
           f"data={Path(args.out) / 'dataset.yaml'} epochs=10 imgsz=960")
 
 

@@ -35,22 +35,41 @@ def _val_metrics(model, data_yaml: str, imgsz: int) -> dict:
     per_class: dict[str, float] = {}
     try:
         names = model.names or {}
-        idxs = list(getattr(m.box, "ap_class_index", []) or [])
-        ap50 = list(getattr(m.box, "ap50", []) or [])
-        for ci, ap in zip(idxs, ap50):
-            per_class[str(names.get(int(ci), ci))] = round(float(ap), 4)
-    except Exception:
-        pass
+        # NOTE: `arr or []` on a numpy array raises "truth value of an
+        # array is ambiguous" - which the old except swallowed, silently
+        # emptying per_class and DISABLING the per-class regression gate
+        # (person/car zero-drop was never enforced). Length-check instead.
+        idxs = getattr(m.box, "ap_class_index", None)
+        ap50 = getattr(m.box, "ap50", None)
+        if idxs is not None and ap50 is not None:
+            for ci, ap in zip(list(idxs), list(ap50)):
+                per_class[str(names.get(int(ci), ci))] = round(float(ap), 4)
+    except Exception as e:
+        print(f"promote: per-class metrics unavailable "
+              f"({type(e).__name__}: {e})")
     return {"map50": round(float(m.box.map50), 4), "per_class": per_class}
+
+
+def _bucket_name_from_web_config() -> str | None:
+    """storageBucket out of web/firebase-config.js - inlined (no app.pool_sync
+    import) so the slim CI env never drags that module's dependency chain
+    into the publish path."""
+    import re
+    cfg = _SRC_ROOT / "web" / "firebase-config.js"
+    try:
+        m = re.search(r"storageBucket:\s*[\"']([^\"']+)[\"']", cfg.read_text())
+        return m.group(1) if m else None
+    except OSError:
+        return None
 
 
 def _storage_bucket():
     """Firebase Storage bucket via the Admin SDK (write access needed)."""
     import firebase_admin
     from firebase_admin import credentials, storage
-    from app.pool_sync import _bucket_name
     cred = os.environ.get("FIREBASE_CREDENTIALS")
-    bucket = os.environ.get("FIREBASE_STORAGE_BUCKET") or _bucket_name()
+    bucket = (os.environ.get("FIREBASE_STORAGE_BUCKET")
+              or _bucket_name_from_web_config())
     if not cred or not Path(cred).is_file():
         raise SystemExit("--publish needs FIREBASE_CREDENTIALS pointing at "
                          "the service-account json")
@@ -137,8 +156,17 @@ def main() -> None:
         if args.publish:
             # The reject verdict still belongs in the cumulative cloud
             # history (D9 full retention); pointer and head stay untouched.
-            adapters.publish_to_storage(_storage_bucket(), adir,
-                                        history_only=True)
+            # A history-upload hiccup must NOT fail the run - the verdict
+            # is already in history.jsonl + the run artifact, and the next
+            # run re-publishes the cumulative history anyway.
+            try:
+                adapters.publish_to_storage(_storage_bucket(), adir,
+                                            history_only=True)
+            except BaseException as e:
+                import traceback
+                traceback.print_exc()
+                print(f"promote: history publish failed ({type(e).__name__}) "
+                      f"- verdict preserved locally, continuing")
         _gh_summary(record)
         return
 
@@ -153,7 +181,15 @@ def main() -> None:
     for r in reasons:
         print(f"  - {r}")
     if args.publish:
-        n = adapters.publish_to_storage(_storage_bucket(), adir)
+        # A PROMOTED head that fails to publish is a real failure - the VM
+        # would never see it. Fail loudly with the full cause.
+        try:
+            n = adapters.publish_to_storage(_storage_bucket(), adir)
+        except BaseException:
+            import traceback
+            traceback.print_exc()
+            raise SystemExit("promote: PUBLISH FAILED for a promoted head - "
+                             "the VM cannot hot-load it; see traceback above")
         print(f"published {n} object(s) to Storage training/ - the VM "
               f"hot-loads it within a few rounds")
     _gh_summary(record)

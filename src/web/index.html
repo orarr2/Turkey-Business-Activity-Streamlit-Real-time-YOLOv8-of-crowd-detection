@@ -717,6 +717,8 @@
               <b id="fbs-wrong">0</b> wrong</span>
             <span class="fbs-box"><span class="dot" style="background:#f0a35e"></span>
               <b id="fbs-relabel">0</b> relabeled</span>
+            <span class="fbs-box"><span class="dot" style="background:#c084fc"></span>
+              <b id="fbs-object">0</b> object</span>
             <span class="fbs-box"><span class="dot" style="background:#4f8cff"></span>
               <b id="fbs-missed">0</b> missed</span>
           </div>
@@ -744,6 +746,8 @@
           <div class="btn-row">
             <button id="frame-save">save + next frame →</button>
             <button class="next" id="frame-skip">skip</button>
+            <button class="next" id="frame-undo" title="re-open the frame you
+              just saved to fix a mistaken verdict" disabled>↩ undo last</button>
           </div>
           <div class="review-status" id="review-status"></div>
           <div class="review-stats" id="review-stats">reviewed 0</div>
@@ -908,7 +912,12 @@
         if (hasImage) params.set("min_sim", String(strictness));
         const cls = getSelectedClasses();
         if (cls.length) params.set("classes", cls.join(","));
-        const from = $("search-from").value, to = $("search-to").value;
+        // datetime-local strings are LOCAL wall-clock; the server compares
+        // epoch seconds against file mtimes. Serializing the raw string let
+        // the server read local time as UTC and shifted the window hours
+        // into the future - every recent search returned 0 results.
+        const toEpoch = (v) => v ? String(Math.floor(new Date(v).getTime() / 1000)) : "";
+        const from = toEpoch($("search-from").value), to = toEpoch($("search-to").value);
         if (from) params.set("from", from);
         if (to)   params.set("to", to);
 
@@ -1073,7 +1082,9 @@
     const camEl = $("frame-cam"), pathEl = $("frame-path");
     const modeVerdictBtn = $("mode-verdict"), modeAddBtn = $("mode-add");
     const addClsSel = $("add-cls");
-    const saveBtn = $("frame-save"), skipBtn = $("frame-skip");
+    const saveBtn = $("frame-save"), skipBtn = $("frame-skip"),
+          undoBtn = $("frame-undo");
+    let lastSavedPath = null;
     const noteEl = $("review-note");
     const statusEl = $("review-status"), statsEl = $("review-stats");
     const framesWrap = $("frames-usage"), framesMb = $("frames-mb"),
@@ -1089,7 +1100,7 @@
           liveClearBtn = $("live-clear");
     const fbsU = $("fbs-untouched"), fbsC = $("fbs-correct"),
           fbsW = $("fbs-wrong"), fbsM = $("fbs-missed"),
-          fbsR = $("fbs-relabel");
+          fbsR = $("fbs-relabel"), fbsO = $("fbs-object");
     const stripEl = $("frame-strip");
     if (!canvas) return;
 
@@ -1134,6 +1145,7 @@
 
     function verdictColor(v) {
       if (v && v.startsWith("relabel:")) return "#f0a35e";
+      if (v === "object") return "#c084fc";
       return v === "correct" ? "#36d399" : v === "wrong" ? "#ef4444" : "#8b909a";
     }
 
@@ -1141,17 +1153,19 @@
       if (!current) { fbsU.textContent = fbsC.textContent =
           fbsW.textContent = fbsM.textContent = "0"; return; }
       const boxes = current.boxes || [];
-      let c = 0, w = 0, rl = 0;
+      let c = 0, w = 0, rl = 0, ob = 0;
       for (const b of boxes) {
         const v = boxVerdicts[String(b.id)];
         if (v === "correct") c++;
         else if (v === "wrong") w++;
+        else if (v === "object") ob++;
         else if (v && v.startsWith("relabel:")) rl++;
       }
       fbsC.textContent = c;
       fbsW.textContent = w;
+      if (fbsO) fbsO.textContent = ob;
       if (fbsR) fbsR.textContent = rl;
-      fbsU.textContent = boxes.length - c - w - rl;
+      fbsU.textContent = boxes.length - c - w - rl - ob;
       fbsM.textContent = missedBoxes.length;
     }
 
@@ -1170,7 +1184,7 @@
         const [x1, y1, x2, y2] = b.box;
         const v = boxVerdicts[String(b.id)];
         const col = v ? verdictColor(v) : (clsColor[b.cls] || "#e7e9ee");
-        ctx.lineWidth = v === "wrong" || v === "correct" ? 3 : 2;
+        ctx.lineWidth = v === "wrong" || v === "correct" || v === "object" ? 3 : 2;
         ctx.strokeStyle = col;
         ctx.strokeRect(x1 * scale, y1 * scale,
                        (x2 - x1) * scale, (y2 - y1) * scale);
@@ -1259,9 +1273,13 @@
         draw();
         return;
       }
-      // verdict mode - cycle: undef/relabel → correct → wrong → undef
+      // verdict mode - cycle: undef/relabel → correct → wrong → object → undef
+      // ("object" = a static thing - pole, building, divider - not a
+      //  mis-classed participant; trains as a drop, feeds the static
+      //  auto-blacklist, restores the old crop-reviewer nuance)
       const next = (cur === undefined || cur.startsWith("relabel:")) ? "correct"
-                 : cur === "correct" ? "wrong" : undefined;
+                 : cur === "correct" ? "wrong"
+                 : cur === "wrong" ? "object" : undefined;
       if (next) boxVerdicts[key] = next;
       else delete boxVerdicts[key];
       draw();
@@ -1504,6 +1522,8 @@
         });
         const data = await r.json();
         if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+        lastSavedPath = current.frame_path;
+        undoBtn.disabled = false;
         sessionSaved++;
         await refreshStats();
         await loadStrip();
@@ -1525,6 +1545,12 @@
     }
     saveBtn.addEventListener("click", submit);
     skipBtn.addEventListener("click", loadNext);
+    // Undo = re-open the frame just saved with its verdicts prefilled; a
+    // re-save simply overwrites the stored review (the store is keyed by
+    // frame path), so fixing a mistaken click is one hop back.
+    undoBtn.addEventListener("click", () => {
+      if (lastSavedPath) loadSpecific(lastSavedPath);
+    });
 
     async function refreshStats() {
       try {

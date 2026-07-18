@@ -380,8 +380,24 @@ function forceYouTubeLive(iframe) {
   };
   const nudge = () => { cmd("mute"); cmd("playVideo"); cmd("seekTo", [1e7, true]); };
   iframe.addEventListener("load", () => setTimeout(nudge, 700));
+  // 12 nudges over ~30s: Chrome staggers autoplay for several cross-origin
+  // iframes and the old 6x2.5s window sometimes expired before the last
+  // tile's player was ready - the operator found tiles frozen on load.
   let n = 0;
-  const iv = setInterval(() => { nudge(); if (++n >= 6) clearInterval(iv); }, 2500);
+  const iv = setInterval(() => { nudge(); if (++n >= 12) clearInterval(iv); }, 2500);
+  // Re-kick when the user returns to the tab: background tabs get their
+  // timers and autoplay throttled, so a dashboard opened then revisited
+  // minutes later could sit paused until a manual click.
+  window.__ytNudges = (window.__ytNudges || []);
+  window.__ytNudges.push(nudge);
+  if (!window.__ytVisHooked) {
+    window.__ytVisHooked = true;
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        for (const f of window.__ytNudges) { try { f(); } catch (_) {} }
+      }
+    });
+  }
 }
 
 function attachHls(st, video, cfg) {
@@ -469,12 +485,19 @@ function start(cfg) {
   }, (err) => console.warn("config/grid subscription failed:", err));
 
   // 4b. latest/{slot_id} -> KPI cards.
+  // LOCAL preview keys its tiles local_0..3 while every cloud doc is keyed
+  // slot_1..4 - without a join the KPIs, the activity index and the model
+  // view all stare at keys that don't exist and sit empty forever (that is
+  // exactly what happened after the grid refactor). cloudToTile() joins by
+  // the active camera when the local pick matches a cloud slot, else by
+  // position, so the cloud counts always land on SOME tile.
   const slotIds = new Set(GRID_SLOTS.map((s) => s.slot_id));
   onSnapshot(collection(db, "latest"), (snap) => {
     let alive = 0;
     for (const d of snap.docs) {
-      if (!slotIds.has(d.id)) continue;
-      const st  = tileState[d.id];
+      const tid = cloudToTile(d.id);
+      if (!tid || !slotIds.has(tid)) continue;
+      const st  = tileState[tid];
       if (!st) continue;
       const rec = d.data();
       const ageS = rec.ts ? Math.round((Date.now() - new Date(rec.ts).getTime()) / 1000) : null;
@@ -512,8 +535,9 @@ function start(cfg) {
     for (const d of snap.docs) {
       const r = d.data();
       if (!r.ok) continue;
-      if (!bySlot[r.slot]) continue;
-      bySlot[r.slot].push(r);
+      const tid = cloudToTile(r.slot);
+      if (!tid || !bySlot[tid]) continue;
+      bySlot[tid].push(r);
     }
     for (const slot of GRID_SLOTS) {
       const rows = bySlot[slot.slot_id].sort((a, b) => a.ts.localeCompare(b.ts));
@@ -547,8 +571,40 @@ function start(cfg) {
   }, (err) => console.warn("events subscription failed:", err));
 }
 
+// cloud slot_id -> local tile slot_id. Rebuilt on every config/grid change:
+// match by the active camera first (name or embed - the local picker may
+// have picked exactly what the collector runs), else fall back to position
+// (slot_N -> the N-th local tile). Identity in cloud mode.
+let cloudSlotMap = {};
+
+function cloudToTile(cloudId) {
+  if (!LOCAL_MODE) return cloudId;
+  if (cloudSlotMap[cloudId]) return cloudSlotMap[cloudId];
+  const m = /^slot_(\d+)$/.exec(cloudId || "");
+  const byPos = m ? GRID_SLOTS[Number(m[1]) - 1] : null;
+  return byPos ? byPos.slot_id : null;
+}
+
+function rebuildCloudSlotMap(cfg) {
+  cloudSlotMap = {};
+  if (!LOCAL_MODE || !cfg || !Array.isArray(cfg.slots)) return;
+  const taken = new Set();
+  for (const slotCfg of cfg.slots) {
+    const hit = GRID_SLOTS.find((s) =>
+        !taken.has(s.slot_id) &&
+        ((s.placeholder_name && s.placeholder_name === slotCfg.active_cam_name)
+         || (s.placeholder_embed && slotCfg.active_embed
+             && s.placeholder_embed === slotCfg.active_embed)));
+    if (hit) {
+      cloudSlotMap[slotCfg.slot_id] = hit.slot_id;
+      taken.add(hit.slot_id);
+    }
+  }
+}
+
 function applyGridConfig(cfg) {
   if (!cfg || !Array.isArray(cfg.slots)) return;
+  rebuildCloudSlotMap(cfg);
   for (const slotCfg of cfg.slots) {
     const st = tileState[slotCfg.slot_id];
     if (!st) continue;
@@ -587,6 +643,18 @@ function setLatest(st, d) {
   };
   set("person",   d.person);
   set("vehicles", d.vehicles);
+  // Honesty label (local preview): the video is YOUR picked camera, but
+  // counts/KPIs stream from whatever camera the CLOUD collector has in
+  // this slot. When the two differ, say so on the tile instead of letting
+  // Bangkok numbers sit silently under an Istanbul title.
+  if (LOCAL_MODE && d.cam_name && st.camAreaEl) {
+    if (st.camAreaEl.dataset.baseTxt === undefined)
+      st.camAreaEl.dataset.baseTxt = st.camAreaEl.textContent;
+    const mismatch = st.camNameEl && st.camNameEl.textContent
+        && st.camNameEl.textContent !== d.cam_name;
+    st.camAreaEl.textContent = st.camAreaEl.dataset.baseTxt
+        + (mismatch ? ` · counts: ${d.cam_name} (cloud grid)` : "");
+  }
   // Vehicle speed chip: shown only when this sample tracked moving vehicles
   // (a burst-based estimate; the tooltip carries the honesty disclaimer).
   if (st.speedWrap) {

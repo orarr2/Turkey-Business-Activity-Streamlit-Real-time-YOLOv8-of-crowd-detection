@@ -969,6 +969,45 @@ _RETURNING_LAST_SAVE: dict[str, dict] = {}   # slot_id -> {eid: last_save_ts}
 # In-memory: a restart resets the count, so treat the warning as a floor -
 # the dashboard's "(N in 24h)" badge is the authoritative daily number.
 _ANOMALY_DAYCOUNT: dict[str, list] = {}
+# Same shape for loiter/returning events: (cam_id, kind) -> [date, n, warned].
+_EVENT_DAYCOUNT: dict[tuple[str, str], list] = {}
+EVENT_BUDGET_PER_DAY = 10
+
+
+def _event_evidence_ok(box: dict, kind: str, cam_id: str) -> bool:
+    """Anti-flood gates for loiter/returning events (2026-07-18).
+
+    1. Evidence floor: the triggering detection must clear its class's
+       UN-boosted default gate. Review-loop boosts may loosen a camera's
+       gate to 0.20 to recover misses - right for COUNTING, wrong for
+       ALERTING: the sub-default-conf "person" that sits still forever is
+       a lamppost, not a loiterer.
+    2. Daily budget: at most EVENT_BUDGET_PER_DAY events per (cam, kind)
+       per local day; beyond it the event is dropped and one loud line
+       flags the miscalibration (mirrors the anomaly budget).
+    """
+    cls = box.get("cls", "person")
+    try:
+        conf = float(box.get("conf") or 0.0)
+    except (TypeError, ValueError):
+        conf = 0.0
+    if conf < DEFAULT_PER_CLASS_CONF.get(cls, 0.35):
+        return False
+    local_day = (dt.datetime.now(dt.timezone.utc)
+                 .astimezone(cam_tzinfo(cam_id)).date().isoformat())
+    cell = _EVENT_DAYCOUNT.setdefault((cam_id, kind), [local_day, 0, False])
+    if cell[0] != local_day:
+        cell[:] = [local_day, 0, False]
+    if cell[1] >= EVENT_BUDGET_PER_DAY:
+        if not cell[2]:
+            cell[2] = True
+            print(f"  !! {cam_id}: {kind} events hit the "
+                  f"{EVENT_BUDGET_PER_DAY}/day budget - suppressing the "
+                  f"rest of today (thresholds likely too loose for this "
+                  f"scene; review before trusting the feed)")
+        return False
+    cell[1] += 1
+    return True
 
 
 def _prune_entity_boxes(max_age_sec: float | None = None) -> None:
@@ -1170,6 +1209,9 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
                         _returning_last_save,
                         unobserved_sec=unobs,
                         prev_box=prev_box, new_box=box)
+                    if passes and not _event_evidence_ok(box, "returning",
+                                                         cam_id):
+                        passes = False
                     if passes:
                         try:
                             crop_url, full_url, crop_bytes = _save_returning_visitor(
@@ -1204,10 +1246,21 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
                             print(f"  ! returning save failed for {slot_id}/{cam_id} "
                                   f"eid{r.entity_id}: {e}")
                 # Prolonged presence (loitering / parked-too-long).
+                # Evidence floor (2026-07-18): the event must be backed by a
+                # detection that clears its class's UN-boosted default gate.
+                # The review loop legitimately loosens per-cam gates down to
+                # 0.20 to recover misses, but a "person" that only exists at
+                # conf 0.22 on a loosened gate is exactly the lamppost/banner
+                # class of FP that flooded the report with fake loiters -
+                # weak evidence may count, it must never alert. Plus a daily
+                # per-camera budget, same idea as the anomaly budget.
                 if presence is not None and box is not None:
                     loiter = presence.observe(cam_id, r.entity_id,
                                               box.get("cls", "person"), box,
                                               frame.shape, cam)
+                    if loiter is not None and not _event_evidence_ok(
+                            box, "loiter", cam_id):
+                        loiter = None
                     if loiter is not None:
                         _handle_loiter(firebase, alerts, slot, cam_id, ts,
                                        frame, box, loiter,

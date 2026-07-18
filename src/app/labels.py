@@ -46,7 +46,12 @@ VERDICTS = ("correct", "wrong_label", "not_an_object")
 # just called it the wrong class - the payload carries the user's fix, so
 # the training exporter can emit a corrected label instead of dropping the
 # box the way a plain "wrong" does.
-BOX_VERDICTS = ("correct", "wrong")
+# "object" (2026-07-18, restoring a crop-reviewer nuance the canvas UI
+# lost): the detection is a STATIC THING - a building, a pole, a road
+# divider - not a mis-classified participant. Trains as a drop exactly
+# like "wrong", but the explicit signal feeds the static-position
+# auto-blacklist faster and reads honestly in the review history.
+BOX_VERDICTS = ("correct", "wrong", "object")
 
 # Classes a relabel verdict may target. Mirrors detect_core's
 # CLASSES_OF_INTEREST without importing it here: labels.py must stay
@@ -272,7 +277,8 @@ class ReviewStore:
         for fr in self._frames_by_path.values():
             for v in fr.box_verdicts.values():
                 if v == "correct": tp += 1
-                elif v == "wrong" or v.startswith("relabel:"): fp += 1
+                elif (v in ("wrong", "object")
+                      or v.startswith("relabel:")): fp += 1
             fn += len(fr.missed_detections or ())
         return {
             "total_reviewed":    len(self._by_path),
@@ -300,6 +306,9 @@ class ReviewStore:
 _GATE_BY_CLS = {"person": 0.35, "bicycle": 0.22, "motorcycle": 0.22,
                 "car": 0.35, "bus": 0.35, "train": 0.25, "truck": 0.35}
 _GATE_SPAN = 0.25
+# Review queue recency scope: frames older than this only surface once the
+# fresh pool is fully reviewed (or explicitly, via the strip / list API).
+FRESH_WINDOW_H = 48
 
 
 def frame_uncertainty(meta: dict) -> float:
@@ -356,19 +365,34 @@ def sample_frame(store: ReviewStore,
     ties - the operator's clicks go where they teach the most. ``seed`` is
     kept for API compatibility; selection is deterministic.
 
+    Scope (2026-07-18): the queue serves frames captured in the last
+    FRESH_WINDOW_H hours when any exist - the pool keeps frames from
+    every camera the collector ever visited, and surfacing week-old
+    Turkey frames ahead of the live session's cameras confused the
+    operator. Older frames stay reachable through the strip / list.
+
     Returns None when every stored frame has been reviewed.
     """
     from app.review_frames import list_all_frames, load_metadata
 
     rels = list_all_frames(snapshots_root)
     pool: list[tuple[float, str, dict]] = []
+    cutoff_us = (time.time() - FRESH_WINDOW_H * 3600) * 1_000_000
+    fresh: list[tuple[float, str, dict]] = []
     for rel in rels:
         if store.is_frame_reviewed(rel):
             continue
         meta = load_metadata(rel, snapshots_root)
         if not meta:
             continue
-        pool.append((frame_uncertainty(meta), rel, meta))
+        item = (frame_uncertainty(meta), rel, meta)
+        pool.append(item)
+        try:
+            if int(Path(rel).stem) >= cutoff_us:
+                fresh.append(item)
+        except ValueError:
+            pass
+    pool = fresh or pool
     if not pool:
         return None
     pool.sort(key=lambda t: t[1], reverse=True)   # newest timestamp-name first
