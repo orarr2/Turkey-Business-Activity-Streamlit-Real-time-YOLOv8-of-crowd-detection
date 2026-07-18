@@ -460,20 +460,33 @@ class HostBreaker:
 
 
 class CountryDirector:
-    """Country-generic grid controller (operator spec, 2026-07-17).
+    """Country-generic grid controller (operator spec, sharpened 2026-07-18).
 
-    The grid always runs FOUR cameras from ONE country. Each country owns
-    its own CameraPool (priority ladder over that country's cameras) and
-    HostBreaker (per-host 403/429 circuit breaker). Countries are tried in
-    a fixed priority order; the director stays on a country as long as it
-    can field live cameras, backfilling a dead camera from deeper in the
-    SAME country's bench, and only advances to the next country when the
-    active one is fully dark (`min_live` live cameras, default 1).
+    The grid runs cameras from ONE country, at the widest width any country
+    can field. Each country owns its own CameraPool (priority ladder over
+    that country's cameras) and HostBreaker (per-host 403/429 circuit
+    breaker). The rule, per the operator:
 
-    Recovery: a country higher in the order than the active one is re-probed
-    shortly before each scheduled report; if it delivers, the grid switches
-    back to it (Turkey is the project's subject - the point is to spend the
-    maximum time on it and only visit Thailand/Japan/USA while it is down).
+      1. a dead camera backfills from deeper in the SAME country's bench
+         first - the country is only abandoned when its whole ladder
+         cannot field the target width;
+      2. the target width starts at 4: the first country in priority order
+         (Turkey -> Thailand -> Japan -> USA) that can field 4 live
+         cameras wins;
+      3. only after a full loop finds NO country fielding 4 does the grid
+         narrow to 3 - again scanning the full priority order - then 2,
+         then 1. Width grows back automatically as cameras recover
+         (cooldowns expire / benches refill);
+      4. everything dark: hold the active country at full width - the
+         padded assignment keeps probing, which is how dead cameras get
+         re-discovered.
+
+    Recovery upward to a BLOCKED country (Turkey behind its geo-block) is
+    the pre-report probe's job, not this bookkeeping's: blocked hosts stay
+    out of live_count while their breaker rests, so the director never
+    sniffs them mid-day. The report itself always ships from whatever
+    country the closing window actually ran on; a successful pre-report
+    probe only re-aims the NEXT window.
 
     Pure control logic - the actual frame grabs happen in the main loop,
     which feeds results back through record(). Fully unit-testable offline.
@@ -505,13 +518,19 @@ class CountryDirector:
                 host_of, threshold=breaker_threshold,
                 rest_minutes=breaker_rest_minutes)
         self.active = self.order[0]
+        self.n_active = n_slots        # current grid width (spec rule 3)
 
     # ---- per-round assignment -------------------------------------------
     def assign(self, now: float) -> tuple[str, list[str]]:
-        """(active_country, [4 cam_ids]) for this round, honoring the active
-        country's host breaker."""
+        """(active_country, cam_ids) for this round, honoring the active
+        country's host breaker. The list is n_active wide - fewer than
+        n_slots when the whole ladder is narrower than the grid (the
+        remaining slots idle instead of hammering proven-dead cameras
+        every round). All-dark hold keeps full width so the padded
+        assignment can re-discover recoveries."""
         pool, br = self.pools[self.active], self.breakers[self.active]
-        return self.active, pool.assign(now=now, blocked=br.blocked_cams(now))
+        cams = pool.assign(now=now, blocked=br.blocked_cams(now))
+        return self.active, cams[: max(1, self.n_active)]
 
     def record(self, cam: str, ok: bool, http: int | None, now: float,
                country: str | None = None) -> str | None:
@@ -535,22 +554,33 @@ class CountryDirector:
         return sum(1 for c in pool.pool
                    if pool._eligible(c, now) and c not in blocked)
 
+    def desired_state(self, now: float) -> tuple[str, int]:
+        """(country, width): the widest grid any country can field right
+        now, ties broken by priority order (spec rules 2-3). Width 0 means
+        everything is dark. Pure bookkeeping - no network; blocked hosts
+        are already excluded from live_count, so a geo-blocked Turkey is
+        skipped without a single request."""
+        for n in range(self.n_slots, 0, -1):
+            for country in self.order:
+                if self.live_count(country, now) >= n:
+                    return country, n
+        return self.active, 0
+
     def maybe_advance(self, now: float) -> tuple[str, str] | None:
-        """If the active country is dark (< min_live live cameras), rotate to
-        the next country in priority order that has live cameras. Returns
-        (from, to) on a switch, else None. If nobody has live cameras the
-        active country is kept (the grid holds steady rather than churning)."""
-        if self.live_count(self.active, now) >= self.min_live:
+        """Re-aim the grid at desired_state. Returns (from, to) on a
+        country switch, else None (width changes surface via n_active).
+        Everything dark: hold the active country at FULL width - the
+        padded assignment keeps probing resting cameras, which is how the
+        grid re-discovers a recovery (spec rule 4)."""
+        country, n = self.desired_state(now)
+        if n <= 0:
+            self.n_active = self.n_slots
             return None
-        start = self.order.index(self.active)
-        for step in range(1, len(self.order) + 1):
-            cand = self.order[(start + step) % len(self.order)]
-            if cand == self.active:
-                continue
-            if self.live_count(cand, now) >= self.min_live:
-                prev, self.active = self.active, cand
-                return prev, cand
-        return None
+        self.n_active = n
+        if country == self.active:
+            return None
+        prev, self.active = self.active, country
+        return prev, country
 
     def countries_above(self, country: str | None = None) -> list[str]:
         """Higher-priority countries than the active one, best-first - the
@@ -560,10 +590,13 @@ class CountryDirector:
 
     def switch_to(self, country: str) -> None:
         """Force the active country (used after a successful recovery probe).
-        Forgives that country's accumulated strikes so it starts clean."""
+        Forgives that country's accumulated strikes so it starts clean, and
+        restores full grid width - the fresh country gets its fair shot at
+        fielding 4 before desired_state narrows anything."""
         if country not in self.pools:
             return
         self.active = country
+        self.n_active = self.n_slots
         pool = self.pools[country]
         pool.forgive(list(pool.pool))
 
@@ -647,12 +680,31 @@ def _ts_filename(ts_iso: str) -> str:
     return ts_iso.replace("-", "").replace(":", "").replace("T", "_")[:15]
 
 
-def _slot_metadata(slot: dict, active_cam: str) -> dict:
+def _slot_metadata(slot: dict, active_cam: str | None) -> dict:
     """Snapshot of what the dashboard needs about a slot right now. The
     human label is the active CAMERA's own name (the grid is country-generic
     now - the slot_id stays generic and the tile title follows whatever
     camera is live), and `country` lets the dashboard/report state which
-    country the grid is currently watching."""
+    country the grid is currently watching.
+
+    active_cam=None marks an IDLE slot: the grid narrowed below 4 because
+    no country can field that many live cameras right now (spec rule 3).
+    The dashboard shows the honest state instead of a dead player."""
+    if active_cam is None:
+        return {
+            "slot_id":         slot["slot_id"],
+            "primary":         slot["primary"],
+            "active_cam":      None,
+            "active_cam_name": "standby - grid narrowed",
+            "active_embed":    None,
+            "active_page":     None,
+            "active_hls":      None,
+            "active_kind":     None,
+            "country":         None,
+            "city":            "",
+            "display_area":    slot["display_area"],
+            "idle":            True,
+        }
     cam = CAMERAS.get(active_cam, {})
     return {
         "slot_id":         slot["slot_id"],
@@ -1451,9 +1503,10 @@ def main() -> None:
     _pool0 = director.pools[director.active]
     print("country grid: "
           f"{' -> '.join(COUNTRY_ORDER)} | active={director.active} "
-          f"({len(country_pools[director.active])} cams); advance to the next "
-          f"country only when the active one has < {director.min_live} live "
-          "camera.")
+          f"({len(country_pools[director.active])} cams); widest-grid rule: "
+          "first country (by priority) fielding 4 live cams wins; none -> "
+          "the grid narrows to 3, then 2, then 1, and widens back as "
+          "cameras recover.")
     print(f"per-country pool: {_pool0.max_failures} misses rest a camera "
           f"{_pool0.retry_seconds // 60:.0f} min; tvkur cams + probation cams "
           "rest after a single miss.")
@@ -1463,7 +1516,10 @@ def main() -> None:
           "single probe request decides (answer = back in rotation).")
 
     _active_country, _assigned = director.assign(time.time())
-    assignment = dict(zip(slot_ids, _assigned))
+    # Width-aware map: slots beyond the grid's current width idle at None.
+    assignment = {sid: (_assigned[i] if i < len(_assigned) else None)
+                  for i, sid in enumerate(slot_ids)}
+    _active_width = len(_assigned)
 
     reid = None
     if not args.no_reid:
@@ -1513,7 +1569,8 @@ def main() -> None:
           f"{director.active}:")
     print("  priority: " + " -> ".join(director.pools[director.active].pool))
     for slot in GRID_SLOTS:
-        print(f"  {slot['slot_id']:20s} starts on {assignment[slot['slot_id']]}")
+        print(f"  {slot['slot_id']:20s} starts on "
+              f"{assignment[slot['slot_id']] or 'idle (grid narrowed)'}")
     print(f"interval={args.interval}s, imgsz={args.imgsz}, burst={args.burst}, "
           f"reid={'on' if reid else 'off'}, conf={args.conf}, "
           f"snapshots={'on' if save_snapshots else 'off'}")
@@ -1602,12 +1659,15 @@ def main() -> None:
                     director, model, args, firebase, slot_ids, round_start)
                 if switched:
                     _all_miss_rounds = 0
-            # If the active country is fully dark, advance to the next country
-            # that can field live cameras (deep same-country bench first, so
-            # this only fires when the whole country is down).
+            # Re-aim the grid (operator spec 2026-07-18): widest width any
+            # country can field, priority order breaking ties, full-order
+            # rescan per width - deep same-country bench first, then the
+            # next country at width 4, and only after a full loop finds no
+            # 4-capable country does the grid narrow to 3, 2, 1.
             adv = director.maybe_advance(round_start)
             if adv:
-                print(f"  * country: {adv[0]} is dark - switching grid to "
+                print(f"  * country: {adv[0]} cannot field "
+                      f"{director.n_active} camera(s) - switching grid to "
                       f"{adv[1]}.")
                 _all_miss_rounds = 0
 
@@ -1615,16 +1675,26 @@ def main() -> None:
             # healthy cameras in priority order, one per slot, never a
             # duplicate. Cameras of a breaker-tripped host stay out entirely.
             active_country, _assigned = director.assign(round_start)
-            round_cams = dict(zip(slot_ids, _assigned))
+            round_cams = {sid: (_assigned[i] if i < len(_assigned) else None)
+                          for i, sid in enumerate(slot_ids)}
             country_changed = active_country != _active_country
+            width_changed = len(_assigned) != _active_width
+            if width_changed:
+                trend = ("narrowed - no country fields more"
+                         if len(_assigned) < _active_width else "recovered")
+                print(f"  * grid width: {_active_width} -> {len(_assigned)} "
+                      f"slot(s) ({trend})")
             _active_country = active_country
+            _active_width = len(_assigned)
             moved = [sid for sid in slot_ids
                      if round_cams[sid] != assignment.get(sid)]
             assignment = round_cams
-            if moved or country_changed:
+            if moved or country_changed or width_changed:
                 for sid in moved:
-                    print(f"  * {sid}: -> {assignment[sid]} "
-                          f"({CAMERAS.get(assignment[sid], {}).get('country', '?')})")
+                    cam_lbl = assignment[sid]
+                    print(f"  * {sid}: -> "
+                          + (f"{cam_lbl} ({CAMERAS.get(cam_lbl, {}).get('country', '?')})"
+                             if cam_lbl else "idle"))
                 slots_meta = [_slot_metadata(s, assignment[s["slot_id"]])
                               for s in GRID_SLOTS]
                 try:
@@ -1634,6 +1704,8 @@ def main() -> None:
             round_had_ok = False
             for slot in GRID_SLOTS:
                 cam_id = assignment[slot["slot_id"]]
+                if cam_id is None:
+                    continue          # idle slot: grid is narrower this round
                 ok = sample_slot(model, slot, cam_id, firebase, reid=reid,
                                  conf=args.conf, presence=presence,
                                  alerts=alerts, imgsz=args.imgsz,

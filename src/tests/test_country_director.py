@@ -159,3 +159,81 @@ def test_recovery_fires_only_before_report_not_periodically(monkeypatch):
     monkeypatch.setattr(col, "_minutes_to_next_report", lambda ts, *a: 3.0)
     assert col._recovery_due(5000)
     assert not col._recovery_due(5000 + 60)
+
+
+# ---- widest-grid rule (operator spec, sharpened 2026-07-18) -----------------
+
+def kill_all_but(director, country, n_keep, now):
+    """Rest every camera of a country except the first n_keep."""
+    pool = director.pools[country]
+    for cam in list(pool.pool)[n_keep:]:
+        for _ in range(pool.max_failures):
+            pool.record(cam, False, now=now)
+
+
+def test_prefers_four_in_lower_country_over_three_in_active():
+    d = make_director()
+    now = 1000.0
+    kill_country(d, "turkey", now)
+    d.active = "thailand"
+    kill_all_but(d, "thailand", 3, now)      # whole Thai ladder down to 3
+    adv = d.maybe_advance(now)
+    assert adv == ("thailand", "japan")      # Japan can still field 4
+    assert d.n_active == 4
+
+
+def test_narrows_to_three_when_no_country_fields_four():
+    d = make_director()
+    now = 1000.0
+    kill_country(d, "turkey", now)
+    kill_all_but(d, "thailand", 3, now)
+    kill_all_but(d, "japan", 2, now)
+    kill_all_but(d, "usa", 1, now)
+    d.active = "usa"                          # end of the full loop
+    adv = d.maybe_advance(now)
+    # Thailand is the highest-priority country that fields 3.
+    assert adv == ("usa", "thailand")
+    assert d.n_active == 3
+    _, cams = d.assign(now)
+    assert len(cams) == 3
+
+
+def test_narrows_further_and_widens_back_on_recovery():
+    d = make_director()
+    now = 1000.0
+    for c in ("turkey", "thailand", "japan"):
+        kill_country(d, c, now)
+    kill_all_but(d, "usa", 2, now)
+    d.active = "usa"
+    assert d.maybe_advance(now) is None       # already on the best option
+    assert d.n_active == 2
+    assert len(d.assign(now)[1]) == 2
+    # Cooldowns expire -> whole benches are eligible again -> width recovers
+    later = now + d.pools["usa"].retry_seconds + 1
+    d.maybe_advance(later)
+    assert d.n_active == 4
+
+
+def test_all_dark_holds_full_width_for_rediscovery():
+    d = make_director()
+    now = 1000.0
+    for c in COUNTRY_ORDER:
+        kill_country(d, c, now)
+    d.active = "thailand"
+    assert d.maybe_advance(now) is None
+    assert d.n_active == 4                    # padded probing continues
+    assert len(d.assign(now)[1]) == 4
+
+
+def test_switch_to_restores_full_width():
+    d = make_director()
+    now = 1000.0
+    kill_country(d, "turkey", now)
+    kill_all_but(d, "thailand", 2, now)
+    kill_country(d, "japan", now)
+    kill_country(d, "usa", now)
+    d.active = "thailand"
+    d.maybe_advance(now)
+    assert d.n_active == 2
+    d.switch_to("turkey")                     # pre-report probe succeeded
+    assert d.active == "turkey" and d.n_active == 4

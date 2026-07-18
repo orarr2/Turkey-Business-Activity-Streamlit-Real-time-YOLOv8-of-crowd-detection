@@ -291,6 +291,18 @@ function buildVideoInto(st, cfg, slot) {
     try { st.currentHlsInstance.destroy(); } catch (_) {}
     st.currentHlsInstance = null;
   }
+  // Idle slot: the collector narrowed the grid because no country can
+  // field this many live cameras right now. Show the honest state
+  // instead of a dead player (preserve the KPI overlay like below).
+  if (!cfg.active_cam) {
+    for (const el of Array.from(st.videoWrap.children)) {
+      if (el !== st.overlay) el.remove();
+    }
+    st.videoWrap.insertAdjacentHTML("afterbegin",
+      `<div class="video-fallback">slot on standby -
+        no additional live camera in any country right now</div>`);
+    return;
+  }
   const hlsUrl = hlsUrlForActiveCam(cfg);
   const embed  = cfg.active_embed;
   const page   = cfg.active_page || slot.placeholder_page;
@@ -547,8 +559,13 @@ function applyGridConfig(cfg) {
                        slotCfg.display_area);
       buildVideoInto(st, slotCfg, st.slot);
     }
-    const usingFallback = slotCfg.active_cam !== slotCfg.primary;
-    if (usingFallback) {
+    if (slotCfg.idle || !slotCfg.active_cam) {
+      // Grid narrowed: this slot is deliberately idle, not "on fallback".
+      st.fallbackBadge.textContent = "standby";
+      st.fallbackBadge.title =
+        "grid narrowed - no country fields this many live cameras right now";
+      st.fallbackBadge.style.display = "inline-block";
+    } else if (slotCfg.active_cam !== slotCfg.primary) {
       st.fallbackBadge.textContent = "↳ fallback";
       st.fallbackBadge.title = `primary cam offline - using fallback: ${slotCfg.active_cam}`;
       st.fallbackBadge.style.display = "inline-block";
