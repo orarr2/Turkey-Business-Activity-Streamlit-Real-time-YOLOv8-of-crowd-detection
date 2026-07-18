@@ -122,6 +122,10 @@ def save_frame(cam_id: str, frame, boxes: list[dict],
                 "id":   i,
                 "cls":  b.get("cls", "?"),
                 "conf": round(float(b.get("conf") or 0.0), 3),
+                # WS1: capture-time uncertainty (against the burst's
+                # EFFECTIVE gates); absent on pre-WS1 callers.
+                **({"uncertainty": round(float(b["uncertainty"]), 4)}
+                   if b.get("uncertainty") is not None else {}),
                 "box":  [round(float(b["x1"]), 1), round(float(b["y1"]), 1),
                           round(float(b["x2"]), 1), round(float(b["y2"]), 1)],
             }

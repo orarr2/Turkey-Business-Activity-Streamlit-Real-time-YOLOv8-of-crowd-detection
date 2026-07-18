@@ -134,7 +134,12 @@ def save_crop(cam_id: str, frame, boxes: list[dict],
     # bootstrap saves several crops in the same millisecond.
     ts = int(time.time() * 1_000_000)
     conf_pct = int(round((b.get("conf") or 0) * 100))
-    name = f"{ts}_{b.get('cls','?')}_{conf_pct:02d}.jpg"
+    # WS1: capture-time uncertainty travels in the filename (crops have no
+    # sidecar json) so the BADGE sampler can weight the pool without
+    # re-running the model.
+    u = b.get("uncertainty")
+    u_sfx = f"_u{int(round(float(u) * 100)):02d}" if u is not None else ""
+    name = f"{ts}_{b.get('cls','?')}_{conf_pct:02d}{u_sfx}.jpg"
     out_path = out_dir / name
     if not cv2.imwrite(str(out_path), crop, [cv2.IMWRITE_JPEG_QUALITY, 85]):
         return None

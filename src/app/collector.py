@@ -1056,13 +1056,34 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
             line=cam.get("line"), per_class_conf=gates,
             burst_stride=burst_stride)
         ok = 1
+        # WS1: every box that reaches a review pool carries `uncertainty`,
+        # scored against the EFFECTIVE gates this burst ran with (boosted +
+        # night) - not the shipped defaults. The optional flip pass (one
+        # extra inference on the mirrored frame, UNCERTAINTY_FLIP=1) only
+        # runs on bursts that are actually being sampled, so the regular
+        # round cost is untouched. Best-effort; a failure here must never
+        # abort a successful sample write.
+        ls_due = rf_due = False
+        try:
+            from app.live_samples import should_sample as _ls_should
+            from app.review_frames import should_save as _rf_should
+            ls_due = bool(boxes) and _ls_should(cam_id)
+            rf_due = bool(boxes) and _rf_should(cam_id)
+            if boxes:
+                from app.uncertainty import attach_uncertainty, flip_delta
+                flip = None
+                if ((ls_due or rf_due)
+                        and os.environ.get("UNCERTAINTY_FLIP") == "1"):
+                    flip = flip_delta(model, frame, boxes, imgsz)
+                attach_uncertainty(boxes, gates, flip)
+        except Exception as _u_err:
+            print(f"[{ts}] uncertainty skipped: {_u_err}")
         # Live-sample pool: save one random detection per LIVE_SAMPLE_EVERY_N
         # bursts so the review UI has fresh material even on cameras that
-        # don't trigger returning / events / anomalies. Best-effort; a
-        # failure here must never abort a successful sample write.
+        # don't trigger returning / events / anomalies.
         try:
-            from app.live_samples import should_sample as _ls_should, save_crop as _ls_save
-            if boxes and _ls_should(cam_id):
+            if ls_due:
+                from app.live_samples import save_crop as _ls_save
                 _ls_save(cam_id, frame, boxes)
         except Exception as _ls_err:
             print(f"[{ts}] live_samples skipped: {_ls_err}")
@@ -1071,8 +1092,8 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
         # and gather multiple verdicts per frame (including "missed
         # detection" - the input we need for real recall).
         try:
-            from app.review_frames import should_save as _rf_should, save_frame as _rf_save
-            if boxes and _rf_should(cam_id):
+            if rf_due:
+                from app.review_frames import save_frame as _rf_save
                 _rf_save(cam_id, frame, boxes)
         except Exception as _rf_err:
             print(f"[{ts}] review_frames skipped: {_rf_err}")

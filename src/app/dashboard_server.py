@@ -187,6 +187,11 @@ _VISUAL_SEARCH = _VisualSearchState()
 # handler threads share the one instance.
 _REVIEW_STORE = None
 _REVIEW_STORE_LOCK = threading.Lock()
+# crop_path -> (sampler, uncertainty_at_selection) for crops served but not
+# yet judged, so the submit row can record HOW the crop was chosen (spec
+# 9.1) without any client-side change. Small and self-cleaning: entries pop
+# on submit and the dict resets with the process.
+_LAST_SERVED_CROPS: dict[str, tuple] = {}
 
 
 def _review_store():
@@ -402,17 +407,40 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
     # ---- human-in-the-loop review endpoints ------------------------------
     # Backing the "Review detections" panel in index.html. The user is shown
-    # one random un-reviewed crop with its current label and picks correct /
+    # one un-reviewed crop with its current label and picks correct /
     # wrong-label / not-an-object. Answers persist to data/reviews.json via
-    # ReviewStore.
+    # ReviewStore. Sampler: REVIEW_SAMPLER=badge|naive (default naive),
+    # overridable per request with ?strategy= (plan WS2). The response
+    # carries "sampler" so the UI can badge it, and the server remembers
+    # what it served so the submit row records sampler +
+    # uncertainty_at_selection (spec 9.1) without any client change.
     def _review_sample(self) -> None:
         try:
-            from app.labels import sample_crop
-            s = sample_crop(_review_store(), SNAPSHOTS_DIR)
+            from urllib.parse import parse_qs, urlparse
+            q = parse_qs(urlparse(self.path).query)
+            strategy = ((q.get("strategy") or [""])[0]
+                        or os.environ.get("REVIEW_SAMPLER") or "naive").lower()
+            s = None
+            if strategy == "badge":
+                try:
+                    from app.badge import sample_crop_badge
+                    ranked = sample_crop_badge(_review_store(), SNAPSHOTS_DIR)
+                    if ranked and ranked.get("batch"):
+                        s = {**ranked["batch"][0], "sampler": "badge"}
+                except Exception as ex:
+                    print(f"  ! badge sampler failed, falling back to naive: "
+                          f"{type(ex).__name__}: {ex}")
+            if s is None:
+                from app.labels import sample_crop
+                s = sample_crop(_review_store(), SNAPSHOTS_DIR)
+                if s is not None:
+                    s["sampler"] = "naive"
             if s is None:
                 self._send_json(200, {"done": True,
                                       "message": "no un-reviewed crops in the store"})
                 return
+            _LAST_SERVED_CROPS[s["path"]] = (s.get("sampler"),
+                                             s.get("uncertainty"))
             self._send_json(200, s)
         except Exception as e:
             print(f"  ! review-sample failed: {type(e).__name__}: {e}")
@@ -449,13 +477,20 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             # through the same crop twice counts as two learning events and
             # the boost ledger drifts away from the review store.
             was_reviewed = _review_store().is_reviewed(crop_path)
+            served_sampler, served_u = _LAST_SERVED_CROPS.pop(
+                crop_path, (None, None))
             r = _review_store().submit(
                 crop_path,
                 verdict,
                 original_cls=str(payload.get("original_cls", "?")),
                 corrected_cls=payload.get("corrected_cls") or None,
                 anomaly_verdict=payload.get("anomaly_verdict") or None,
-                note=payload.get("note") or None)
+                note=payload.get("note") or None,
+                sampler=payload.get("sampler") or served_sampler,
+                uncertainty_at_selection=(
+                    payload.get("uncertainty_at_selection")
+                    if payload.get("uncertainty_at_selection") is not None
+                    else served_u))
             # After each submit, let the auto-blacklist accumulator decide
             # whether N repeated rejects in one area now justify auto-adding
             # a polygon. Silent failure - we never want a blacklist step to

@@ -74,6 +74,11 @@ class Review:
     anomaly_verdict: str | None  # "yes" / "no" - was this really an anomaly?
     note: str | None
     reviewed_at: str           # ISO-8601 UTC
+    # Spec 9.1: which sampler served the crop and how uncertain the model
+    # was at selection time - the raw material for the naive-vs-BADGE
+    # label-efficiency comparison (D8 replay).
+    sampler: str | None = None
+    uncertainty_at_selection: float | None = None
 
     def to_public(self) -> dict:
         d = {"crop_path": self.crop_path, "verdict": self.verdict,
@@ -84,6 +89,10 @@ class Review:
             d["anomaly_verdict"] = self.anomaly_verdict
         if self.note:
             d["note"] = self.note
+        if self.sampler:
+            d["sampler"] = self.sampler
+        if self.uncertainty_at_selection is not None:
+            d["uncertainty_at_selection"] = self.uncertainty_at_selection
         return d
 
 
@@ -136,6 +145,7 @@ class ReviewStore:
             return
         for row in data.get("reviews", []):
             try:
+                u_sel = row.get("uncertainty_at_selection")
                 r = Review(
                     crop_path=str(row["crop_path"]),
                     verdict=str(row["verdict"]),
@@ -143,7 +153,10 @@ class ReviewStore:
                     corrected_cls=row.get("corrected_cls") or None,
                     anomaly_verdict=row.get("anomaly_verdict") or None,
                     note=row.get("note") or None,
-                    reviewed_at=str(row.get("reviewed_at", "")))
+                    reviewed_at=str(row.get("reviewed_at", "")),
+                    sampler=row.get("sampler") or None,
+                    uncertainty_at_selection=(float(u_sel)
+                                              if u_sel is not None else None))
                 self._by_path[r.crop_path] = r
             except (KeyError, TypeError):
                 continue
@@ -187,7 +200,9 @@ class ReviewStore:
                original_cls: str = "?",
                corrected_cls: str | None = None,
                anomaly_verdict: str | None = None,
-               note: str | None = None) -> Review:
+               note: str | None = None,
+               sampler: str | None = None,
+               uncertainty_at_selection: float | None = None) -> Review:
         if verdict not in VERDICTS:
             raise ValueError(f"unknown verdict {verdict!r}; expected one of "
                              f"{VERDICTS}")
@@ -200,7 +215,11 @@ class ReviewStore:
             corrected_cls=(str(corrected_cls) if corrected_cls else None),
             anomaly_verdict=(str(anomaly_verdict) if anomaly_verdict else None),
             note=(str(note) if note else None),
-            reviewed_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+            reviewed_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            sampler=(str(sampler) if sampler else None),
+            uncertainty_at_selection=(float(uncertainty_at_selection)
+                                      if uncertainty_at_selection is not None
+                                      else None))
         with self._lock:
             self._by_path[r.crop_path] = r
             self._save_locked()
@@ -295,6 +314,16 @@ def frame_uncertainty(meta: dict) -> float:
     """
     best = 0.0
     for b in meta.get("boxes") or []:
+        # Prefer the capture-time value (WS1: scored on the burst's
+        # EFFECTIVE boosted/night gates by the collector). The margin
+        # below is the fallback for pre-WS1 frames, scored on defaults.
+        u = b.get("uncertainty")
+        if u is not None:
+            try:
+                best = max(best, float(u))
+                continue
+            except (TypeError, ValueError):
+                pass
         try:
             conf = float(b.get("conf") or 0.0)
         except (TypeError, ValueError):
