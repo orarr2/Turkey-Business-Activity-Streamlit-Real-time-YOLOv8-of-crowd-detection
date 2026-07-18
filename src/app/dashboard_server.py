@@ -100,6 +100,10 @@ class _VisualSearchState:
 
     def __init__(self):
         self._lock = threading.Lock()
+        # Serializes SnapshotIndex.refresh() between the background
+        # refresher thread and request handlers - two concurrent refreshes
+        # would race the entries dict and double-embed the same backlog.
+        self.refresh_lock = threading.Lock()
         self._ready = False
         self.embedder = None
         self.model = None
@@ -926,9 +930,27 @@ def _warm_visual_search_async() -> None:
     """
     def _run() -> None:
         try:
-            _VISUAL_SEARCH.get()
+            st = _VISUAL_SEARCH.get()
         except Exception as e:
             print(f"  ! visual-search warmup failed: {type(e).__name__}: {e}")
+            return
+        # Keep the embedding index warm FOREVER, not just at boot: the
+        # pool-sync puller drops fresh crops every couple of minutes, and
+        # deferring their embedding to the next search request meant the
+        # FIRST search after hours of collecting sat behind minutes of
+        # OSNet work (the operator read that as "search is broken").
+        import time as _time
+        while True:
+            _time.sleep(120)
+            try:
+                with st.refresh_lock:
+                    n = st.index.refresh()
+                if n:
+                    print(f"  * search index: +{n} crop(s) embedded "
+                          f"(background)")
+            except Exception as e:
+                print(f"  ! search index refresh failed: "
+                      f"{type(e).__name__}: {e}")
     threading.Thread(target=_run, daemon=True,
                      name="visual-search-warmup").start()
 
