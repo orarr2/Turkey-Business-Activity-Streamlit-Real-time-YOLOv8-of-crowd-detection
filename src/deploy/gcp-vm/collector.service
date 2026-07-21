@@ -16,6 +16,14 @@ Environment=OMP_NUM_THREADS=2
 Environment=MALLOC_ARENA_MAX=2
 Environment=FIREBASE_CREDENTIALS=__SA_PATH__
 Environment=FIREBASE_STORAGE_BUCKET=__STORAGE_BUCKET__
+# Optional Cloudflare-Worker relay for the IBB CDN (Istanbul cams). When
+# /etc/turkey-footfall/proxy.env exists it should carry:
+#   IBB_PROXY_URL=https://ibb-proxy.<sub>.workers.dev
+#   IBB_PROXY_SECRET=<shared-secret>
+# Without the file the collector runs unchanged - IBB stays 403 from GCP
+# and the Turkey grid depends on the YouTube tier only. See
+# deploy/cloudflare-proxy/README.md for the 5-minute setup.
+EnvironmentFile=-/etc/turkey-footfall/proxy.env
 # OSNet re-identification embedder. When the ONNX file is present the
 # collector + dashboard-server use semantic identity matching (~5-10 ms
 # per crop on CPU); when it's absent, both fall back to the HSV histogram

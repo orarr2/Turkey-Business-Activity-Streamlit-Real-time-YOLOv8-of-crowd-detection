@@ -1,0 +1,7 @@
+name = "ibb-proxy"
+main = "worker.js"
+compatibility_date = "2026-07-21"
+
+# No routes or custom domain: the free workers.dev subdomain is enough
+# for a personal collector and does not need DNS management. The shared
+# secret handles auth (set via `wrangler secret put PROXY_SECRET`).

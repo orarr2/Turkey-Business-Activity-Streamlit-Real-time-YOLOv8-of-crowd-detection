@@ -278,12 +278,52 @@ HEADER_HOSTS = {
 # did not finish in 15s, so only the lightest camera (taksim) ever delivered.
 _SEGMENT_HTTP_TIMEOUT_S = int(os.environ.get("SEGMENT_HTTP_TIMEOUT_S") or 30)
 
+
+# ---- IBB proxy relay (Cloudflare Worker) --------------------------------
+# `kamerayayin.ibb.istanbul` returns HTTP 403 to every GCP IP range - it
+# treats Google Cloud as a scraping ASN. Every other origin (residential,
+# Cloudflare edge, other clouds) sees 200 with the full HLS chain. When
+# IBB_PROXY_URL is set, every IBB request is rewritten to go through the
+# operator's Cloudflare Worker (see deploy/cloudflare-proxy/) which
+# fetches from a non-GCP address and hands the bytes back. The URL is
+# encoded as the worker's PATH so response bodies with relative segment
+# names still resolve through the worker on the follow-up fetch.
+# Empty env vars = no proxy, current behavior preserved.
+_IBB_PROXY_URL = (os.environ.get("IBB_PROXY_URL") or "").rstrip("/")
+_IBB_PROXY_SECRET = os.environ.get("IBB_PROXY_SECRET") or ""
+_IBB_PROXY_HOSTS = ("kamerayayin.ibb.istanbul",)
+
+
+def _apply_ibb_proxy(url: str,
+                     extra_headers: dict | None) -> tuple[str, dict | None]:
+    """When configured, route an IBB URL through the Cloudflare Worker.
+
+    Rewrites `https://kamerayayin.ibb.istanbul/X.m3u8` to
+    `<worker>/https://kamerayayin.ibb.istanbul/X.m3u8` and adds the
+    shared-secret header so the worker accepts the call. All other URLs
+    pass through unchanged - the worker's own allow-list would refuse them
+    anyway, but we save the round trip.
+    """
+    if not (_IBB_PROXY_URL and _IBB_PROXY_SECRET):
+        return url, extra_headers
+    from urllib.parse import urlparse
+    try:
+        host = urlparse(url).hostname or ""
+    except ValueError:
+        return url, extra_headers
+    if host not in _IBB_PROXY_HOSTS:
+        return url, extra_headers
+    hdrs = dict(extra_headers or {})
+    hdrs["X-Proxy-Secret"] = _IBB_PROXY_SECRET
+    return f"{_IBB_PROXY_URL}/{url}", hdrs
+
 def _http_get(url: str, extra_headers: dict | None = None,
               max_bytes: int | None = None) -> bytes:
     """GET with browser-ish headers. `max_bytes` truncates the body - the
     Konya-era trick of decoding a LIGHT rendition, recreated for hosts that
     only serve 1080p: a frame grab needs the first ~MB of a segment (the
     leading I-frame), not the whole 5 MB."""
+    url, extra_headers = _apply_ibb_proxy(url, extra_headers)
     h = {"User-Agent": "Mozilla/5.0"}
     if extra_headers:
         h.update(extra_headers)
