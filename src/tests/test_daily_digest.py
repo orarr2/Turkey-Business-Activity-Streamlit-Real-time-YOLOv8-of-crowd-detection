@@ -130,7 +130,7 @@ def test_training_lines_with_labels_but_rejected():
     joined = " ".join(lines)
     assert "labeled 5 frames" in joined
     assert "8 confirmed" in joined and "3 objects you added" in joined
-    assert "did not improve" in joined and "diverse labels" in joined
+    assert "did not clear the gate" in joined and "diverse labels" in joined
     # Must NOT include the alarm-flavored old copy.
     assert "rejected at gate" not in joined
     assert "REJECTED" not in joined
@@ -141,7 +141,7 @@ def test_training_lines_promoted():
                 "at": "2026-07-12T01:30:00Z"}
     lines = _training_lines(training, {"frames_labeled": 25})
     joined = " ".join(lines)
-    assert "promoted a new detection head" in joined
+    assert "PROMOTED a new detection head" in joined
     assert "head_run9.pt" in joined
     assert "already picked it up" in joined
 
@@ -175,7 +175,7 @@ def test_compose_full_report_english():
     assert "up to 55 people" in text
     # Training section reframed - no more "rejected at gate" alarm text
     assert "rejected at gate" not in text
-    assert "did not improve" in text and "head_run2.pt" in text
+    assert "did not clear the gate" in text and "head_run2.pt" in text
     assert "All cameras reporting normally" in text
 
     # A different active country flips the whole report label.
@@ -199,7 +199,7 @@ def test_promoted_line():
                 "at": "2026-07-12T01:30:00Z", "reasons": ["+1.2pp"]}
     _, text, _ = compose_digest(_NOON, 12, [], [], training, [],
                                 reviews={"frames_labeled": 25})
-    assert "promoted a new detection head" in text
+    assert "PROMOTED a new detection head" in text
     assert "head_run9.pt" in text
 
 

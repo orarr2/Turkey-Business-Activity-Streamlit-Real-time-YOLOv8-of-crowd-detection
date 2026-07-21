@@ -326,6 +326,42 @@ def _event_caption(e: dict, kind_labels: dict[str, str]) -> str:
     return " · ".join(parts)
 
 
+def fetch_grid_thumbnails(grid: dict | None, latest: list[dict],
+                          bucket_name: str | None,
+                          downloader=None) -> list[dict]:
+    """One small annotated frame per active grid slot for the report cover.
+
+    The collector overwrites `snapshots/live/<slot>.jpg` on every sample
+    (see collector._save_live_view - 24h Storage lifecycle keeps it fresh);
+    when Storage is off, `latest.live_url` still points at the last one.
+    Returns a list of {name, city, country, jpeg} - the caller renders it
+    as a 2x2 strip. Silently drops slots without a resolvable image.
+    """
+    if downloader is None:
+        downloader = _http_bytes
+    if not grid or not bucket_name:
+        return []
+    latest_by_slot = {str(d.get("slot") or ""): d for d in latest}
+    out: list[dict] = []
+    for s in (grid or {}).get("slots") or []:
+        slot_id = str(s.get("slot_id") or "")
+        # The live-view URL when the collector wrote one; otherwise fall
+        # back to the fixed Storage path each slot's live tile writes to.
+        live_url = ((latest_by_slot.get(slot_id) or {}).get("live_url")
+                    or f"https://storage.googleapis.com/{bucket_name}/"
+                       f"snapshots/live/{slot_id}.jpg")
+        data = downloader(live_url)
+        if not data:
+            continue
+        out.append({
+            "name":    s.get("active_cam_name") or s.get("active_cam") or "?",
+            "city":    s.get("city") or "",
+            "country": s.get("country") or "",
+            "jpeg":    _shrink_jpeg(data, max_width=520, quality=70),
+        })
+    return out
+
+
 def fetch_snapshots_for_groups(groups: list[dict],
                                bucket_name: str | None = None,
                                downloader=None,
@@ -371,10 +407,12 @@ def fetch_snapshots_for_groups(groups: list[dict],
         entry["fullframe_jpeg"] = _shrink_jpeg(ff_bytes) if shrink and ff_bytes else ff_bytes
         entry["crop_jpeg"] = _shrink_jpeg(cr_bytes) if shrink and cr_bytes else cr_bytes
 
-        # First-sighting lookup for returning visitors. Missing entity_id,
-        # missing bucket, or a stale manifest all resolve to "no first
-        # image" - the card degrades gracefully to a single object crop.
-        if (g.get("kind") == "returning" and bucket_name
+        # First-sighting lookup for returning AND loitering visitors:
+        # both are "this same entity" claims that read as unfounded without
+        # a comparison frame. Missing entity_id, missing bucket, or a stale
+        # manifest all resolve to "no first image" - the card degrades
+        # gracefully to a single object crop.
+        if (g.get("kind") in ("returning", "loiter") and bucket_name
                 and e.get("entity_id") is not None):
             first_url = find_first_sighting(bucket_name,
                                             str(e.get("cam_id") or ""),
@@ -494,7 +532,11 @@ def compose_pdf(out_path: str | Path, *,
                 total_samples: int,
                 training_lines: list[str] | None = None,
                 country_label: str = "Live grid",
-                grid_cameras: list[dict] | None = None) -> Path:
+                grid_country_label: str | None = None,
+                grid_cameras: list[dict] | None = None,
+                grid_thumbnails: list[dict] | None = None,
+                dominant: str | None = None,
+                current_country: str | None = None) -> Path:
     """Compose the phone-oriented English PDF and return its path.
 
     ``snapshots`` is a list of picked GROUP dicts (from
@@ -535,12 +577,65 @@ def compose_pdf(out_path: str | Path, *,
     story.append(Paragraph(f"{_fmt_date(now_il)}  ·  last {window_hours} hours",
                            styles["sub"]))
 
+    # "Currently watching" callout when the window's data majority and the
+    # grid at digest time disagree - an overnight ladder walk would title
+    # the report by the country that owned the WINDOW, and this line names
+    # where the collector actually is right now.
+    grid_label_txt = grid_country_label or country_label
+    if (dominant and current_country
+            and dominant != current_country):
+        story.append(Paragraph(
+            f"This window's data is mostly from {country_label}. "
+            f"The grid moved to {grid_label_txt} at digest time - the "
+            f"section below reflects the current grid, not the window's "
+            f"majority.",
+            styles["cap"]))
+
+    # Live-grid strip: annotated thumbnails of what the four active
+    # cameras look like right now. The report used to be text-only for
+    # this section; a picture answers the "does the grid actually work?"
+    # question at a glance.
+    if grid_thumbnails:
+        story.append(Paragraph(
+            f"Live grid preview - {grid_label_txt}", styles["h"]))
+        _thumb_cells = []
+        cap_style = ParagraphStyle(
+            "thumbcap", fontName="Helvetica", fontSize=9,
+            alignment=TA_CENTER, leading=11,
+            textColor=colors.HexColor("#334155"))
+        for t in grid_thumbnails[:4]:
+            name = str(t.get("name") or "?")
+            city = str(t.get("city") or "")
+            caption = name + (f" · {city}" if city else "")
+            _thumb_cells.append([
+                Image(BytesIO(t["jpeg"]), width=7.5*cm, height=4.2*cm,
+                      kind="proportional"),
+                Paragraph(caption, cap_style),
+            ])
+        # Two-column table, each cell an image over its caption.
+        col = []
+        for i in range(0, len(_thumb_cells), 2):
+            row = _thumb_cells[i:i+2]
+            while len(row) < 2:
+                row.append([Paragraph("", cap_style)])
+            col.append(row)
+        tt = Table(col, colWidths=[8.1*cm, 8.1*cm])
+        tt.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 2),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ]))
+        story.append(tt)
+        story.append(Spacer(1, 4))
+
     # Live grid: which cameras / country the collector is running RIGHT NOW.
     # The collector is country-generic (4 cameras from one country, rotating
     # through a ladder when a country is blocked), so this section makes the
     # report self-describing - the reader sees exactly what was watched.
     if grid_cameras:
-        story.append(Paragraph(f"Live grid - {country_label} "
+        story.append(Paragraph(f"Live grid - {grid_label_txt} "
                                f"({len(grid_cameras)} cameras)", styles["h"]))
         grid_rows = [["Camera", "City", "Country"]]
         for gc in grid_cameras:
@@ -637,12 +732,30 @@ def compose_pdf(out_path: str | Path, *,
         story.append(Paragraph("Quiet - no anomalies in this window.",
                                styles["body"]))
 
-    # Camera activity peaks
-    story.append(Paragraph("Activity Peaks by Camera", styles["h"]))
-    if cam_stats:
+    # Camera activity peaks - only cameras that actually delivered frames.
+    # The ladder walk probes dead cameras across every country and each
+    # probe writes an ok=0 doc; listing those buried the real story under
+    # 20+ rows of zeros. Cameras from the reporting-country majority sit
+    # in their own table; cameras from earlier legs of the same window get
+    # a compact "earlier in this window" table underneath (context without
+    # noise). Dead-probed cameras collapse to one honest footnote.
+    _visible = [c for c in cam_stats if c.get("samples", 0) > 0]
+    _dark = len(cam_stats) - len(_visible)
+    try:
+        from app.cameras import CAMERAS as _CAM_CAT
+    except Exception:
+        _CAM_CAT = {}
+    _dom = dominant or current_country
+    _dom_rows = [c for c in _visible
+                 if (_CAM_CAT.get(str(c.get("cam_id"))) or {}).get(
+                     "country", _dom) == _dom]
+    _other_rows = [c for c in _visible if c not in _dom_rows]
+
+    def _peaks_table(rows, title):
+        story.append(Paragraph(title, styles["h"]))
         header = ["Camera", "Peak People", "Peak Vehicles", "Typical Traffic"]
         body = [header]
-        for c in cam_stats:
+        for c in rows:
             people = str(c["peak_person"])
             if c["peak_person_ts"]:
                 people += f" at {_fmt_ts(c['peak_person_ts'])}"
@@ -653,9 +766,22 @@ def compose_pdf(out_path: str | Path, *,
                     repeatRows=1)
         tbl.setStyle(_table_style())
         story.append(tbl)
-    else:
+
+    if _dom_rows:
+        _peaks_table(_dom_rows,
+                     f"Activity Peaks - {country_label}")
+    if _other_rows:
+        _peaks_table(_other_rows,
+                     "Earlier in this window (before the grid settled here)")
+    if not _visible:
+        story.append(Paragraph("Activity Peaks by Camera", styles["h"]))
         story.append(Paragraph("No footfall samples in this window.",
                                styles["body"]))
+    if _dark:
+        story.append(Paragraph(
+            f"{_dark} more camera(s) were probed but delivered no frames "
+            "(dead / geo-blocked) - omitted above.",
+            styles["cap"]))
 
     # Training status
     story.append(Paragraph("Model Training Status", styles["h"]))

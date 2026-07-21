@@ -1362,6 +1362,31 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
                                   f"{primary.get('observed')} vs "
                                   f"{primary.get('expected')} expected"),
                             image_jpeg=annotated_jpeg)
+            # Scene anomalies (extreme_load / camera_obstructed / camera_dark)
+            # were only being written to the footfall record's `is_anomaly`
+            # flag - the digest reads `events`, so the daily report NEVER
+            # surfaced 'camera_obstructed' or 'camera_dark' even when the
+            # collector's log had shouted about them. Mirror one row per
+            # verdict into `events` so they appear in the anomalies table
+            # exactly like loiter/returning. The per-(cam, kind) 30-min
+            # cooldown lives inside check_scene_anomalies, so this write
+            # is already deduped upstream.
+            try:
+                firebase.write_event({
+                    "kind":         primary["kind"],
+                    "slot":         slot_id,
+                    "cam_id":       cam_id,
+                    "cam_name":     cam.get("name", cam_id),
+                    "ts":           ts,
+                    "metric":       primary.get("metric"),
+                    "observed":     primary.get("observed"),
+                    "expected":     primary.get("expected"),
+                    "snapshot_url": record.get("snapshot_url"),
+                    "fullframe_url": record.get("snapshot_annotated_url")
+                                     or record.get("snapshot_url"),
+                })
+            except Exception as _e:
+                print(f"  ! scene-anomaly event write failed: {_e}")
 
     try:
         firebase.write(slot_id, record)

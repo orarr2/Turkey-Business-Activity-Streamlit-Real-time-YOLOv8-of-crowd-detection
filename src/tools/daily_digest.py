@@ -42,6 +42,12 @@ _SRC_ROOT = Path(__file__).resolve().parent.parent
 WINDOW_HOURS_DEFAULT = 12
 STALE_SLOT_MIN = 10          # newest sample older than this = stuck stream
 
+# Delta reporting: the Learning line used to repeat the same running totals
+# every 12 hours ("36 frames, 3 confirmed, 167 objects added") even when
+# nothing new had been reviewed - misleading progress signal. We now stash
+# the last report's snapshot on disk and report only the CHANGE.
+LAST_REPORT_STATE = _SRC_ROOT / "data" / ".digest_last_report.json"
+
 # Operator-facing labels for anomaly kinds. English throughout: the report
 # ships to the operator's Gmail and inline-previews on a plain LTR client;
 # every earlier Hebrew rendering (dashboard-side or bidi-shaped PDF) is
@@ -97,6 +103,8 @@ def footfall_stats(records: list[dict]) -> list[dict]:
     how fast traffic typically flows there.
     """
     cams: dict[str, dict] = {}
+    # Keep the display-name key working for tests that predate cam_id, but
+    # the PDF reads cam_id off c["cam_id"] to partition by country.
     for r in records:
         cam_id = str(r.get("cam_id") or r.get("cam_name") or "?")
         cam = str(r.get("cam_name") or cam_id)
@@ -153,36 +161,76 @@ def _fmt_ts(ts_iso: str) -> str:
         return str(ts_iso)[:16]
 
 
+def _load_last_report() -> dict:
+    try:
+        return json.loads(LAST_REPORT_STATE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_last_report(state: dict) -> None:
+    try:
+        LAST_REPORT_STATE.parent.mkdir(parents=True, exist_ok=True)
+        LAST_REPORT_STATE.write_text(json.dumps(state, indent=1))
+    except OSError as e:
+        print(f"digest: could not persist last-report state: {e}")
+
+
 def _training_lines(training: dict | None,
-                    reviews: dict | None) -> list[str]:
-    """One or two friendly sentences summarizing where the learning loop
-    stands. The old phrasing ('rejected at gate - head_run2.pt') read as
-    'the model is broken' - it isn't; the gate did its job on a tiny
-    dataset. Frame it as 'here's how many labels you have, here's what
-    the trainer did with them'."""
+                    reviews: dict | None,
+                    prev: dict | None = None) -> list[str]:
+    """Delta-based Learning line: only the CHANGE since the last digest.
+
+    The old phrasing repeated the running totals every 12 hours, so a report
+    with no new labels still read 'you have labeled 36 frames' - misleading
+    progress signal. We now stash the last snapshot on disk and describe
+    what moved. First-ever run prints the current totals as the baseline.
+    """
     lines: list[str] = []
     r = reviews or {}
-    if r.get("frames_labeled"):
-        stats = (f"You have labeled {r['frames_labeled']} frames "
-                 f"({r.get('boxes_confirmed', 0)} confirmed, "
-                 f"{r.get('boxes_rejected', 0)} rejected, "
-                 f"{r.get('missed_marked', 0)} objects you added).")
-        lines.append(stats)
+    prev = prev or {}
+    cur_frames = r.get("frames_labeled", 0)
+    cur_conf = r.get("boxes_confirmed", 0)
+    cur_rej = r.get("boxes_rejected", 0)
+    cur_miss = r.get("missed_marked", 0)
+
+    if not prev:
+        if cur_frames:
+            lines.append(f"So far you have labeled {cur_frames} frames "
+                         f"({cur_conf} confirmed, {cur_rej} rejected, "
+                         f"{cur_miss} objects you added). Future reports "
+                         f"will only mention new work since the last one.")
+        else:
+            lines.append("No frames labeled yet - open the Reinforcement "
+                         "Learning tab in the dashboard and start tagging.")
     else:
-        lines.append("No frames labeled yet - open the Reinforcement "
-                     "Learning tab in the dashboard and start tagging.")
-    if training:
+        d_frames = cur_frames - prev.get("frames_labeled", 0)
+        d_conf = cur_conf - prev.get("boxes_confirmed", 0)
+        d_rej = cur_rej - prev.get("boxes_rejected", 0)
+        d_miss = cur_miss - prev.get("missed_marked", 0)
+        if d_frames > 0 or d_conf > 0 or d_rej > 0 or d_miss > 0:
+            lines.append(f"Since the last report you labeled {d_frames} new "
+                         f"frame(s) (+{d_conf} confirmed, +{d_rej} rejected, "
+                         f"+{d_miss} objects added). Running total: "
+                         f"{cur_frames} frames.")
+        else:
+            lines.append(f"No new labels since the last report - "
+                         f"{cur_frames} frames on file. The trainer needs "
+                         f"more diverse examples before the next promotion.")
+
+    prev_train = prev.get("last_training") if prev else None
+    if training and training != prev_train:
         when = str(training.get("at") or "")[:10]
         cand = training.get("candidate") or training.get("file") or "?"
         if training.get("promoted"):
-            lines.append(f"Cloud training on {when} promoted a new "
-                         f"detection head ({cand}). The VM has already "
+            lines.append(f"Cloud training on {when} PROMOTED a new "
+                         f"detection head ({cand}); the VM has already "
                          f"picked it up.")
         else:
-            lines.append(f"Cloud training on {when} did not improve on the "
-                         f"baseline yet ({cand}). More diverse labels will "
-                         f"give the next run something new to learn from.")
-    else:
+            lines.append(f"Cloud training on {when} did not clear the gate "
+                         f"({cand}). More diverse labels will give the "
+                         f"next run something new to learn from.")
+    elif not training:
         lines.append("No cloud training run has executed yet. Trigger "
                      "'train-head' in the GitHub Actions tab once you have "
                      "20+ labeled frames.")
@@ -200,6 +248,46 @@ _COUNTRY_LABELS = {"turkey": "Turkey", "thailand": "Thailand",
 def _country_label(grid: dict | None) -> str:
     c = str((grid or {}).get("country") or "")
     return _COUNTRY_LABELS.get(c, c.title() if c else "Live grid")
+
+
+def _country_from_sample(sample: dict) -> str | None:
+    """Best-effort country of one footfall sample: catalog first, then the
+    cam-id prefix as a fallback for samples on cameras since removed."""
+    try:
+        from app.cameras import CAMERAS
+        c = (CAMERAS.get(str(sample.get("cam_id"))) or {}).get("country")
+    except Exception:
+        c = None
+    if c:
+        return c
+    cid = str(sample.get("cam_id") or "")
+    if cid.startswith("th_"):
+        return "thailand"
+    if cid.startswith("jp_"):
+        return "japan"
+    if cid.startswith("us_"):
+        return "usa"
+    return "turkey" if cid else None      # legacy Turkey cams have no prefix
+
+
+def dominant_country(footfall: list[dict]) -> str | None:
+    """The country that owned the WINDOW - not the moment the digest fired.
+
+    When the collector rotates through the ladder overnight (Thailand ->
+    Japan -> USA), a 12h digest that titles itself by the current grid can
+    read as "USA report" even though 99% of the samples were Thai. Weight
+    by ok-samples so a two-round USA probe with no frames cannot outvote
+    hours of live Thai data."""
+    counts: dict[str, int] = {}
+    for r in footfall:
+        if r.get("ok") != 1:
+            continue
+        c = _country_from_sample(r)
+        if c:
+            counts[c] = counts.get(c, 0) + 1
+    if not counts:
+        return None
+    return max(counts.items(), key=lambda kv: kv[1])[0]
 
 
 def _grid_cameras(grid: dict | None) -> list[dict]:
@@ -220,11 +308,18 @@ def compose_digest(now_il: dt.datetime, window_hours: int,
                    training: dict | None, stale_slots: list[dict],
                    reviews: dict | None = None,
                    grid: dict | None = None,
+                   dominant: str | None = None,
+                   prev: dict | None = None,
                    ) -> tuple[str, str, str]:
     """Returns (subject, plain_text, html). English throughout, phone-first.
-    `grid` is config/grid - names the active country and the live cameras."""
+    `grid` is config/grid - the collector's CURRENT country; `dominant` is
+    the country that owned the reporting WINDOW. When they disagree (an
+    overnight ladder walk fired the digest on a probe country) we title by
+    the data majority and mention the current grid as a footnote."""
     part = "Midday report" if now_il.hour < 16 else "Evening report"
-    label = _country_label(grid)
+    grid_label = _country_label(grid)
+    label = (_COUNTRY_LABELS.get(dominant, dominant.title())
+             if dominant else grid_label)
     subject = f"{label} - {part} {now_il.strftime('%d.%m')}"
 
     lines: list[str] = [f"{part} - last {window_hours} hours", ""]
@@ -236,9 +331,16 @@ def compose_digest(now_il: dt.datetime, window_hours: int,
     # Which grid is the collector on right now (country-generic - it may have
     # fallen through to another country while the primary was geo-blocked).
     grid_cams = _grid_cameras(grid)
+    if dominant and dominant != (grid or {}).get("country"):
+        note = (f"This window's data is mostly from {label}. The grid moved "
+                f"to {grid_label} at digest time - the live section below "
+                f"reflects the current grid, not the window's majority.")
+        lines.append(note)
+        lines.append("")
+        html.append(f"<p style='color:#475569;font-size:13px'>{note}</p>")
     if grid_cams:
-        lines.append(f"Live grid ({label}) - {len(grid_cams)} cameras:")
-        html.append(f"<h3 style='margin:14px 0 6px'>Live grid - {label}</h3>")
+        lines.append(f"Live grid ({grid_label}) - {len(grid_cams)} cameras:")
+        html.append(f"<h3 style='margin:14px 0 6px'>Live grid - {grid_label}</h3>")
         html.append("<table cellpadding='4' style='border-collapse:collapse'>")
         for gc in grid_cams:
             where = f" ({gc['city']})" if gc["city"] else ""
@@ -352,7 +454,7 @@ def compose_digest(now_il: dt.datetime, window_hours: int,
 
     lines.append("Learning:")
     html.append("<h3 style='margin:14px 0 6px'>Learning</h3>")
-    for line in _training_lines(training, reviews):
+    for line in _training_lines(training, reviews, prev=prev):
         lines.append("  " + line)
         html.append(f"<p>{line}</p>")
 
@@ -374,6 +476,47 @@ def _firestore():
     return firestore.client()
 
 
+def _scene_events_from_footfall(footfall: list[dict],
+                                already: list[dict]) -> list[dict]:
+    """Materialize scene anomalies (is_anomaly footfall rows) as event dicts,
+    with a per-(cam, kind) cooldown so a persistent obstruction doesn't
+    show up once per sample. Skips (cam, kind) pairs already present in the
+    events feed - the collector's own write path landed 2026-07-21; anything
+    from before that only lives in footfall."""
+    SCENE_KINDS = ("extreme_load", "camera_obstructed", "camera_dark")
+    have = {(str(e.get("cam_id")), str(e.get("kind")))
+            for e in already if e.get("kind") in SCENE_KINDS}
+    out: list[dict] = []
+    last_by = {}
+    for r in sorted(footfall, key=lambda x: str(x.get("ts") or "")):
+        if not r.get("is_anomaly"):
+            continue
+        a = r.get("anomaly") or {}
+        kind = str(a.get("kind") or "")
+        cam = str(r.get("cam_id") or "")
+        key = (cam, kind)
+        if kind not in SCENE_KINDS or key in have:
+            continue
+        ts = str(r.get("ts") or "")
+        if ts <= last_by.get(key, ""):
+            continue
+        last_by[key] = ts
+        out.append({
+            "kind":          kind,
+            "slot":          r.get("slot"),
+            "cam_id":        cam,
+            "cam_name":      r.get("cam_name"),
+            "ts":            ts,
+            "metric":        a.get("metric"),
+            "observed":      a.get("observed"),
+            "expected":      a.get("expected"),
+            "snapshot_url":  r.get("snapshot_url"),
+            "fullframe_url": r.get("snapshot_annotated_url")
+                             or r.get("snapshot_url"),
+        })
+    return out
+
+
 def fetch_window(db, window_hours: int
                  ) -> tuple[list[dict], list[dict], list[dict], set[str], dict]:
     cutoff = (dt.datetime.now(dt.timezone.utc)
@@ -385,25 +528,37 @@ def fetch_window(db, window_hours: int
     latest = [d.to_dict() for d in db.collection("latest").stream()]
     grid = (db.collection("config").document("grid").get().to_dict() or {})
     active = {str(s.get("slot_id") or "") for s in grid.get("slots") or []}
+    # Backfill scene anomalies from footfall so the report surfaces
+    # camera_obstructed / camera_dark / extreme_load regardless of whether
+    # the collector was writing them into `events` (that path only landed
+    # 2026-07-21).
+    events = events + _scene_events_from_footfall(footfall, events)
     return events, footfall, latest, active, grid
 
 
 def stale_from_latest(latest: list[dict],
                       now_utc: dt.datetime | None = None,
-                      active_slots: set[str] | None = None) -> list[dict]:
+                      active_slots: set[str] | None = None,
+                      window_ok_by_slot: dict | None = None) -> list[dict]:
     """Slots whose newest sample is old, OR fresh but last round was a MISS.
 
     Two failure modes surface here:
       * traditional stale: the collector stopped writing (`ts` gone old);
-      * silent-miss: collector keeps writing but every round decodes to
-        empty frames - `ts` stays fresh but `ok=0`. Without the second
-        check the report reads "reporting normally" while every peak is 0.
+      * silent-miss: collector keeps writing but the recent samples all
+        decoded to empty frames. The previous rule flagged any latest
+        doc with `ok=0` - which caught momentary single-round misses on
+        healthy cameras and read as "camera dead" (Sukhumvit at 20:00
+        with thousands of ok samples got that label because the last
+        round happened to miss). `window_ok_by_slot` lets us require
+        BOTH a fresh latest miss AND < HEALTHY_OK_MIN successful rounds
+        across the window; healthy cameras with one bad round are quiet.
 
     `active_slots` filters to the CURRENT grid - `latest` keeps documents
     of cameras that once ran and were since removed (observed live: the
     catalog-only tram camera showed up as '1462 minutes stale'), and
     those are history, not alarms.
     """
+    HEALTHY_OK_MIN = 20        # samples in the window that count as healthy
     now_utc = now_utc or dt.datetime.now(dt.timezone.utc)
     out = []
     for d in latest:
@@ -420,6 +575,13 @@ def stale_from_latest(latest: list[dict],
         # ok is only set to 0 by collector.py on a MISS; a legacy record
         # without the field is treated as "unknown" (not flagged).
         silent_miss = d.get("ok") == 0
+        # Healthy latest with a single miss? Do not alarm. Only flag when
+        # the WINDOW itself carries <HEALTHY_OK_MIN ok rounds for the slot.
+        ok_in_window = ((window_ok_by_slot or {})
+                        .get(str(d.get("slot") or ""), None))
+        if silent_miss and ok_in_window is not None \
+                and ok_in_window >= HEALTHY_OK_MIN:
+            silent_miss = False
         if traditional_stale or silent_miss:
             entry = {"cam": str(d.get("cam_name") or d.get("cam_id")
                                 or d.get("slot") or "?"),
@@ -542,7 +704,10 @@ def _build_pdf(now_il: dt.datetime, window_hours: int,
                reviews: dict | None,
                stale_slots: list[dict], footfall_count: int,
                total_events: int,
-               out_path: Path, grid: dict | None = None) -> Path | None:
+               out_path: Path, grid: dict | None = None,
+               dominant: str | None = None,
+               prev: dict | None = None,
+               latest: list[dict] | None = None) -> Path | None:
     """Compose the PDF; returns the path or None if reportlab is missing
     (the plain-text mail still ships in that case, which is the pre-PDF
     behavior and better than silently dropping the whole run)."""
@@ -556,6 +721,12 @@ def _build_pdf(now_il: dt.datetime, window_hours: int,
     bucket = os.environ.get("FIREBASE_STORAGE_BUCKET") or _bucket_name()
     picked_groups = report_pdf.pick_group_samples(event_groups)
     snapshots = report_pdf.fetch_snapshots_for_groups(picked_groups, bucket)
+    # Grid thumbnails: the "live view" annotated frame the collector
+    # publishes for each active slot (24h Storage lifecycle - always fresh).
+    grid_thumbs = report_pdf.fetch_grid_thumbnails(grid, latest or [],
+                                                   bucket)
+    grid_label = (_COUNTRY_LABELS.get(dominant, dominant.title())
+                  if dominant else _country_label(grid))
     return report_pdf.compose_pdf(
         out_path,
         now_il=now_il, window_hours=window_hours,
@@ -563,8 +734,13 @@ def _build_pdf(now_il: dt.datetime, window_hours: int,
         training=training, stale_slots=stale_slots,
         snapshots=snapshots, kind_labels=KIND_LABELS,
         total_events=total_events, total_samples=footfall_count,
-        training_lines=_training_lines(training, reviews),
-        country_label=_country_label(grid), grid_cameras=_grid_cameras(grid))
+        training_lines=_training_lines(training, reviews, prev=prev),
+        country_label=grid_label,
+        grid_country_label=_country_label(grid),
+        grid_cameras=_grid_cameras(grid),
+        grid_thumbnails=grid_thumbs,
+        dominant=dominant,
+        current_country=(grid or {}).get("country"))
 
 
 def main() -> None:
@@ -584,21 +760,37 @@ def main() -> None:
     cam_stats = footfall_stats(footfall)
     training = fetch_last_training()
     reviews = fetch_review_stats()
-    stale = stale_from_latest(latest, active_slots=active or None)
+    prev_state = _load_last_report()
+    # Per-slot healthy-round tally for the aggregate stale check - a slot
+    # with 100+ ok rounds this window is not "producing empty frames" just
+    # because the last one happened to miss.
+    window_ok_by_slot: dict = {}
+    for r in footfall:
+        if r.get("ok") == 1:
+            k = str(r.get("slot") or "")
+            window_ok_by_slot[k] = window_ok_by_slot.get(k, 0) + 1
+    stale = stale_from_latest(latest, active_slots=active or None,
+                              window_ok_by_slot=window_ok_by_slot)
+    dominant = dominant_country(footfall)
     now_il = _israel_now()
 
     subject, text, html = compose_digest(
         now_il, args.window_hours, groups, cam_stats, training, stale,
-        reviews=reviews, grid=grid)
+        reviews=reviews, grid=grid, dominant=dominant,
+        prev=prev_state)
 
-    country_slug = str((grid or {}).get("country") or "grid")
+    # Country slug for the PDF filename: the DATA majority when it exists,
+    # not the momentary grid - matches the report's subject line.
+    country_slug = dominant or str((grid or {}).get("country") or "grid")
     default_pdf = (Path("./daily_digest.pdf") if args.dry_run
                    else Path(tempfile.mkdtemp(prefix="digest-"))
                         / f"{country_slug}_report_{now_il.strftime('%Y%m%d_%H%M')}.pdf")
     pdf_path = Path(args.pdf_out) if args.pdf_out else default_pdf
     built = _build_pdf(now_il, args.window_hours, groups, cam_stats,
                        training, reviews, stale, len(footfall),
-                       total_events=len(events), out_path=pdf_path, grid=grid)
+                       total_events=len(events), out_path=pdf_path,
+                       grid=grid, dominant=dominant, prev=prev_state,
+                       latest=latest)
 
     if args.dry_run:
         print(f"SUBJECT: {subject}\n\n{text}")
@@ -608,6 +800,17 @@ def main() -> None:
         return
     send_gmail(subject, text, html,
                attachments=[built] if built else None)
+    # Snapshot for the NEXT report's delta line. Only persist after a
+    # successful send so a crashed run doesn't retroactively silence the
+    # unsent report's numbers.
+    _save_last_report({
+        "frames_labeled":  (reviews or {}).get("frames_labeled", 0),
+        "boxes_confirmed": (reviews or {}).get("boxes_confirmed", 0),
+        "boxes_rejected":  (reviews or {}).get("boxes_rejected", 0),
+        "missed_marked":   (reviews or {}).get("missed_marked", 0),
+        "last_training":   training,
+        "sent_at":         now_il.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    })
     print(f"digest sent: {subject} ({len(events)} events, "
           f"{len(footfall)} samples"
           + (f", PDF {built.stat().st_size // 1024} KB attached"
