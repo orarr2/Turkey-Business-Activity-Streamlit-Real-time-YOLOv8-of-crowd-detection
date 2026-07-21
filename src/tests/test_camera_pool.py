@@ -20,11 +20,15 @@ import time
 from app.cameras import FALLBACK_POOL, GRID_SLOTS, country_pool
 from app.collector import CameraPool
 
-# Turkey ladder, new order: IBB four on top, Konya four below.
+# Turkey ladder, operator-approved 2026-07-21: 3 YouTube-Live cameras on
+# top (the only ones that clear the GCP geo-block on the IBB CDN), then
+# IBB four, then Konya four, then the rest of the Turkish tail.
+YT3 = ["tr_bulancak_meydan", "tr_golden_horn", "tr_giresun_kalesi"]
 IBB4 = ["taksim_yeni", "sultanahmet_1_yeni", "eyup_sultan_yeni",
         "beyazit_meydan_yeni"]
 KONYA = ["konya_hukumet", "otogar_kavsagi", "konya_kulturpark",
          "konya_millet_caddesi"]
+TOP4 = YT3 + IBB4[:1]      # what an all-healthy pool serves on n_slots=4
 
 
 def make_pool(**kw):
@@ -40,9 +44,10 @@ def kill(pool, cam, now):
 
 
 def test_pool_layout_matches_operator_spec():
-    assert FALLBACK_POOL[:4] == IBB4                  # IBB first now
-    assert FALLBACK_POOL[4:8] == KONYA
-    assert FALLBACK_POOL[8] == "buyuk_camlica_yeni"   # Turkish tail head
+    assert FALLBACK_POOL[:3] == YT3                   # YouTube tier first
+    assert FALLBACK_POOL[3:7] == IBB4
+    assert FALLBACK_POOL[7:11] == KONYA
+    assert FALLBACK_POOL[11] == "buyuk_camlica_yeni"  # Turkish tail head
     assert len(FALLBACK_POOL) == len(set(FALLBACK_POOL))
     assert country_pool("turkey") == FALLBACK_POOL
     for s in GRID_SLOTS:
@@ -50,9 +55,9 @@ def test_pool_layout_matches_operator_spec():
         assert set(chain) == set(FALLBACK_POOL)
 
 
-def test_all_healthy_assigns_the_four_ibb():
+def test_all_healthy_assigns_the_top_of_the_ladder():
     pool = make_pool()
-    assert pool.assign(now=1000) == IBB4
+    assert pool.assign(now=1000) == TOP4
 
 
 def test_assignment_always_distinct():
@@ -66,17 +71,29 @@ def test_assignment_always_distinct():
         now += 40
 
 
-def test_dead_ibb_promotes_the_konya_four_in_order():
+def test_dead_top_promotes_next_tier_in_order():
     pool = make_pool()
     now = 1000
-    for cam in IBB4:
+    for cam in YT3 + IBB4:
         kill(pool, cam, now)
     assert pool.assign(now=now) == KONYA
 
 
-def test_partial_ibb_outage_mixes_tiers_in_priority_order():
+def test_partial_ibb_outage_still_serves_yt_first():
     pool = make_pool()
     now = 1000
+    kill(pool, "sultanahmet_1_yeni", now)
+    kill(pool, "beyazit_meydan_yeni", now)
+    # With YT3 healthy, they always fill slots 1-3; slot 4 goes to the
+    # first surviving IBB camera (taksim, since sultanahmet+beyazit rest).
+    assert pool.assign(now=now) == YT3 + ["taksim_yeni"]
+
+
+def test_yt_dead_partial_ibb_mixes_tiers_in_priority_order():
+    pool = make_pool()
+    now = 1000
+    for cam in YT3:
+        kill(pool, cam, now)
     kill(pool, "sultanahmet_1_yeni", now)
     kill(pool, "beyazit_meydan_yeni", now)
     assert pool.assign(now=now) == [
@@ -85,29 +102,29 @@ def test_partial_ibb_outage_mixes_tiers_in_priority_order():
     ]
 
 
-def test_dead_top_eight_keeps_walking_the_catalog():
+def test_dead_top_tiers_keep_walking_the_catalog():
     pool = make_pool()
     now = 1000
-    for cam in IBB4 + KONYA:
+    for cam in YT3 + IBB4 + KONYA:
         kill(pool, cam, now)
     got = pool.assign(now=now)
-    assert got == FALLBACK_POOL[8:12]   # buyuk_camlica, ince_minareli, ...
+    assert got == FALLBACK_POOL[11:15]   # buyuk_camlica, ince_minareli, ...
     assert len(set(got)) == 4
 
 
 def test_everything_dead_holds_steady_on_top_of_ladder():
     """All-dead pool: the padding is deterministic (pool priority order),
-    so the grid stops churning tiles and sits on the four IBB cams."""
+    so the grid stops churning tiles and sits on the top of the ladder."""
     pool = make_pool()
     now = 1000
     for cam in FALLBACK_POOL:
         kill(pool, cam, now)
     first = pool.assign(now=now + 1)
-    assert first == IBB4
+    assert first == TOP4
     t = now + 1
     for _ in range(10):
         cams = pool.assign(now=t)
-        assert cams == IBB4
+        assert cams == TOP4
         for c in cams:
             pool.record(c, False, now=t)
         t += 40
@@ -125,64 +142,71 @@ def test_forced_sample_of_resting_camera_does_not_extend_cooldown():
 def test_cooldown_expiry_reprobes_higher_priority():
     pool = make_pool(retry_minutes=15)
     now = 1000
-    for cam in IBB4:
+    for cam in YT3 + IBB4:
         kill(pool, cam, now)
     assert pool.assign(now=now) == KONYA
     later = now + 15 * 60 + 1
-    assert pool.assign(now=later)[0] == "taksim_yeni"
+    # The reprobe pulls the highest-priority tier - now YT3 - back first.
+    assert pool.assign(now=later)[0] == YT3[0]
 
 
 def test_probation_cameras_rest_after_a_single_miss():
+    """Proven-dead cams (killed and then rehabilitated by a
+    cooldown expiry) rest after ONE further miss - bypass the
+    max_failures grace period."""
     pool = make_pool(retry_minutes=15)
     now = 1000
-    for cam in IBB4:
-        kill(pool, cam, now)
-    for cam in KONYA:
-        pool.record(cam, True, now=now)
-    later = now + 15 * 60 + 1
-    probe = pool.assign(now=later)
-    assert probe == IBB4
-    for cam in probe:
-        pool.record(cam, False, now=later)    # still dead: ONE miss each
-    assert pool.assign(now=later + 1) == KONYA
+    kill(pool, "taksim_yeni", now)
+    assert pool.proven_dead["taksim_yeni"]
+    later = now + pool.retry_seconds + 1        # cooldown expired
+    assert pool.cooldown_until["taksim_yeni"] <= later
+    pool.record("taksim_yeni", False, now=later)   # ONE miss
+    assert pool.cooldown_until["taksim_yeni"] > later
 
 
 def test_recovered_camera_is_fully_rehabilitated():
+    """A successful frame after cooldown wipes proven_dead so the
+    camera regains the FULL grace (max_failures misses allowed again)."""
     pool = make_pool()
     now = 1000
     kill(pool, "taksim_yeni", now)
     later = now + pool.retry_seconds + 1
-    pool.record("taksim_yeni", True, now=later)
-    assert pool.assign(now=later + 1)[0] == "taksim_yeni"
-    pool.record("taksim_yeni", False, now=later + 2)
-    assert pool.assign(now=later + 3)[0] == "taksim_yeni"
+    pool.record("taksim_yeni", True, now=later)      # revived
+    assert not pool.proven_dead["taksim_yeni"]
+    assert pool.cooldown_until["taksim_yeni"] == 0.0
+    pool.record("taksim_yeni", False, now=later + 2) # 1 of max_failures
+    # Rehabilitated -> ONE miss should NOT rest it.
+    assert pool.cooldown_until["taksim_yeni"] == 0.0
 
 
 def test_record_ignores_unknown_camera():
     pool = make_pool()
     pool.record("not_in_pool", False, now=1000)
-    assert pool.assign(now=1000) == IBB4
+    assert pool.assign(now=1000) == TOP4
 
 
 def test_fast_fail_cameras_rest_after_one_miss():
     """tvkur/Konya fast-fail: one miss and the camera is out this round."""
     pool = make_pool(fast_fail=KONYA)
     now = 1000
-    for cam in IBB4:                     # clear the IBB tier out of the way
+    for cam in YT3 + IBB4:                    # clear the YT+IBB tiers first
         kill(pool, cam, now)
     assert pool.assign(now=now) == KONYA
     for cam in KONYA:
         pool.record(cam, False, now=now)      # ONE miss each
     # Konya rests immediately; ladder walks to the Turkish tail.
-    assert pool.assign(now=now + 1) == FALLBACK_POOL[8:12]
+    assert pool.assign(now=now + 1) == FALLBACK_POOL[11:15]
 
 
 def test_fast_fail_does_not_touch_other_tiers():
     pool = make_pool(fast_fail=KONYA)
     now = 1000
-    # One miss on an IBB (non-fast-fail) cam must NOT rest it.
+    # One miss on an IBB (non-fast-fail) cam must NOT rest it. Asserted
+    # on the cooldown directly so it doesn't depend on where taksim sits
+    # in the pool head (YT3 sits above IBB in the operator-approved
+    # ladder as of 2026-07-21).
     pool.record("taksim_yeni", False, now=now)
-    assert pool.assign(now=now)[0] == "taksim_yeni"
+    assert pool.cooldown_until["taksim_yeni"] == 0.0
 
 
 def test_recovered_fast_fail_cam_is_still_one_strike():

@@ -362,6 +362,36 @@ CAMERAS = {
         "type": "commercial street (geo-restricted)",
     },
 
+    # --- Turkey YouTube-Live tier (2026-07-21, added after the GCP geo-block
+    # verification). Every IBB stream (kamerayayin.ibb.istanbul) and every
+    # tvkur.com-backed webcamera24 Turkey entry returns HTTP 403 on the raw
+    # HLS layer from us-east1 - verified end-to-end with tools/probe_country
+    # (21/21 DEAD, all http_403). YouTube-Live is the only path that gives
+    # the collector actual Turkish coverage from the free-tier VM: these
+    # three streams are webcamera24-listed but backed by youtube.com/watch
+    # embeds (verified 2026-07-21 with yt-dlp is_live=True), so they resolve
+    # exactly like the Thailand/Japan/USA cameras that have been running
+    # for weeks. Ordered first in TURKEY_POOL below so the collector starts
+    # here instead of walking through the 21 blocked entries.
+    "tr_bulancak_meydan": {
+        "name": "Bulancak Meydani (Giresun)", "city": "Giresun", "country": "turkey",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=vn702Owd5Kk",
+        "page": "https://webcamera24.com/camera/turkey/bulancak-square-cam/",
+        "embed": "https://www.youtube.com/embed/vn702Owd5Kk?autoplay=1&mute=1&playsinline=1&enablejsapi=1",
+    },
+    "tr_golden_horn": {
+        "name": "Golden Horn (Istanbul)", "city": "Istanbul", "country": "turkey",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=7VCk0oB0pDo",
+        "page": "https://webcamera24.com/camera/turkey/clarionhotelgoldenhorn-cam/",
+        "embed": "https://www.youtube.com/embed/7VCk0oB0pDo?autoplay=1&mute=1&playsinline=1&enablejsapi=1",
+    },
+    "tr_giresun_kalesi": {
+        "name": "Giresun Kalesi (Castle)", "city": "Giresun", "country": "turkey",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=MMw0F-b-Q7c",
+        "page": "https://webcamera24.com/camera/turkey/giresun-castle-cam/",
+        "embed": "https://www.youtube.com/embed/MMw0F-b-Q7c?autoplay=1&mute=1&playsinline=1&enablejsapi=1",
+    },
+
     # ================= Multi-country street/traffic cameras =================
     # Added 2026-07-17 for the country-generic collector. All resolve to a
     # YouTube Live via yt-dlp's ANDROID innertube client (the web client
@@ -580,11 +610,18 @@ CAMERAS = {
 # CountryDirector re-probes higher-priority countries shortly before each
 # report and switches back if one has recovered.
 #
-# Turkey ladder (operator's revised order 2026-07-17): IBB first (the
-# original target, geo-blocked from GCP since early July but the primary
-# subject), then the four Konya cams, then the Turkish tail (rest of the
-# IBB catalog + the Konya tram-line view). Konya `tvkur` cams are the
-# fast-fail lane (see collector.CameraPool): one miss rests them.
+# Turkey ladder (revised 2026-07-21 after the geo-block verification):
+# YouTube-backed cameras FIRST. tools/probe_country --country turkey from
+# the GCP VM returns HTTP 403 on every one of the 21 IBB/Konya/webcamera24-
+# tvkur entries; the only path that actually delivers Turkish frames from
+# us-east1 is YouTube-Live. TURKEY_YT sits at the head of the pool so the
+# collector starts on working cameras; the blocked tiers stay in place so
+# a future thaw (or a Turkey-routed VM) puts them right back into rotation
+# without a code change. Konya `tvkur` cams are the fast-fail lane
+# (see collector.CameraPool): one miss rests them.
+TURKEY_YT = [
+    "tr_bulancak_meydan", "tr_golden_horn", "tr_giresun_kalesi",
+]
 TURKEY_IBB = [
     "taksim_yeni", "sultanahmet_1_yeni", "eyup_sultan_yeni", "beyazit_meydan_yeni",
 ]
@@ -597,7 +634,7 @@ TURKEY_TAIL = [
     "ulus_parki_yeni", "pierre_lotti_yeni", "emirgan_yeni", "kiz_kulesi_yeni",
     "hidiv_kasri_yeni", "dragos_yeni",
 ]
-TURKEY_POOL = TURKEY_IBB + TURKEY_KONYA + TURKEY_TAIL
+TURKEY_POOL = TURKEY_YT + TURKEY_IBB + TURKEY_KONYA + TURKEY_TAIL
 
 # Foreign ladders: the operator's four per country first (verified live
 # 2026-07-17), then the spares discovered from the same webcamera24 country

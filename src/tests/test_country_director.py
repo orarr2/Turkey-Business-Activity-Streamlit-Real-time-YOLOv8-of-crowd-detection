@@ -33,7 +33,7 @@ def test_starts_on_top_priority_country():
     country, cams = d.assign(now=1000)
     assert country == "turkey"
     assert len(cams) == 4 and len(set(cams)) == 4
-    assert cams[0] == "taksim_yeni"       # Turkey ladder is IBB-first
+    assert cams[0] == "tr_bulancak_meydan"   # Turkey ladder is YT-first (post-2026-07-21)
 
 
 def test_full_turkey_stays_on_turkey():
@@ -60,8 +60,10 @@ def test_single_dead_camera_does_not_advance_country():
     d = make_director()
     now = 1000
     pool = d.pools["turkey"]
-    # Kill the four IBB primaries; Konya + tail are still live.
-    for cam in ["taksim_yeni", "sultanahmet_1_yeni", "eyup_sultan_yeni",
+    # Kill the three YT cameras + four IBB primaries; the Turkey pool
+    # still fields Konya + tail from the same country's bench.
+    for cam in ["tr_bulancak_meydan", "tr_golden_horn", "tr_giresun_kalesi",
+                "taksim_yeni", "sultanahmet_1_yeni", "eyup_sultan_yeni",
                 "beyazit_meydan_yeni"]:
         for _ in range(pool.max_failures):
             pool.record(cam, False, now=now)
@@ -121,7 +123,7 @@ def test_switch_to_forgives_strikes():
     d.switch_to("turkey")
     assert d.live_count("turkey", now) == len(d.pools["turkey"].pool)
     _, cams = d.assign(now)
-    assert cams[0] == "taksim_yeni"
+    assert cams[0] == "tr_bulancak_meydan"
 
 
 def test_record_routes_to_named_country():
