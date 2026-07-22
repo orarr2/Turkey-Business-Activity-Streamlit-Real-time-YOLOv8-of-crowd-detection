@@ -24,8 +24,8 @@ from app.collector import CameraPool
 # top (the only ones that clear the GCP geo-block on the IBB CDN), then
 # IBB four, then Konya four, then the rest of the Turkish tail.
 YT3 = ["tr_bulancak_meydan", "tr_golden_horn", "tr_giresun_kalesi"]
-IBB4 = ["taksim_yeni", "sultanahmet_1_yeni", "eyup_sultan_yeni",
-        "beyazit_meydan_yeni"]
+IBB4 = ["taksim_yeni", "beyazit_meydan_yeni", "sarachane_yeni",
+        "sultanahmet_1_yeni"]
 KONYA = ["konya_hukumet", "otogar_kavsagi", "konya_kulturpark",
          "konya_millet_caddesi"]
 TOP4 = YT3 + IBB4[:1]      # what an all-healthy pool serves on n_slots=4
@@ -82,10 +82,11 @@ def test_dead_top_promotes_next_tier_in_order():
 def test_partial_ibb_outage_still_serves_yt_first():
     pool = make_pool()
     now = 1000
+    # Kill the 3rd + 4th IBB cams of the new order (sarachane, sultanahmet_1).
+    kill(pool, "sarachane_yeni", now)
     kill(pool, "sultanahmet_1_yeni", now)
-    kill(pool, "beyazit_meydan_yeni", now)
     # With YT3 healthy, they always fill slots 1-3; slot 4 goes to the
-    # first surviving IBB camera (taksim, since sultanahmet+beyazit rest).
+    # first surviving IBB camera (taksim, since sarachane+sultanahmet rest).
     assert pool.assign(now=now) == YT3 + ["taksim_yeni"]
 
 
@@ -94,10 +95,10 @@ def test_yt_dead_partial_ibb_mixes_tiers_in_priority_order():
     now = 1000
     for cam in YT3:
         kill(pool, cam, now)
-    kill(pool, "sultanahmet_1_yeni", now)
     kill(pool, "beyazit_meydan_yeni", now)
+    kill(pool, "sultanahmet_1_yeni", now)
     assert pool.assign(now=now) == [
-        "taksim_yeni", "eyup_sultan_yeni",
+        "taksim_yeni", "sarachane_yeni",
         "konya_hukumet", "otogar_kavsagi",
     ]
 

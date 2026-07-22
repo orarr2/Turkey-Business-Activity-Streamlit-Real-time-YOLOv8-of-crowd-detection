@@ -623,13 +623,17 @@ TURKEY_YT = [
     "tr_bulancak_meydan", "tr_golden_horn", "tr_giresun_kalesi",
 ]
 TURKEY_IBB = [
-    "taksim_yeni", "sultanahmet_1_yeni", "eyup_sultan_yeni", "beyazit_meydan_yeni",
+    # Operator-approved IBB set (2026-07-21): Taksim -> Beyazit -> Sarachane
+    # -> Sultanahmet. Eyup Sultan moved down to the tail; Sarachane
+    # promoted up from the tail. All four resolve through kamerayayin.ibb.istanbul,
+    # so they ride the Cloudflare-Worker relay in one call.
+    "taksim_yeni", "beyazit_meydan_yeni", "sarachane_yeni", "sultanahmet_1_yeni",
 ]
 TURKEY_KONYA = [
     "konya_hukumet", "otogar_kavsagi", "konya_kulturpark", "konya_millet_caddesi",
 ]
 TURKEY_TAIL = [
-    "buyuk_camlica_yeni", "konya_ince_minareli", "sarachane_yeni",
+    "buyuk_camlica_yeni", "konya_ince_minareli", "eyup_sultan_yeni",
     "sultanahmet_2_yeni", "uskudar_yeni", "salacak_yeni", "kucukcekmece_yeni",
     "ulus_parki_yeni", "pierre_lotti_yeni", "emirgan_yeni", "kiz_kulesi_yeni",
     "hidiv_kasri_yeni", "dragos_yeni",

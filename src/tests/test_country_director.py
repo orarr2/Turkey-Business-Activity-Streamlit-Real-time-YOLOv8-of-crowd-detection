@@ -63,8 +63,8 @@ def test_single_dead_camera_does_not_advance_country():
     # Kill the three YT cameras + four IBB primaries; the Turkey pool
     # still fields Konya + tail from the same country's bench.
     for cam in ["tr_bulancak_meydan", "tr_golden_horn", "tr_giresun_kalesi",
-                "taksim_yeni", "sultanahmet_1_yeni", "eyup_sultan_yeni",
-                "beyazit_meydan_yeni"]:
+                "taksim_yeni", "beyazit_meydan_yeni", "sarachane_yeni",
+                "sultanahmet_1_yeni"]:
         for _ in range(pool.max_failures):
             pool.record(cam, False, now=now)
     assert d.live_count("turkey", now) >= 4

@@ -13,8 +13,8 @@ from app.collector import CameraPool, HostBreaker
 
 KONYA = ["konya_hukumet", "otogar_kavsagi", "konya_kulturpark",
          "konya_millet_caddesi"]
-IBB4 = ["taksim_yeni", "sultanahmet_1_yeni", "eyup_sultan_yeni",
-        "beyazit_meydan_yeni"]
+IBB4 = ["taksim_yeni", "beyazit_meydan_yeni", "sarachane_yeni",
+        "sultanahmet_1_yeni"]
 
 def _host(cam: str) -> str:
     if cam.startswith(("konya", "otogar")):
