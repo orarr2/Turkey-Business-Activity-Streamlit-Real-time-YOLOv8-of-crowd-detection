@@ -23,12 +23,14 @@ from app.collector import CameraPool
 # Turkey ladder, operator-approved 2026-07-21: 3 YouTube-Live cameras on
 # top (the only ones that clear the GCP geo-block on the IBB CDN), then
 # IBB four, then Konya four, then the rest of the Turkish tail.
-YT3 = ["tr_bulancak_meydan", "tr_golden_horn", "tr_giresun_kalesi"]
+YT4 = ["tr_bulancak_meydan", "tr_golden_horn", "tr_giresun_kalesi",
+       "tr_ankara_kivircik_park"]
+YT3 = YT4[:3]                              # back-compat alias
 IBB4 = ["taksim_yeni", "beyazit_meydan_yeni", "sarachane_yeni",
         "sultanahmet_1_yeni"]
 KONYA = ["konya_hukumet", "otogar_kavsagi", "konya_kulturpark",
          "konya_millet_caddesi"]
-TOP4 = YT3 + IBB4[:1]      # what an all-healthy pool serves on n_slots=4
+TOP4 = YT4                                 # 4 healthy YT cams fill all 4 slots
 
 
 def make_pool(**kw):
@@ -44,10 +46,10 @@ def kill(pool, cam, now):
 
 
 def test_pool_layout_matches_operator_spec():
-    assert FALLBACK_POOL[:3] == YT3                   # YouTube tier first
-    assert FALLBACK_POOL[3:7] == IBB4
-    assert FALLBACK_POOL[7:11] == KONYA
-    assert FALLBACK_POOL[11] == "buyuk_camlica_yeni"  # Turkish tail head
+    assert FALLBACK_POOL[:4] == YT4                   # YouTube tier first
+    assert FALLBACK_POOL[4:8] == IBB4
+    assert FALLBACK_POOL[8:12] == KONYA
+    assert FALLBACK_POOL[12] == "buyuk_camlica_yeni"  # Turkish tail head
     assert len(FALLBACK_POOL) == len(set(FALLBACK_POOL))
     assert country_pool("turkey") == FALLBACK_POOL
     for s in GRID_SLOTS:
@@ -74,7 +76,7 @@ def test_assignment_always_distinct():
 def test_dead_top_promotes_next_tier_in_order():
     pool = make_pool()
     now = 1000
-    for cam in YT3 + IBB4:
+    for cam in YT4 + IBB4:
         kill(pool, cam, now)
     assert pool.assign(now=now) == KONYA
 
@@ -85,15 +87,14 @@ def test_partial_ibb_outage_still_serves_yt_first():
     # Kill the 3rd + 4th IBB cams of the new order (sarachane, sultanahmet_1).
     kill(pool, "sarachane_yeni", now)
     kill(pool, "sultanahmet_1_yeni", now)
-    # With YT3 healthy, they always fill slots 1-3; slot 4 goes to the
-    # first surviving IBB camera (taksim, since sarachane+sultanahmet rest).
-    assert pool.assign(now=now) == YT3 + ["taksim_yeni"]
+    # With YT4 healthy the top tier fills all 4 slots on its own.
+    assert pool.assign(now=now) == YT4
 
 
 def test_yt_dead_partial_ibb_mixes_tiers_in_priority_order():
     pool = make_pool()
     now = 1000
-    for cam in YT3:
+    for cam in YT4:
         kill(pool, cam, now)
     kill(pool, "beyazit_meydan_yeni", now)
     kill(pool, "sultanahmet_1_yeni", now)
@@ -106,10 +107,10 @@ def test_yt_dead_partial_ibb_mixes_tiers_in_priority_order():
 def test_dead_top_tiers_keep_walking_the_catalog():
     pool = make_pool()
     now = 1000
-    for cam in YT3 + IBB4 + KONYA:
+    for cam in YT4 + IBB4 + KONYA:
         kill(pool, cam, now)
     got = pool.assign(now=now)
-    assert got == FALLBACK_POOL[11:15]   # buyuk_camlica, ince_minareli, ...
+    assert got == FALLBACK_POOL[12:16]   # buyuk_camlica, ince_minareli, ...
     assert len(set(got)) == 4
 
 
@@ -143,7 +144,7 @@ def test_forced_sample_of_resting_camera_does_not_extend_cooldown():
 def test_cooldown_expiry_reprobes_higher_priority():
     pool = make_pool(retry_minutes=15)
     now = 1000
-    for cam in YT3 + IBB4:
+    for cam in YT4 + IBB4:
         kill(pool, cam, now)
     assert pool.assign(now=now) == KONYA
     later = now + 15 * 60 + 1
@@ -190,13 +191,13 @@ def test_fast_fail_cameras_rest_after_one_miss():
     """tvkur/Konya fast-fail: one miss and the camera is out this round."""
     pool = make_pool(fast_fail=KONYA)
     now = 1000
-    for cam in YT3 + IBB4:                    # clear the YT+IBB tiers first
+    for cam in YT4 + IBB4:                    # clear the YT+IBB tiers first
         kill(pool, cam, now)
     assert pool.assign(now=now) == KONYA
     for cam in KONYA:
         pool.record(cam, False, now=now)      # ONE miss each
     # Konya rests immediately; ladder walks to the Turkish tail.
-    assert pool.assign(now=now + 1) == FALLBACK_POOL[11:15]
+    assert pool.assign(now=now + 1) == FALLBACK_POOL[12:16]
 
 
 def test_fast_fail_does_not_touch_other_tiers():

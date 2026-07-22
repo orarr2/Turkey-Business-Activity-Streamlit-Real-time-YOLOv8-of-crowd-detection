@@ -23,6 +23,15 @@ from app.detect_core import box_iou, point_in_polygon
 
 LOITER_PERSON_SEC_DEFAULT  = 300.0
 LOITER_VEHICLE_SEC_DEFAULT = 900.0
+# A stay whose FIRST and CURRENT boxes overlap above this is a static object
+# - kiosk, awning, signage - that YOLO keeps calling "car" or "bus". The
+# match_iou gate (0.30) below is the CONTINUITY test between consecutive
+# samples; this new gate is the STATICITY test across the whole stay. Two
+# midday-2026-07-22 evidence cards nailed the failure mode: the same kiosk
+# labeled "car" for 1000s + a fixed shop awning labeled "bus" for 960s -
+# both got picked up as loiter alerts, both would have failed this gate
+# (IoU first-vs-last ~1.0). A real loiterer at least shifts weight.
+LOITER_MAX_STATIC_IOU = 0.90
 
 
 class PresenceTracker:
@@ -33,16 +42,21 @@ class PresenceTracker:
                  vehicle_sec: float = LOITER_VEHICLE_SEC_DEFAULT,
                  match_iou: float = 0.30,
                  continuity_gap_sec: float = 180.0,
-                 realert_sec: float = 1800.0):
+                 realert_sec: float = 1800.0,
+                 max_static_iou: float = LOITER_MAX_STATIC_IOU):
         self.person_sec  = person_sec
         self.vehicle_sec = vehicle_sec
         self.match_iou   = match_iou
         self.continuity_gap_sec = continuity_gap_sec
         self.realert_sec = realert_sec
-        # (cam_id, entity_id) -> [stay_start, last_seen, box, last_alert_ts]
-        # last_alert_ts is None until the first alert - an epoch-0 sentinel
-        # would silently suppress alerts whenever now < realert_sec (tests,
-        # simulated clocks).
+        self.max_static_iou = max_static_iou
+        # (cam_id, entity_id) -> [stay_start, last_seen, first_box, box,
+        #                         last_alert_ts]
+        # first_box (added 2026-07-22) is the box the stay STARTED with -
+        # the static-object gate needs it to compare against the current
+        # box. last_alert_ts is None until the first alert - an epoch-0
+        # sentinel would silently suppress alerts whenever now <
+        # realert_sec (tests, simulated clocks).
         self._stays: dict[tuple[str, int], list] = {}
 
     def threshold_for(self, cls: str, cam: dict | None = None) -> float:
@@ -61,21 +75,30 @@ class PresenceTracker:
         stay = self._stays.get(key)
 
         if stay is not None:
-            _, last_seen, prev_box, _ = stay
+            _, last_seen, _first_box, prev_box, _ = stay
             if (now - last_seen > self.continuity_gap_sec
                     or box_iou(prev_box, box) < self.match_iou):
                 stay = None                      # moved, or continuity broken
 
         if stay is None:
-            self._stays[key] = [now, now, box, None]
+            self._stays[key] = [now, now, dict(box), box, None]
             return None
         stay[1] = now
-        stay[2] = box
+        stay[3] = box
 
         duration = now - stay[0]
         if duration < self.threshold_for(cls, cam):
             return None
-        if stay[3] is not None and now - stay[3] < self.realert_sec:
+        if stay[4] is not None and now - stay[4] < self.realert_sec:
+            return None
+
+        # Static-object gate: a "loiterer" whose box has not moved AT ALL
+        # since the stay started is not a loiterer - it is a kiosk, sign,
+        # awning or parked machinery that YOLO keeps re-classifying. Refuse
+        # to alert. A real person or vehicle that stops moving still drifts
+        # a few pixels between samples; a stationary structure holds IoU
+        # ~1.0 forever.
+        if box_iou(stay[2], box) >= self.max_static_iou:
             return None
 
         loiter_roi = (cam or {}).get("loiter_roi")
@@ -86,7 +109,7 @@ class PresenceTracker:
             if not point_in_polygon(fx, fy, loiter_roi):
                 return None
 
-        stay[3] = now
+        stay[4] = now
         return {
             "kind": "loiter",
             "cls": cls,

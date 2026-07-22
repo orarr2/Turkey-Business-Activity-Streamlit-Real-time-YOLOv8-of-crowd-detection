@@ -160,9 +160,9 @@ def test_loiter_realert_cooldown():
     p = PresenceTracker(person_sec=100, realert_sec=1800)
     t = 1000.0
     p.observe("cam", 7, "person", BOX, FRAME_SHAPE, now=t)
-    ev = p.observe("cam", 7, "person", BOX, FRAME_SHAPE, now=t + 120)
+    ev = p.observe("cam", 7, "person", BOX_NUDGE, FRAME_SHAPE, now=t + 120)
     assert ev is not None
-    ev2 = p.observe("cam", 7, "person", BOX, FRAME_SHAPE, now=t + 160)
+    ev2 = p.observe("cam", 7, "person", BOX_NUDGE, FRAME_SHAPE, now=t + 160)
     assert ev2 is None                         # within realert window
 
 
@@ -172,10 +172,12 @@ def test_loiter_roi_gate():
     t = 1000.0
     # BOX foot point is (70/200=0.35, 0.9) -> outside loiter_roi -> silent
     p.observe("cam", 7, "person", BOX, FRAME_SHAPE, cam=cam, now=t)
-    assert p.observe("cam", 7, "person", BOX, FRAME_SHAPE, cam=cam, now=t + 120) is None
+    assert p.observe("cam", 7, "person", BOX_NUDGE, FRAME_SHAPE, cam=cam, now=t + 120) is None
     # BOX_FAR foot point (170/200=0.85, 0.9) -> inside -> fires
     p.observe("cam", 8, "person", BOX_FAR, FRAME_SHAPE, cam=cam, now=t)
-    ev = p.observe("cam", 8, "person", BOX_FAR, FRAME_SHAPE, cam=cam, now=t + 120)
+    ev = p.observe("cam", 8, "person",
+                   {"x1": 152, "y1": 31, "x2": 192, "y2": 91},
+                   FRAME_SHAPE, cam=cam, now=t + 120)
     assert ev is not None
 
 
@@ -184,7 +186,49 @@ def test_loiter_per_camera_threshold_override():
     p = PresenceTracker(person_sec=300)
     t = 1000.0
     p.observe("cam", 7, "person", BOX, FRAME_SHAPE, cam=cam, now=t)
-    ev = p.observe("cam", 7, "person", BOX, FRAME_SHAPE, cam=cam, now=t + 80)
+    ev = p.observe("cam", 7, "person", BOX_NUDGE, FRAME_SHAPE, cam=cam, now=t + 80)
+    assert ev is not None
+
+
+# ---- static-object gate (2026-07-22 fix for FP kiosk/awning loiters) --------
+
+BOX_STATIC = {"x1": 50, "y1": 30, "x2": 90, "y2": 90}     # same as BOX
+
+
+def test_static_object_never_fires_loiter():
+    """The 2026-07-22 midday+evening reports flagged loitering on a kiosk
+    at Taksim (class 'car' for 1000s) and an awning at Eyup Sultan (class
+    'bus' for 920s). Both had IoU ~1.0 between first-vs-current box - the
+    hallmark of a static structure YOLO keeps re-classifying. The gate
+    must refuse to alert regardless of duration."""
+    p = PresenceTracker(vehicle_sec=100)          # match the report's "car"/"bus"
+    t = 1000.0
+    p.observe("cam", 7, "car", BOX_STATIC, FRAME_SHAPE, now=t)
+    # 8 samples over 320s, box never moves - IoU stays at 1.0
+    for i in range(1, 9):
+        ev = p.observe("cam", 7, "car", BOX_STATIC, FRAME_SHAPE,
+                       now=t + i * 40)
+    assert ev is None                # duration exceeds threshold but IoU=1.0
+    # Long tail - still no alert
+    ev2 = p.observe("cam", 7, "car", BOX_STATIC, FRAME_SHAPE, now=t + 2000)
+    assert ev2 is None
+
+
+def test_static_object_starts_moving_and_fires():
+    """Symmetric: a car that stood still for 5 minutes then rolled a bit
+    IS a real loiter case (parked car repositioning). Once the box moves
+    below the static-IoU threshold, the alert must fire."""
+    p = PresenceTracker(vehicle_sec=100)
+    t = 1000.0
+    p.observe("cam", 7, "car", BOX, FRAME_SHAPE, now=t)
+    # Continuity samples every 40s so the stay does not reset (default gap
+    # is 180s); box is static so duration accumulates without firing.
+    for i in range(1, 6):
+        ev = p.observe("cam", 7, "car", BOX, FRAME_SHAPE, now=t + i * 40)
+        assert ev is None                # static-object gate suppresses each
+    # After ~200s and one small real drift (IoU ~0.66) - alert fires.
+    BOX_DRIFT = {"x1": 56, "y1": 34, "x2": 96, "y2": 94}
+    ev = p.observe("cam", 7, "car", BOX_DRIFT, FRAME_SHAPE, now=t + 240)
     assert ev is not None
 
 

@@ -60,9 +60,10 @@ def test_single_dead_camera_does_not_advance_country():
     d = make_director()
     now = 1000
     pool = d.pools["turkey"]
-    # Kill the three YT cameras + four IBB primaries; the Turkey pool
+    # Kill the four YT cameras + four IBB primaries; the Turkey pool
     # still fields Konya + tail from the same country's bench.
     for cam in ["tr_bulancak_meydan", "tr_golden_horn", "tr_giresun_kalesi",
+                "tr_ankara_kivircik_park",
                 "taksim_yeni", "beyazit_meydan_yeni", "sarachane_yeni",
                 "sultanahmet_1_yeni"]:
         for _ in range(pool.max_failures):

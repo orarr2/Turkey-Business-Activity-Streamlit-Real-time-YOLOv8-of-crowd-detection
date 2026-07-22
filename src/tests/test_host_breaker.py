@@ -113,24 +113,27 @@ def test_pool_assign_skips_blocked_cams_and_pads_unblocked_first():
     # The whole IBB host is blocked by the breaker; with IBB out, the pool
     # must skip every blocked cam. Post-2026-07-21 the YT3 tier sits above
     # IBB so it fills slots 1-3 before falling to Konya for the last slot.
-    YT3 = ["tr_bulancak_meydan", "tr_golden_horn", "tr_giresun_kalesi"]
+    # 2026-07-22: YT tier expanded to 4 cams (Ankara added), so it now
+    # covers ALL four slots when IBB is blocked - no fallback to KONYA.
+    YT4 = ["tr_bulancak_meydan", "tr_golden_horn", "tr_giresun_kalesi",
+           "tr_ankara_kivircik_park"]
     picked = pool.assign(now=now, blocked=set(IBB_ALL))
-    assert picked == YT3 + [KONYA[0]]
+    assert picked == YT4
     assert not set(picked) & set(IBB_ALL)
 
 
 def test_pool_forgive_wipes_strikes_and_cooldowns():
     pool = CameraPool(FALLBACK_POOL, n_slots=4)
     now = 1000
-    # Kill YT3 first so IBB actually reaches the assignment; the breaker
-    # test predates the YT tier and pinned the head to taksim.
-    YT3 = ["tr_bulancak_meydan", "tr_golden_horn", "tr_giresun_kalesi"]
-    for cam in YT3 + IBB4:
+    # Kill the YT tier first so IBB actually reaches the assignment.
+    YT4 = ["tr_bulancak_meydan", "tr_golden_horn", "tr_giresun_kalesi",
+           "tr_ankara_kivircik_park"]
+    for cam in YT4 + IBB4:
         for _ in range(pool.max_failures):
             pool.record(cam, False, now=now)
     assert pool.assign(now=now)[0] != "taksim_yeni"
     pool.forgive(IBB4)
-    # YT3 still rests; assignment fills from IBB (forgiven) + KONYA head.
+    # YT tier still rests; assignment fills from IBB (forgiven) + KONYA head.
     got = pool.assign(now=now)
     assert got[:4] == IBB4
     # Forgiven cams regain the FULL grace (proven_dead cleared).
@@ -141,6 +144,7 @@ def test_pool_forgive_wipes_strikes_and_cooldowns():
 def test_forgive_ignores_unknown_camera():
     pool = CameraPool(FALLBACK_POOL, n_slots=4)
     pool.forgive(["not_in_pool"])
-    # Post-2026-07-21: the YT3 tier sits above IBB in the pool head.
-    YT3 = ["tr_bulancak_meydan", "tr_golden_horn", "tr_giresun_kalesi"]
-    assert pool.assign(now=1000) == YT3 + IBB4[:1]
+    # Post-2026-07-22: the 4-camera YT tier fills all 4 slots.
+    YT4 = ["tr_bulancak_meydan", "tr_golden_horn", "tr_giresun_kalesi",
+           "tr_ankara_kivircik_park"]
+    assert pool.assign(now=1000) == YT4

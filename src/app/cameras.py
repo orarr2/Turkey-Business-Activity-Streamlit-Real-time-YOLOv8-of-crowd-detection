@@ -391,6 +391,17 @@ CAMERAS = {
         "page": "https://webcamera24.com/camera/turkey/giresun-castle-cam/",
         "embed": "https://www.youtube.com/embed/MMw0F-b-Q7c?autoplay=1&mute=1&playsinline=1&enablejsapi=1",
     },
+    # Ankara addition (2026-07-22 deeper webcamera24 re-scan across every
+    # Turkish city index): outdoor city park in Yenimahalle/Ankara, hosted
+    # on the Ankara municipality-adjacent channel and confirmed
+    # yt-dlp is_live=True. Adds a capital-city option to the Turkey grid
+    # beyond the Istanbul/Giresun cluster.
+    "tr_ankara_kivircik_park": {
+        "name": "Kivircik Ali Parki (Ankara)", "city": "Ankara", "country": "turkey",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=jJlZiD3hZ80",
+        "page": "https://webcamera24.com/camera/turkey/7984-ali-ozutemiz-kivircik-ali-parki-yenimahalle-ankara-canli-yayin/",
+        "embed": "https://www.youtube.com/embed/jJlZiD3hZ80?autoplay=1&mute=1&playsinline=1&enablejsapi=1",
+    },
 
     # ================= Multi-country street/traffic cameras =================
     # Added 2026-07-17 for the country-generic collector. All resolve to a
@@ -621,6 +632,7 @@ CAMERAS = {
 # (see collector.CameraPool): one miss rests them.
 TURKEY_YT = [
     "tr_bulancak_meydan", "tr_golden_horn", "tr_giresun_kalesi",
+    "tr_ankara_kivircik_park",
 ]
 TURKEY_IBB = [
     # Operator-approved IBB set (2026-07-21): Taksim -> Beyazit -> Sarachane
