@@ -983,6 +983,60 @@ DEFAULT_PER_CLASS_CONF = {
     "truck":      0.35,
 }
 
+# ---- Opt-in extra classes (EXTRA_CLASSES env) --------------------------------
+# The seven-class business set above is deliberate; everything downstream
+# (review, relabel, calibration, training export) is built around it. But
+# some scenes have a legitimate extra subject - a square full of pigeons,
+# a canal with boats - and losing them at the `classes=` filter means no
+# counting, no heatmap, no tracking. EXTRA_CLASSES adds COCO classes to
+# DETECTION ONLY: "bird" or "bird:0.30,dog" (optional per-class gate,
+# default 0.30). Counts/heatmap/tracker pick them up automatically;
+# the review/training chain intentionally does NOT - extras never mint
+# labels, so they cannot skew the fine-tuning loop. Unset env = the exact
+# seven-class behavior, byte for byte.
+_EXTRA_CLASS_IDS = {
+    # COCO ids for the extras that make sense on a street/square camera.
+    "bird": 14, "cat": 15, "dog": 16, "boat": 8,
+    "backpack": 24, "umbrella": 25, "handbag": 26, "suitcase": 28,
+}
+
+
+def _apply_extra_classes(spec: str | None = None) -> list[str]:
+    """Parse EXTRA_CLASSES and extend the class tables in place.
+
+    Returns the class names actually added (tests use it directly and
+    undo by popping the returned names from the three tables).
+    """
+    spec = (os.environ.get("EXTRA_CLASSES") or "").strip() if spec is None \
+        else spec
+    added: list[str] = []
+    for item in spec.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        name, _, gate = item.partition(":")
+        name = name.strip()
+        cid = _EXTRA_CLASS_IDS.get(name)
+        if cid is None or name in CLASSES_OF_INTEREST:
+            if cid is None and name:
+                print(f"EXTRA_CLASSES: unknown class {name!r} ignored "
+                      f"(known: {', '.join(sorted(_EXTRA_CLASS_IDS))})")
+            continue
+        CLASSES_OF_INTEREST[name] = cid
+        NAME_BY_ID[cid] = name
+        try:
+            DEFAULT_PER_CLASS_CONF[name] = float(gate) if gate else 0.30
+        except ValueError:
+            DEFAULT_PER_CLASS_CONF[name] = 0.30
+        added.append(name)
+    if added:
+        print(f"detect_core: extra classes enabled: {', '.join(added)} "
+              "(detection/counts/heatmap only - never the training chain)")
+    return added
+
+
+_apply_extra_classes()
+
 # Person shape / size gates. A real pedestrian on a street cam is TALLER
 # than wide (aspect >= 0.90) but NOT wildly so (aspect <= 3.0); has at
 # least a couple of dozen pixels of vertical extent; and never spans more
@@ -1179,6 +1233,7 @@ _BOX_COLORS = {
     "bus":        (0, 90, 230),
     "train":      (200, 60, 200),   # magenta - rail is neither road nor foot
     "truck":      (0, 90, 230),
+    "bird":       (60, 200, 220),   # only drawn when EXTRA_CLASSES adds it
 }
 
 
@@ -1195,6 +1250,10 @@ def draw_boxes(frame: np.ndarray, boxes: list[dict]) -> np.ndarray:
         color = _BOX_COLORS.get(b.get("cls", ""), (255, 255, 255))
         cv2.rectangle(out, (x1, y1), (x2, y2), color, 2)
         label = f'{b.get("cls", "?")} {b.get("conf", 0):.2f}'
+        if "track_id" in b:
+            # Within-burst individual number (app/tracker.py) - lets the
+            # viewer tell look-alike objects apart on the annotated frame.
+            label = f'#{b["track_id"]} ' + label
         if "kmh" in b:
             # burst-based estimate (see estimate_speeds) - "~" marks it as
             # such; 0 means matched-but-not-moving, i.e. parked.
@@ -1343,6 +1402,23 @@ def detect_burst(model, frames: list[np.ndarray], conf: float = 0.35,
             for s in speeds:
                 for tb in (s.get("boxes") or (s["box"],)):
                     tb["kmh"] = s["kmh"]
+    # Individual ids ride the same burst: a BYTE-style two-stage matcher
+    # with constant-velocity prediction (app/tracker.py) stamps each
+    # detection with a within-window `track_id`. Same shared-dict trick as
+    # the speed tags above - the representative frame's boxes carry the id
+    # into every annotated surface, so look-alike individuals (a flock, a
+    # uniform crowd) are numbered apart by position and motion, which is
+    # the only signal that separates them. Pure bookkeeping, no inference.
+    if len(per) >= 2:
+        try:
+            from app.tracker import assign_burst_ids
+            tracks = assign_burst_ids([b for _, b, _ in per],
+                                      per[0][2].shape,
+                                      dt=burst_stride / BURST_FPS_ASSUMED)
+            if tracks:
+                debug["individuals"] = len(tracks)
+        except Exception as e:
+            print(f"detect_burst: tracker skipped ({type(e).__name__}: {e})")
     return counts, best[1], best[2], debug
 
 
