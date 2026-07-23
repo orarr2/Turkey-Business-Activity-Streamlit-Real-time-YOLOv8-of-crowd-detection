@@ -208,6 +208,11 @@ if (stripEl) {
       <div class="nums">
         <span>👤 <b data-p>-</b></span>
         <span class="v">🚗 <b data-v>-</b></span>
+        <button data-heat hidden
+                title="toggle the long-horizon presence heatmap for this camera (where activity stands, weighted by dwell time)"
+                style="margin-left:auto;background:none;border:1px solid #444;
+                       border-radius:4px;color:inherit;cursor:pointer;
+                       font-size:11px;padding:0 5px">🔥</button>
       </div>
       <div class="age" data-age></div>`;
     stripEl.appendChild(cell);
@@ -220,8 +225,28 @@ if (stripEl) {
       p:     cell.querySelector("[data-p]"),
       v:     cell.querySelector("[data-v]"),
       age:   cell.querySelector("[data-age]"),
+      heatBtn: cell.querySelector("[data-heat]"),
       lastSampleMs: null,
+      liveUrl: null,
+      heatUrl: null,
+      showHeat: false,
     };
+    // Heatmap toggle: swaps the model-view image between the live
+    // annotated frame and the collector-published dwell heatmap overlay.
+    // The button only appears once a heatmap_url has arrived for the slot.
+    s.heatBtn.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      s.showHeat = !s.showHeat;
+      s.heatBtn.style.borderColor = s.showHeat ? "#f0a35e" : "#444";
+      const url = s.showHeat && s.heatUrl ? s.heatUrl : s.liveUrl;
+      if (url) {
+        const busted = url + (url.includes("?") ? "&" : "?") + "t=" + Date.now();
+        s.img.src = busted;
+        s.link.href = busted;
+        s.img.hidden = false;
+      }
+    });
     s.img.addEventListener("error", () => {
       // Storage URL rotted, or Storage never got this snapshot. Roll back to
       // the empty state so the cell reads as "no live view" instead of a
@@ -241,9 +266,15 @@ function updateStrip(slotId, d) {
   if (!s) return;
   if (d.person   != null) s.p.textContent = d.person;
   if (d.vehicles != null) s.v.textContent = d.vehicles;
+  if (d.heatmap_url && s.heatBtn) {
+    s.heatUrl = d.heatmap_url;
+    s.heatBtn.hidden = false;
+  }
   if (d.ok && d.live_annotated_url) {
-    const url = d.live_annotated_url
-        + (d.live_annotated_url.includes("?") ? "&" : "?")
+    s.liveUrl = d.live_annotated_url;
+    const shown = s.showHeat && s.heatUrl ? s.heatUrl : d.live_annotated_url;
+    const url = shown
+        + (shown.includes("?") ? "&" : "?")
         + "t=" + encodeURIComponent(d.ts || Date.now());
     s.img.src = url;
     s.img.hidden = false;
@@ -1054,8 +1085,9 @@ function renderAnomalyEvents() {
 // ---------- 6c. Operational events (loiter / returning) ----------------------
 
 const EVENT_LABELS = {
-  loiter:    { icon: "⏱", label: "prolonged presence" },
-  returning: { icon: "↩", label: "returning visitor" },
+  loiter:           { icon: "⏱", label: "prolonged presence" },
+  returning:        { icon: "↩", label: "returning visitor" },
+  static_departed:  { icon: "📤", label: "static object left" },
 };
 
 // Keep the full events list in module scope so the accordion can look up
@@ -1078,6 +1110,8 @@ function renderEventsTable(events) {
         ? `${e.cls ?? "?"} stationary ${Math.round((e.duration_sec ?? 0) / 60)} min`
         : e.kind === "returning"
         ? `${e.cls ?? "?"} #${e.entity_id ?? "?"} back after ${Math.round((e.gap_seconds ?? 0) / 60)} min`
+        : e.kind === "static_departed"
+        ? `${e.cls ?? "?"} static ${Math.round((e.dwell_sec ?? 0) / 60)} min - now gone`
         : "";
     const snap = e.snapshot_url || e.fullframe_url;
     // Every row with an entity_id gets an expand-toggle - clicking it opens

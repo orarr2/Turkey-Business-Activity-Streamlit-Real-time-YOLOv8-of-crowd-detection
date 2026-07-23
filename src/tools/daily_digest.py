@@ -58,6 +58,7 @@ KIND_LABELS = {
     "camera_dark":       "View went dark",
     "loiter":            "Loitering",
     "returning":         "Returning visitor",
+    "static_departed":   "Static object left",
 }
 
 

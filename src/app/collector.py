@@ -860,6 +860,28 @@ def _save_live_view(slot_id: str, frame, boxes: list[dict], firebase) -> str | N
     return f"/snapshots/live/{slot_id}.jpg"
 
 
+def _save_heatmap_view(cam_id: str, frame, firebase) -> str | None:
+    """Publish the presence-heatmap overlay for a camera.
+
+    ONE fixed object per CAMERA (snapshots/heatmaps/{cam_id}.jpg) -
+    cam-keyed rather than slot-keyed because the map is a property of the
+    scene, and the grid re-seats cameras across slots. Overwritten every
+    ~30 samples; same lifecycle trick as the live view (each overwrite
+    resets the Storage object's age)."""
+    from app import heatmap as _hm
+    img = _hm.render(cam_id, base_frame=frame)
+    okj, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    if not okj:
+        return None
+    if firebase.storage is not None:
+        return firebase.upload_snapshot(f"heatmaps/{cam_id}.jpg",
+                                        buf.tobytes())
+    hm_dir = SNAPSHOTS_ROOT / "heatmaps"
+    hm_dir.mkdir(parents=True, exist_ok=True)
+    (hm_dir / f"{cam_id}.jpg").write_bytes(buf.tobytes())
+    return f"/snapshots/heatmaps/{cam_id}.jpg"
+
+
 def _save_event_crop(kind: str, slot_id: str, base: str, frame, box: dict,
                      firebase) -> tuple[str | None, str | None, bytes | None]:
     """Save a bbox crop + full frame for an event under snapshots/{kind}/...
@@ -972,6 +994,10 @@ _ANOMALY_DAYCOUNT: dict[str, list] = {}
 # Same shape for loiter/returning events: (cam_id, kind) -> [date, n, warned].
 _EVENT_DAYCOUNT: dict[tuple[str, str], list] = {}
 EVENT_BUDGET_PER_DAY = 10
+# Last published heatmap-overlay URL per camera. The object is fixed
+# (heatmaps/<cam_id>.jpg, overwritten in place), so once a render exists
+# every subsequent record can carry the URL, not just the render sample.
+_HEATMAP_URLS: dict[str, str] = {}
 
 
 def _event_evidence_ok(box: dict, kind: str, cam_id: str) -> bool:
@@ -1073,9 +1099,78 @@ def _handle_loiter(firebase, alerts: AlertSink | None, slot: dict,
           f"@ {slot['slot_id']}/{cam_id} for {minutes:.0f} min")
 
 
+def _save_static_departed_images(slot_id: str, base: str,
+                                 crop_bytes: bytes | None, after_frame,
+                                 firebase) -> tuple[str | None, str | None]:
+    """Persist a static_departed event's evidence pair.
+
+    The object is GONE from the current frame, so the crop is the one the
+    watch captured at settle time (the last good look); the CURRENT frame
+    is saved alongside as the "after" shot - the empty spot."""
+    after_bytes = None
+    if after_frame is not None:
+        okf, full_buf = cv2.imencode(".jpg", after_frame,
+                                     [cv2.IMWRITE_JPEG_QUALITY, 80])
+        if okf:
+            after_bytes = full_buf.tobytes()
+    crop_url = after_url = None
+    if firebase.storage is not None:
+        if crop_bytes:
+            crop_url = firebase.upload_snapshot(
+                f"events/static/{slot_id}/{base}.jpg", crop_bytes)
+        if after_bytes:
+            after_url = firebase.upload_snapshot(
+                f"events/static/{slot_id}/{base}_after.jpg", after_bytes)
+    else:
+        cam_dir = EVENTS_DIR / "static" / slot_id
+        cam_dir.mkdir(parents=True, exist_ok=True)
+        rel = str(cam_dir.relative_to(SNAPSHOTS_ROOT)).replace("\\", "/")
+        if crop_bytes:
+            (cam_dir / f"{base}.jpg").write_bytes(crop_bytes)
+            crop_url = f"/snapshots/{rel}/{base}.jpg"
+        if after_bytes:
+            (cam_dir / f"{base}_after.jpg").write_bytes(after_bytes)
+            after_url = f"/snapshots/{rel}/{base}_after.jpg"
+    return crop_url, after_url
+
+
+def _handle_static_departed(firebase, alerts: AlertSink | None, slot: dict,
+                            cam_id: str, ts: str, frame, dep: dict,
+                            save_snapshots: bool = True) -> None:
+    crop_url = after_url = None
+    crop_bytes = dep.get("crop_jpeg")
+    if save_snapshots:
+        try:
+            base = (f"static_a{dep['anchor_id']:04d}_"
+                    f"{int(dep['dwell_sec'])}s_{_ts_filename(ts)}")
+            crop_url, after_url = _save_static_departed_images(
+                slot["slot_id"], base, crop_bytes, frame, firebase)
+        except Exception as e:
+            print(f"  ! static-departed snapshot save failed: {e}")
+    minutes = dep["dwell_sec"] / 60
+    fh, fw = (frame.shape[:2] if hasattr(frame, "shape") else (0, 0))
+    box = dep["box"]
+    _emit_event(firebase, alerts, {
+        "kind": "static_departed", "slot": slot["slot_id"],
+        "cam_id": cam_id, "ts": ts, "cls": dep["cls"],
+        "dwell_sec": dep["dwell_sec"], "sightings": dep.get("hits"),
+        "snapshot_url": crop_url, "fullframe_url": after_url,
+        # Where the object USED to stand, on the "after" frame - the
+        # report can circle the now-empty spot.
+        "box": [float(box["x1"]), float(box["y1"]),
+                float(box["x2"]), float(box["y2"])],
+        "frame_w": int(fw), "frame_h": int(fh),
+    }, title=f"Static object left @ {slot['display_area']}",
+       body=f"{dep['cls']} static for {minutes:.0f} min - now gone",
+       image_jpeg=crop_bytes)
+    print(f"  ! STATIC-DEPARTED {dep['cls']} a{dep['anchor_id']} "
+          f"@ {slot['slot_id']}/{cam_id} after {minutes:.0f} min")
+
+
 def sample_slot(model, slot: dict, cam_id: str, firebase,
                 reid: ReidStore | None = None, conf: float = 0.30,
                 presence: PresenceTracker | None = None,
+                static_watch=None,
                 alerts: AlertSink | None = None,
                 imgsz: int | None = DEFAULT_IMGSZ,
                 burst: int = 3, burst_stride: int = 25,
@@ -1118,6 +1213,7 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
 
     luma = None
     night = False
+    heatmap_url = None
     try:
         frames = grab_burst(resolve_stream(cam), n=burst, stride=burst_stride)
         if not frames:
@@ -1188,6 +1284,39 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
                 _rf_save(cam_id, frame, boxes)
         except Exception as _rf_err:
             print(f"[{ts}] review_frames skipped: {_rf_err}")
+        # Presence heatmap (HEATMAP=0 disables): bank WHERE this sample's
+        # activity stood - foot points weighted by the observed interval -
+        # and refresh the published overlay every ~30 samples. Pure
+        # bookkeeping from already-computed boxes; no extra inference.
+        try:
+            if boxes and os.environ.get("HEATMAP", "1") != "0":
+                from app import heatmap as _hm
+                _hm.accumulate(cam_id, boxes, frame.shape,
+                               tz=cam_tzinfo(cam_id))
+                if save_snapshots and _hm.render_due(cam_id):
+                    url = _save_heatmap_view(cam_id, frame, firebase)
+                    if url:
+                        _HEATMAP_URLS[cam_id] = url
+                heatmap_url = _HEATMAP_URLS.get(cam_id)
+        except Exception as _hm_err:
+            print(f"[{ts}] heatmap skipped: {_hm_err}")
+        # Static-object watch: objects that settled >= 5 min and then
+        # vanished (parked car pulling out, stall packing up, bag gone).
+        # Runs ONLY on successful samples, so a stream outage can never
+        # fake a departure; dark frames and scene wipes are guarded inside.
+        try:
+            if static_watch is not None:
+                for _dep in static_watch.observe(cam_id, boxes, frame.shape,
+                                                 luma=luma, frame=frame):
+                    _pseudo = dict(_dep["box"], cls=_dep["cls"],
+                                   conf=_dep["conf_median"])
+                    if _event_evidence_ok(_pseudo, "static_departed",
+                                          cam_id):
+                        _handle_static_departed(
+                            firebase, alerts, slot, cam_id, ts, frame,
+                            _dep, save_snapshots=save_snapshots)
+        except Exception as _sw_err:
+            print(f"[{ts}] static watch skipped: {_sw_err}")
         if reid is not None and boxes:
             results = reid.update_from_frame(cam_id, frame, boxes)
             for r in results:
@@ -1310,6 +1439,10 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
         if speeds:
             record["speeds"] = speeds
         record["burst"] = burst_dbg
+        # Presence-heatmap overlay URL (refreshed every ~30 samples; the
+        # dashboard strip offers it as a toggle on the model view).
+        if heatmap_url:
+            record["heatmap_url"] = heatmap_url
         # Day/night tag: lets the dashboard and any offline analysis split
         # baselines - the same street has very different "normal" after dark.
         # Decided pre-detection (it also drove the night gates above).
@@ -1619,6 +1752,22 @@ def main() -> None:
         vehicle_sec = args.loiter_vehicle_min * 60,
     )
 
+    # Static-object watch (STATIC_WATCH=0 disables): objects that settle in
+    # place for 5+ minutes and then vanish become `static_departed` events -
+    # the exact population the loiter path's static-IoU gate refuses on
+    # purpose. Same evidence floor as loiter (UN-boosted default gates).
+    static_watch = None
+    if os.environ.get("STATIC_WATCH", "1") != "0":
+        from app.static_watch import StaticWatch
+        try:
+            _stay_s = float(os.environ.get("STATIC_MIN_STAY_SEC") or 300)
+        except ValueError:
+            _stay_s = 300.0
+        static_watch = StaticWatch(min_stay_sec=_stay_s,
+                                   evidence_gates=DEFAULT_PER_CLASS_CONF)
+        print(f"static watch: on (settle >= {_stay_s:.0f}s; "
+              "STATIC_WATCH=0 to disable)")
+
     alerts = None
     if not args.no_alerts:
         sink = AlertSink()
@@ -1786,6 +1935,7 @@ def main() -> None:
                     continue          # idle slot: grid is narrower this round
                 ok = sample_slot(model, slot, cam_id, firebase, reid=reid,
                                  conf=args.conf, presence=presence,
+                                 static_watch=static_watch,
                                  alerts=alerts, imgsz=args.imgsz,
                                  burst=args.burst, burst_stride=args.burst_stride,
                                  save_snapshots=save_snapshots,
@@ -1877,6 +2027,8 @@ def main() -> None:
                 _prune_entity_boxes(max_age_sec=args.reid_prune_hours * 3600)
                 if presence is not None:
                     presence.prune()
+                if static_watch is not None:
+                    static_watch.prune()
                 last_reid_prune = time.time()
             round_dur = time.time() - round_start
             if round_dur > args.interval:
@@ -1891,6 +2043,11 @@ def main() -> None:
     finally:
         if reid is not None:
             reid.close()
+        try:
+            from app import heatmap as _hm
+            _hm.save_all()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
