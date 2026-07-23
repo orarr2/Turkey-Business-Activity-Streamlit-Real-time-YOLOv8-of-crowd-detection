@@ -186,6 +186,11 @@ class _VisualSearchState:
 
 _VISUAL_SEARCH = _VisualSearchState()
 
+# One deep-window analysis at a time: each run costs `frames` inferences,
+# and ThreadingHTTPServer would happily start several in parallel on a
+# double-clicked button - exactly the CPU spike the round budget forbids.
+_DEEP_ANALYZE_LOCK = threading.Lock()
+
 # Review store - lazily constructed on the first labels endpoint hit. The
 # store is thread-safe (single lock around its dict + rewrite), so all
 # handler threads share the one instance.
@@ -316,6 +321,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/review-frames-stats":
             self._review_frames_stats()
             return
+        if path == "/api/heatmap":
+            self._heatmap()
+            return
         super().do_GET()
 
     def do_POST(self) -> None:
@@ -346,6 +354,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/blacklist-add":
             self._blacklist_add()
             return
+        if path == "/api/deep-analyze":
+            self._deep_analyze()
+            return
         self.send_error(404, "unknown POST endpoint")
 
     def _send_json(self, status: int, payload: dict) -> None:
@@ -356,6 +367,125 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         super().end_headers()   # skip our no-cache re-header dance
         self.wfile.write(body)
+
+    def _send_bytes(self, status: int, content_type: str,
+                    data: bytes) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        super().end_headers()
+        self.wfile.write(data)
+
+    def _heatmap(self) -> None:
+        """GET /api/heatmap?cam=<id>[&layer=person|vehicles|other]
+        [&part=night|morning|afternoon|evening][&format=json]
+
+        Default response is the rendered overlay JPEG. The base image is
+        the camera's freshest review frame when one exists (scene context);
+        otherwise the map renders on a dark canvas. format=json returns
+        the raw grid + stats for client-side rendering."""
+        from urllib.parse import parse_qs, urlparse
+        q = parse_qs(urlparse(self.path).query)
+
+        def _one(name, default=None):
+            try:
+                return q[name][0]
+            except (KeyError, IndexError):
+                return default
+
+        cam = _one("cam", "")
+        if not cam or "/" in cam or "\\" in cam or ".." in cam:
+            self._send_json(400, {"error": "missing or invalid ?cam="})
+            return
+        layer = _one("layer", "person")
+        part = _one("part") or None
+        try:
+            from app import heatmap as hm
+        except Exception as e:
+            self._send_json(500, {"error": f"heatmap unavailable: {e}"})
+            return
+        if layer not in ("person", "vehicles", "other"):
+            self._send_json(400, {"error": "layer must be person|vehicles|other"})
+            return
+        if part is not None and part not in hm.DAYPARTS:
+            self._send_json(400, {"error": f"part must be one of {hm.DAYPARTS}"})
+            return
+        if _one("format") == "json":
+            payload = hm.stats(cam)
+            payload["layer"] = layer
+            payload["part"] = part
+            payload["grid"] = hm.grid_for(cam, layer=layer, daypart=part)
+            self._send_json(200, payload)
+            return
+        base = None
+        frames_dir = SNAPSHOTS_DIR / "review_frames" / cam
+        if frames_dir.is_dir():
+            jpgs = sorted(frames_dir.glob("*.jpg"),
+                          key=lambda p: p.stat().st_mtime)
+            if jpgs:
+                try:
+                    import cv2
+                    base = cv2.imread(str(jpgs[-1]))
+                except Exception:
+                    base = None
+        try:
+            import cv2
+            img = hm.render(cam, base_frame=base, layer=layer, daypart=part)
+            okj, buf = cv2.imencode(".jpg", img,
+                                    [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if not okj:
+                raise RuntimeError("jpeg encode failed")
+        except Exception as e:
+            self._send_json(500, {"error": f"render failed: {e}"})
+            return
+        self._send_bytes(200, "image/jpeg", buf.tobytes())
+
+    def _deep_analyze(self) -> None:
+        """POST /api/deep-analyze?cam=<id>[&frames=12][&stride=12][&imgsz=640]
+
+        Operator-triggered deep window: grabs `frames` frames from ONE
+        camera, tracks every individual (position + motion) and returns
+        the per-individual behavior profile + the trails image URL. Costs
+        `frames` inferences, so one analysis runs at a time - a second
+        request while one is in flight gets 409."""
+        from urllib.parse import parse_qs, urlparse
+        q = parse_qs(urlparse(self.path).query)
+
+        def _one(name, cast, default, lo, hi):
+            try:
+                return max(lo, min(hi, cast(q[name][0])))
+            except (KeyError, IndexError, ValueError):
+                return default
+
+        cam = (q.get("cam") or [""])[0]
+        if not cam:
+            self._send_json(400, {"error": "missing ?cam="})
+            return
+        n_frames = _one("frames", int, 12, 4, 24)
+        stride = _one("stride", int, 12, 4, 40)
+        imgsz = _one("imgsz", int, 640, 320, 960)
+
+        state = _VISUAL_SEARCH.get()
+        if state.model is None:
+            self._send_json(503, {"error": "no detection model loaded "
+                                           "(SEARCH_YOLO=off?)"})
+            return
+        if not _DEEP_ANALYZE_LOCK.acquire(blocking=False):
+            self._send_json(409, {"error": "an analysis is already running - "
+                                           "try again in a few seconds"})
+            return
+        try:
+            from app.behavior import analyze_window
+            result = analyze_window(cam, state.model, n_frames=n_frames,
+                                    stride=stride, imgsz=imgsz)
+            self._send_json(200, result)
+        except ValueError as e:
+            self._send_json(404, {"error": str(e)})
+        except Exception as e:
+            self._send_json(502, {"error": f"{type(e).__name__}: {e}"})
+        finally:
+            _DEEP_ANALYZE_LOCK.release()
 
     def _visual_search(self) -> None:
         """POST /api/search  (or /api/visual-search - the legacy alias).

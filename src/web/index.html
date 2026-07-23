@@ -583,6 +583,114 @@
       <div class="model-strip" id="model-strip"></div>
     </div>
 
+    <!-- Deep-window behavior analysis (local mode only - needs serve.py).
+         Grabs a longer frame window from ONE camera, threads detections
+         into per-INDIVIDUAL tracks by position + motion (the only signal
+         that separates look-alike objects: a flock of pigeons, a uniform
+         crowd), and profiles what each one did: path, speed, moving vs
+         standing, direction, closest neighbor. Costs ~12 inferences per
+         click, which is why it is a button and not part of the live loop. -->
+    <div class="model-section" data-tab="search" id="deepwin-section">
+      <h2>Window analysis - number the individuals, profile each one</h2>
+      <div class="sub">Pick a camera id (as in <code>cameras.py</code>, e.g.
+        the one shown on the tile), choose the window length, and run. Every
+        individual in view gets a number and a movement trail; the table
+        tells you who moved, how fast, in which direction, and who stood
+        still. Ids are stable <i>within</i> the window - two identical-looking
+        objects are told apart by where they are and how they move, which is
+        also why an individual that left the frame cannot be re-claimed
+        after a long gap. Local dashboard only (runs on your machine's
+        model via <code>serve.py</code>).</div>
+      <div class="field-row" style="margin-top:8px">
+        <label>camera id <input type="text" id="deepwin-cam"
+               placeholder="e.g. taksim_meydani" style="width:180px" /></label>
+        <label>frames <input type="number" id="deepwin-frames" value="12"
+               min="4" max="24" style="width:60px" /></label>
+        <label>every Nth frame <input type="number" id="deepwin-stride" value="12"
+               min="4" max="40" style="width:60px" /></label>
+        <button type="button" id="deepwin-go">analyze window</button>
+        <span id="deepwin-status"></span>
+      </div>
+      <div id="deepwin-result" hidden style="margin-top:10px">
+        <a id="deepwin-img-link" target="_blank" rel="noopener">
+          <img id="deepwin-img" alt="individual trails"
+               style="max-width:100%;border-radius:6px" hidden /></a>
+        <div id="deepwin-summary" class="sub" style="margin-top:6px"></div>
+        <div id="deepwin-table" style="overflow-x:auto"></div>
+      </div>
+    </div>
+    <script>
+    // Self-contained wiring for the deep-window panel (local API).
+    (function () {
+      const go = document.getElementById("deepwin-go");
+      if (!go) return;
+      const st = document.getElementById("deepwin-status");
+      go.addEventListener("click", async () => {
+        const cam = (document.getElementById("deepwin-cam").value || "").trim();
+        if (!cam) { st.textContent = "enter a camera id"; return; }
+        const frames = document.getElementById("deepwin-frames").value || 12;
+        const stride = document.getElementById("deepwin-stride").value || 12;
+        go.disabled = true;
+        st.textContent = "grabbing + analyzing (10-30s)…";
+        try {
+          const r = await fetch(`/api/deep-analyze?cam=${encodeURIComponent(cam)}`
+                                + `&frames=${frames}&stride=${stride}`,
+                                { method: "POST" });
+          const data = await r.json();
+          if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+          st.textContent = "";
+          renderDeepWin(data);
+        } catch (e) {
+          st.textContent = `failed: ${e.message}`;
+        } finally {
+          go.disabled = false;
+        }
+      });
+      function esc(s) {
+        return String(s).replace(/[&<>"']/g,
+          (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;",
+                    '"': "&quot;", "'": "&#39;" }[c]));
+      }
+      function renderDeepWin(d) {
+        const wrap = document.getElementById("deepwin-result");
+        const img = document.getElementById("deepwin-img");
+        const link = document.getElementById("deepwin-img-link");
+        wrap.hidden = false;
+        if (d.image_url) {
+          const u = d.image_url + "?t=" + Date.now();
+          img.src = u; img.hidden = false; link.href = u;
+        } else {
+          img.hidden = true;
+        }
+        document.getElementById("deepwin-summary").textContent =
+          `${d.cam_name}: ${d.individuals} individual(s) over ${d.window_sec}s`
+          + ` (${d.frames} frames) - ${d.moving} moving, ${d.stationary} standing still`;
+        const rows = (d.tracks || []).map((t) => `<tr>
+          <td>#${t.id}</td><td>${esc(t.cls ?? "?")}</td>
+          <td>${t.sightings}</td>
+          <td>${Math.round((t.moving_frac ?? 0) * 100)}%</td>
+          <td>${t.stationary ? "standing" : esc(t.direction ?? "-")}</td>
+          <td>${t.mean_speed_px_s ?? "-"}</td>
+          <td>${t.kmh_est != null ? "~" + t.kmh_est : "-"}</td>
+          <td>${t.nn_min_px != null ? Math.round(t.nn_min_px) : "-"}</td>
+          <td>${(t.zones || []).length}</td>
+        </tr>`).join("");
+        document.getElementById("deepwin-table").innerHTML = `
+          <table class="reid"><thead><tr>
+            <th title="individual number, drawn on the image">id</th>
+            <th>class</th>
+            <th title="frames this individual was matched in">seen</th>
+            <th title="fraction of its steps it actually moved">moving</th>
+            <th title="dominant screen direction of its net movement">direction</th>
+            <th title="mean speed, pixels per second">px/s</th>
+            <th title="rough speed estimate for vehicles (class-length ruler, +-30-50%)">km/h</th>
+            <th title="closest same-class neighbor during the window, px">nearest</th>
+            <th title="how many map zones it visited">zones</th>
+          </tr></thead><tbody>${rows}</tbody></table>`;
+      }
+    })();
+    </script>
+
     <!-- Combined 24h chart of all cameras.
          Every section below the tiles starts hidden (`hidden` attribute) and
          is revealed by app.js the moment its data source produces content -
