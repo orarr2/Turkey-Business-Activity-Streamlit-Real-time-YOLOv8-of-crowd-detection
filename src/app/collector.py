@@ -1134,6 +1134,33 @@ def _save_static_departed_images(slot_id: str, base: str,
     return crop_url, after_url
 
 
+# A loiter candidate is FURNITURE when a settled static-watch anchor of the
+# same class was already parked on that spot well before the loiter stay
+# began. Margin: the anchor must predate the stay by at least this many
+# seconds - a genuinely parking car births its anchor together with its
+# stay (ages match within a sample or two), while the Taksim kiosk /
+# Eyup Sultan awning anchors are hours-days older than any stay that
+# re-forms on them after a box-wander reset (observed 2026-07-22..24:
+# entities 164741/164830 re-alerted 8 times across two days, boxes
+# drifting along the frame-bottom strip with IoU 0.10-0.34 between
+# alerts - the first-vs-current static gate cannot catch that wander,
+# anchor age can).
+LOITER_FURNITURE_MARGIN_SEC = 240.0
+
+
+def _loiter_is_furniture(static_watch, cam_id: str, loiter: dict,
+                         now: float | None = None) -> bool:
+    if static_watch is None:
+        return False
+    try:
+        age = static_watch.settled_spot_age(
+            cam_id, loiter["box"], loiter.get("cls"), now=now)
+    except Exception:
+        return False
+    return (age is not None
+            and age > loiter["duration_sec"] + LOITER_FURNITURE_MARGIN_SEC)
+
+
 def _handle_static_departed(firebase, alerts: AlertSink | None, slot: dict,
                             cam_id: str, ts: str, frame, dep: dict,
                             save_snapshots: bool = True) -> None:
@@ -1389,6 +1416,13 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
                                               frame.shape, cam)
                     if loiter is not None and not _event_evidence_ok(
                             box, "loiter", cam_id):
+                        loiter = None
+                    if loiter is not None and _loiter_is_furniture(
+                            static_watch, cam_id, loiter):
+                        print(f"  loiter suppressed (furniture): "
+                              f"{loiter['cls']} ent={loiter['entity_id']} "
+                              f"@ {cam_id} - a settled static anchor predates "
+                              f"the stay")
                         loiter = None
                     if loiter is not None:
                         _handle_loiter(firebase, alerts, slot, cam_id, ts,

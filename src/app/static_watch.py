@@ -234,3 +234,32 @@ class StaticWatch:
         n = sum(len(p) for p in pools)
         s = sum(1 for p in pools for a in p if a["settled"])
         return {"anchors": n, "settled": s}
+
+    def settled_spot_age(self, cam_id: str, box: dict, cls: str | None,
+                         min_iou: float = 0.40,
+                         now: float | None = None) -> float | None:
+        """Age (seconds) of the oldest SETTLED same-class anchor overlapping
+        `box`, or None when no such anchor exists.
+
+        This is the furniture question the loiter path needs answered
+        (2026-07-24): a scene structure that YOLO keeps calling "car"/"bus"
+        (the Taksim kiosk, the Eyup Sultan awning) survives the first-vs-
+        current static-IoU gate because its box WANDERS slowly along the
+        structure - continuity holds sample to sample while the stay's
+        first box drifts out of view. What the wander cannot fake is
+        HISTORY: the static watch's anchor (EMA box, so it follows the same
+        slow drift) has been settled here since long before the loiter stay
+        began. A genuinely parking car's anchor is born WITH its stay, so
+        its age roughly equals the stay duration - the caller uses that
+        margin to tell furniture from a fresh arrival."""
+        now = time.time() if now is None else now
+        best = None
+        for a in self._anchors.get(cam_id, []):
+            if not a["settled"] or a["cls"] != cls:
+                continue
+            if box_iou(a["box"], box) < min_iou:
+                continue
+            age = now - a["first_ts"]
+            if best is None or age > best:
+                best = age
+        return best

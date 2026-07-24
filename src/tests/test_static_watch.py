@@ -148,3 +148,60 @@ def test_per_camera_isolation():
     assert _feed(w, "camB", [], t + 60) == []
     assert _feed(w, "camB", [], t + 120) == []
     assert w.counts("camA")["settled"] == 1
+
+
+# ---- furniture gate for the loiter path (2026-07-24) ------------------------
+# The Taksim kiosk / Eyup Sultan awning re-alerted 8 loiters in two days:
+# their boxes WANDER slowly along the structure, so the presence tracker's
+# first-vs-current static-IoU gate never sees IoU ~1.0, while continuity
+# keeps the stay alive. The discriminator that works is anchor AGE: the
+# static watch's settled anchor predates any loiter stay that re-forms on
+# furniture, while a genuinely parking car births its anchor together with
+# its stay.
+
+from app.collector import LOITER_FURNITURE_MARGIN_SEC, _loiter_is_furniture
+
+
+def _loiter_ev(box=BOX, cls="car", duration=960.0):
+    return {"kind": "loiter", "cls": cls, "entity_id": 7, "cam_id": "cam",
+            "duration_sec": duration,
+            "box": {k: box[k] for k in ("x1", "y1", "x2", "y2")}}
+
+
+def test_settled_spot_age_matches_same_class_overlap():
+    w = StaticWatch()
+    t = _settle(w)                       # anchor born at t0=1000
+    age = w.settled_spot_age("cam", BOX, "car", now=t + 3600)
+    assert age is not None and age > 3600        # anchor predates the query
+    # Different class or far box: no match.
+    assert w.settled_spot_age("cam", BOX, "bus", now=t) is None
+    assert w.settled_spot_age("cam", BOX_FAR, "car", now=t) is None
+    # Unsettled candidates never testify.
+    w2 = StaticWatch()
+    _feed(w2, "cam", [_det()], 1000.0)
+    assert w2.settled_spot_age("cam", BOX, "car", now=1001.0) is None
+
+
+def test_kiosk_loiter_suppressed_as_furniture():
+    """Anchor settled hours before the stay -> the loiter is furniture."""
+    w = StaticWatch()
+    t = _settle(w)                                    # born t=1000
+    now = t + 6 * 3600                                # six hours later
+    ev = _loiter_ev(duration=960.0)                   # a 16-min "stay"
+    assert _loiter_is_furniture(w, "cam", ev, now=now)
+
+
+def test_parking_car_loiter_still_fires():
+    """Anchor born WITH the stay (ages match) -> not furniture -> alert."""
+    w = StaticWatch()
+    t = _settle(w)                                    # anchor age ~6 min
+    ev = _loiter_ev(duration=960.0)                   # stay CLAIMS 16 min
+    # Anchor (360s) is younger than duration+margin -> genuine parking.
+    assert not _loiter_is_furniture(w, "cam", ev, now=t)
+    # Even at exactly duration + margin the gate stays closed (strict >).
+    now_edge = 1000.0 + ev["duration_sec"] + LOITER_FURNITURE_MARGIN_SEC
+    assert not _loiter_is_furniture(w, "cam", ev, now=now_edge)
+
+
+def test_furniture_gate_survives_missing_watch():
+    assert not _loiter_is_furniture(None, "cam", _loiter_ev(), now=2000.0)
