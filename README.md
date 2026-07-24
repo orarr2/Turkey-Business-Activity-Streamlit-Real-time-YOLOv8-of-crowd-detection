@@ -608,6 +608,17 @@ so mid-tier color-similar noise stops appearing in results.
 - **section 10: accuracy calibration** - capture frames from the live grid
   cameras, count people/vehicles yourself, and get MAE + bias per camera and
   per input size (640 vs 960) plus a concrete `conf`/`imgsz` recommendation.
+- **section 11: forecasting** - pulls the collector's Firestore history into a
+  local CSV cache (incremental, read-quota aware; the cache is the long-term
+  archive - Firestore only remembers a few days back), resamples to a 15-min
+  grid per camera, then runs an honest model ladder (persistence, seasonal
+  naive, hour-of-day/week profile, closed-form numpy ridge, and a small torch
+  GRU reading 24 h to predict the next 12 h) with a held-out tail and MAE
+  skill scores. The payoff: an expected-activity band per camera and
+  deviation anomalies - |actual - expected| in MAD units - which flag
+  unusual QUIET (an empty square at rush hour) that rolling-z detectors
+  cannot see by construction. The VM twin notebook carries only the
+  numpy profile forecaster - the piece light enough to run on the e2-micro.
 
 Reuses the exact same `detect_core` + `reid` modules as the collector so the
 numbers reconcile.
