@@ -304,6 +304,12 @@ CAMERAS = {
         "page": "https://webcamera24.com/camera/turkey/8044-otogar-kavsagi/",
         "embed": "https://player.tvkur.com/l/c77i91vbb2nj4i0fr81g",
         "type": "junction/transit",
+        # Counting line perpendicular to the diagonal road axis (top-left
+        # cluster -> bottom-right exit), calibrated on
+        # docs/images/model_view_otogar_kavsagi.jpg. A->B ordered so "in"
+        # = crossing down-right = toward the tram crossing / otogar side.
+        # Same sampled-rate caveat as every "line".
+        "line": [[0.35, 0.65], [0.95, 0.25]],
     },
     # --- Konya Kulturpark (webcamera24 8058) - replaces Giresun in the grid because
     # skylinewebcams geo-blocks Israel. tvkur id: c77i6hb84cnrb6mlji3g. ---
@@ -326,6 +332,14 @@ CAMERAS = {
         "page": "https://webcamera24.com/camera/turkey/8046-millet-caddesi/",
         "embed": "https://player.tvkur.com/l/c77i9cfbb2nj4i0fr82g",
         "type": "hospital junction / vehicular",
+        # Virtual counting line across the junction mouth, calibrated on
+        # docs/images/model_view_konya_millet_caddesi.jpg: the main street
+        # runs from the top-center vanishing point toward the camera, so a
+        # near-horizontal cut at mid-frame catches the whole flow. A->B is
+        # ordered left-to-right, which makes "in" = crossing DOWNWARD =
+        # toward the camera / into the junction foreground. Sampled rate,
+        # not a turnstile (the burst sees ~2-3s of every interval).
+        "line": [[0.03, 0.46], [0.95, 0.30]],
         # The blue keep-right sign on the traffic island reads as `person`
         # (~0.38) again and again - operator flagged it twice from live
         # screenshots. Static street furniture, so a static exclude: any

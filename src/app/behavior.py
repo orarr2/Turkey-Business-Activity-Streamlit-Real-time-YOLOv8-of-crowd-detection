@@ -17,7 +17,21 @@ behavior profile per individual:
   * zones           - which heatmap grid cells it visited (ties the
                       trajectory to the long-horizon dwell map);
   * nn_min/mean_px  - closest same-class neighbor over the window
-                      (crowding/pairing signal).
+                      (crowding/pairing signal);
+  * label           - one readable behavior verdict per individual
+                      (walking / running / erratic / fall_suspect ... -
+                      app/behavior_labels.py) with its evidence;
+  * gestures        - arm-level gestures over the window (hand raised,
+                      both up, wave - app/gestures.py), pose mode only.
+
+Opt-in extras per request: `pose=True` runs the keypoint pass
+(app/pose.py) and enriches labels/gestures with posture; `want_faces`
+adds face DETECTION boxes on the final frame (app/faces.py - rectangles
+only, no identification); `lock` picks one individual (a numeric id or
+"auto") and renders a crosshair target-lock overlay, returning the
+target's normalized offset from frame center - the exact signal a
+pan/tilt loop would consume if local hardware ever existed. All three
+default off, so an unadorned call behaves exactly as before.
 
 Cost model: n_frames extra inferences on ONE camera, so this NEVER runs
 inside the collector's round. It is operator-triggered - the dashboard's
@@ -175,10 +189,14 @@ _TRAIL_COLORS = ((80, 175, 76), (60, 130, 246), (0, 200, 255),
                  (180, 220, 40), (140, 100, 255))
 
 
-def render_window(frames, tracks: list[Track]):
+def render_window(frames, tracks: list[Track], stats: list[dict] | None = None,
+                  lock: dict | None = None, faces: list[dict] | None = None):
     """Annotate the LAST frame with every individual's trail + numbered
     boxes. Trails run through centroids; the final box (drawn by
-    draw_boxes) already carries `#id` in its label."""
+    draw_boxes) already carries `#id` in its label. The optional layers
+    stack on top in reading order: skeletons (when boxes carry `kps`),
+    behavior-label chips (when `stats` is given), face boxes, and the
+    target-lock crosshair last so nothing covers it."""
     import cv2
 
     base = frames[-1]
@@ -192,7 +210,104 @@ def render_window(frames, tracks: list[Track]):
         if pts:
             cv2.circle(out, pts[0], 4, color, -1, cv2.LINE_AA)  # birth dot
     # Boxes of the final frame (they hold the ids) on top of the trails.
-    return draw_boxes(out, _boxes_of_last_frame(tracks))
+    last_boxes = _boxes_of_last_frame(tracks)
+    out = draw_boxes(out, last_boxes)
+
+    if any("kps" in b for b in last_boxes):
+        from app.pose import draw_skeleton
+        out = draw_skeleton(out, last_boxes)
+
+    if stats:
+        _draw_label_chips(out, last_boxes, stats)
+    if faces:
+        from app.faces import draw_faces
+        out = draw_faces(out, faces)
+    if lock:
+        _draw_target_lock(out, lock)
+    return out
+
+
+def _draw_label_chips(out, last_boxes: list[dict], stats: list[dict]) -> None:
+    """Behavior verdict under each surviving individual's box - the demo
+    convention (a colored chip with the label), red when alerting."""
+    import cv2
+
+    by_id = {s.get("id"): s for s in stats}
+    for b in last_boxes:
+        s = by_id.get(b.get("track_id"))
+        if not s or not s.get("label"):
+            continue
+        txt = s["label"]
+        if s.get("gestures"):
+            txt += " +" + "+".join(s["gestures"])
+        color = (0, 0, 220) if s.get("alert") else (90, 90, 90)
+        x1, y2 = int(b["x1"]), int(b["y2"])
+        (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        cv2.rectangle(out, (x1, y2 + 2), (x1 + tw + 6, y2 + th + 8),
+                      color, -1)
+        cv2.putText(out, txt, (x1 + 3, y2 + th + 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1,
+                    cv2.LINE_AA)
+
+
+def _draw_target_lock(out, lock: dict) -> None:
+    """Full-frame crosshair through the locked individual's centroid."""
+    import cv2
+
+    H, W = out.shape[:2]
+    cx, cy = int(lock["cx"]), int(lock["cy"])
+    red = (0, 0, 230)
+    cv2.line(out, (0, cy), (W, cy), red, 1, cv2.LINE_AA)
+    cv2.line(out, (cx, 0), (cx, H), red, 1, cv2.LINE_AA)
+    cv2.circle(out, (cx, cy), 26, red, 2, cv2.LINE_AA)
+    cv2.circle(out, (cx, cy), 4, red, -1, cv2.LINE_AA)
+    cv2.putText(out, f"TARGET LOCKED #{lock['track_id']}",
+                (max(8, W - 320), 34), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                red, 2, cv2.LINE_AA)
+    cv2.putText(out, f"[{cx} {cy}]", (cx + 32, max(20, cy - 12)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, red, 1, cv2.LINE_AA)
+
+
+def _choose_lock(tracks: list[Track], stats: list[dict], want: str,
+                 frame_shape) -> dict | None:
+    """Resolve the lock request to one track. "auto" prefers the first
+    alerting individual, then the largest person, then the largest
+    anything; a numeric id targets that exact track. None when the
+    request matches nothing (an id that never existed, an empty scene)."""
+    if not tracks:
+        return None
+    by_id = {tr.tid: tr for tr in tracks}
+    tid: int | None = None
+    if want == "auto":
+        alerted = [s["id"] for s in stats if s.get("alert")]
+        if alerted:
+            tid = alerted[0]
+        else:
+            def _area(tr: Track) -> float:
+                b = tr.boxes[-1]
+                return (b["x2"] - b["x1"]) * (b["y2"] - b["y1"])
+            persons = [tr for tr in tracks if tr.cls == "person"]
+            pool = persons or tracks
+            tid = max(pool, key=_area).tid
+    else:
+        try:
+            tid = int(want)
+        except (TypeError, ValueError):
+            return None
+    tr = by_id.get(tid)
+    if tr is None:
+        return None
+    H, W = frame_shape[:2]
+    cx, cy = _centroid(tr.boxes[-1])
+    return {
+        "track_id": tr.tid,
+        "cx": round(cx, 1), "cy": round(cy, 1),
+        # Normalized offset from frame center in [-0.5, 0.5] - the error
+        # signal a pan/tilt controller would zero out. Kept even though no
+        # such hardware exists here: it makes the lock testable and honest
+        # about what it is (an annotation, not an actuator).
+        "dx": round(cx / W - 0.5, 3), "dy": round(cy / H - 0.5, 3),
+    }
 
 
 def _boxes_of_last_frame(tracks: list[Track]) -> list[dict]:
@@ -216,12 +331,17 @@ def analyze_window(cam_id: str, model,
                    stride: int = DEFAULT_STRIDE,
                    imgsz: int | None = DEFAULT_IMGSZ,
                    save: bool = True,
-                   frames=None) -> dict:
+                   frames=None,
+                   pose: bool = False,
+                   lock: str | None = None,
+                   want_faces: bool = False) -> dict:
     """Grab a window from `cam_id`, profile every individual in it.
 
     `frames` overrides the live grab (tests / offline replays feed frames
     directly). Raises ValueError on an unknown camera, RuntimeError when
-    the stream yields fewer than 2 frames.
+    the stream yields fewer than 2 frames. `pose` / `lock` / `want_faces`
+    are the opt-in layers documented in the module docstring; all off by
+    default, leaving the base behavior byte-identical.
     """
     cam = CAMERAS.get(cam_id)
     if cam is None:
@@ -244,6 +364,17 @@ def analyze_window(cam_id: str, model,
                                  cam.get("roi_exclude_class"))
         per_boxes.append(b)
 
+    # Optional pose pass: attach keypoints to the person boxes BEFORE the
+    # tracker threads them - the tracker keeps the same dicts, so every
+    # track's box history carries its skeletons for free.
+    pose_persons = 0
+    if pose:
+        from app.pose import attach_keypoints, load_pose_model
+        pose_model = load_pose_model()
+        for fr, b in zip(frames, per_boxes):
+            pose_persons += attach_keypoints(pose_model, fr, b,
+                                             imgsz=imgsz or DEFAULT_IMGSZ)
+
     dt = stride / BURST_FPS_ASSUMED
     tracks = assign_burst_ids(per_boxes, frames[0].shape, dt=dt)
     stats = []
@@ -252,6 +383,28 @@ def analyze_window(cam_id: str, model,
         row["id"] = tr.tid
         stats.append(row)
     attach_neighbor_stats(tracks, stats)
+
+    # Behavior verdict per individual - kinematic rules always, posture
+    # rules when this track's boxes carry keypoints.
+    from app.behavior_labels import label_track
+    from app.gestures import detect_gestures
+    for tr, row in zip(tracks, stats):
+        kps_seq = [b.get("kps") for b in tr.boxes]
+        has_kps = any(kps_seq)
+        row.update(label_track(row, frames[0].shape,
+                               kps_seq if has_kps else None))
+        row["gestures"] = detect_gestures(kps_seq) if has_kps else []
+
+    faces_list: list[dict] = []
+    faces_available = None
+    if want_faces:
+        from app import faces as _faces
+        faces_available = _faces.available()
+        if faces_available:
+            faces_list = _faces.detect_faces(frames[-1])
+
+    lock_info = _choose_lock(tracks, stats, lock, frames[0].shape) \
+        if lock else None
 
     moving = [s for s in stats if not s["stationary"]]
     result = {
@@ -266,12 +419,26 @@ def analyze_window(cam_id: str, model,
         "tracks": stats,
     }
 
+    label_counts: dict[str, int] = {}
+    for s in stats:
+        label_counts[s["label"]] = label_counts.get(s["label"], 0) + 1
+    result["labels"] = label_counts
+    result["alerts"] = [s["id"] for s in stats if s.get("alert")]
+    if pose:
+        result["pose_persons"] = pose_persons
+    if want_faces:
+        result["faces_available"] = faces_available
+        result["faces"] = len(faces_list)
+    if lock_info:
+        result["lock"] = lock_info
+
     if save:
         import cv2
         BEHAVIOR_DIR.mkdir(parents=True, exist_ok=True)
         stem = (f"{cam_id}_"
                 f"{time.strftime('%Y%m%d_%H%M%S', time.gmtime())}")
-        annotated = render_window(frames, tracks)
+        annotated = render_window(frames, tracks, stats=stats,
+                                  lock=lock_info, faces=faces_list or None)
         okj, buf = cv2.imencode(".jpg", annotated,
                                 [cv2.IMWRITE_JPEG_QUALITY, 85])
         if okj:

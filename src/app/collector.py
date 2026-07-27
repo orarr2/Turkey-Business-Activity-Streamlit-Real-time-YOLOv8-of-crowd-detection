@@ -58,6 +58,7 @@ from app.detect_core import (
     night_adjusted_conf,
     resolve_stream,
 )
+from app.faces import maybe_blur as _maybe_blur
 from app.presence import PresenceTracker
 from app.reid import ReidStore
 
@@ -72,6 +73,10 @@ from app.reid import ReidStore
 # We still enforce an interval floor to prevent typos like --interval 1.
 MIN_INTERVAL_S = 5
 FREE_TIER_WRITES_PER_DAY = 20_000
+# Optional skeleton pass for the published model view (--pose). Loaded in
+# main() on hosts that can afford a second model; None = feature off, and
+# every use below checks that. NEVER enable on the 1 GB e2-micro.
+_POSE_MODEL = None
 REID_STATS_EVERY_ROUNDS = 5
 
 # --- Fallback picker knobs ----------------------------------------------------
@@ -803,6 +808,7 @@ def _save_anomaly_snapshot(slot_id: str, cam_id: str, ts_iso: str,
     every anomalous sample on the VM, exactly when the round was already slow.
     """
     stem = _ts_filename(ts_iso)
+    frame = _maybe_blur(frame)          # privacy mode: no-op unless --blur-faces
     raw_ok, raw_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
     if not raw_ok:
         return {}
@@ -848,7 +854,15 @@ def _save_live_view(slot_id: str, frame, boxes: list[dict], firebase) -> str | N
     it because each overwrite resets the object's age. Cheap: draws the
     already-computed boxes, no extra inference.
     """
-    annotated = draw_boxes(frame, boxes)
+    annotated = draw_boxes(_maybe_blur(frame), boxes)
+    if any("kps" in b for b in boxes):
+        # --pose attached skeletons upstream; draw them over the boxes so
+        # the model view shows posture, not just presence.
+        try:
+            from app.pose import draw_skeleton
+            annotated = draw_skeleton(annotated, boxes)
+        except Exception:
+            pass
     okj, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 80])
     if not okj:
         return None
@@ -869,7 +883,7 @@ def _save_heatmap_view(cam_id: str, frame, firebase) -> str | None:
     ~30 samples; same lifecycle trick as the live view (each overwrite
     resets the Storage object's age)."""
     from app import heatmap as _hm
-    img = _hm.render(cam_id, base_frame=frame)
+    img = _hm.render(cam_id, base_frame=_maybe_blur(frame))
     okj, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 80])
     if not okj:
         return None
@@ -886,7 +900,10 @@ def _save_event_crop(kind: str, slot_id: str, base: str, frame, box: dict,
                      firebase) -> tuple[str | None, str | None, bytes | None]:
     """Save a bbox crop + full frame for an event under snapshots/{kind}/...
     Returns (crop_url, full_url, crop_jpeg_bytes) - bytes for alert pushes.
-    Uses Storage if configured, else local disk under web/snapshots/."""
+    Uses Storage if configured, else local disk under web/snapshots/.
+    With --blur-faces both the crop and the full frame are blurred - the
+    published evidence pair carries no recognizable faces either."""
+    frame = _maybe_blur(frame)
     x1 = max(0, int(box["x1"])); y1 = max(0, int(box["y1"]))
     x2 = min(frame.shape[1], int(box["x2"])); y2 = min(frame.shape[0], int(box["y2"]))
     if not (x2 > x1 and y2 > y1):
@@ -1109,7 +1126,7 @@ def _save_static_departed_images(slot_id: str, base: str,
     is saved alongside as the "after" shot - the empty spot."""
     after_bytes = None
     if after_frame is not None:
-        okf, full_buf = cv2.imencode(".jpg", after_frame,
+        okf, full_buf = cv2.imencode(".jpg", _maybe_blur(after_frame),
                                      [cv2.IMWRITE_JPEG_QUALITY, 80])
         if okf:
             after_bytes = full_buf.tobytes()
@@ -1487,6 +1504,15 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
         # "Model view": the annotated frame these counts came from, shown by
         # the dashboard under the live video and refreshed every sample.
         if save_snapshots:
+            if _POSE_MODEL is not None:
+                # Opt-in skeleton pass (--pose): keypoints ride the same box
+                # dicts as track_id/kmh; a pose failure must not cost the
+                # sample, so it degrades to a plain model view.
+                try:
+                    from app.pose import attach_keypoints
+                    attach_keypoints(_POSE_MODEL, frame, boxes)
+                except Exception as e:
+                    print(f"  ! pose pass failed for {slot_id}: {e}")
             try:
                 url = _save_live_view(slot_id, frame, boxes, firebase)
                 if url:
@@ -1672,6 +1698,19 @@ def main() -> None:
     ap.add_argument("--conf", type=float, default=0.30,
                     help="YOLO confidence threshold (cameras.py entries may "
                          "override per camera)")
+    ap.add_argument("--pose", action="store_true",
+                    help="attach skeleton keypoints (yolov8n-pose, or "
+                         "POSE_WEIGHTS) to person boxes on the published "
+                         "model view. Loads a SECOND model - for hosts "
+                         "with >=2GB RAM; do not enable on the 1GB "
+                         "e2-micro")
+    ap.add_argument("--blur-faces", action="store_true",
+                    help="privacy mode: gaussian-blur every detected face "
+                         "in all published snapshots (model view, anomaly "
+                         "frames, event crops, heatmap base). Needs "
+                         "FACE_MODEL pointing at a YuNet .onnx; silently "
+                         "off otherwise. Counting/re-ID always run on the "
+                         "unblurred in-memory frame")
     ap.add_argument("--no-snapshots", action="store_true",
                     help="skip anomaly / returning-visitor image saves")
     ap.add_argument("--prune-snapshots", action="store_true",
@@ -1722,6 +1761,23 @@ def main() -> None:
           f"Storage: {'ON' if firebase.storage else 'off (local disk fallback)'}")
 
     model = load_model(args.weights)
+
+    global _POSE_MODEL
+    if args.pose:
+        from app.pose import load_pose_model
+        _POSE_MODEL = load_pose_model()
+        print("[pose] keypoint model loaded - model view will carry "
+              "skeletons")
+    if args.blur_faces:
+        from app import faces as _faces_mod
+        _faces_mod.BLUR_ENABLED = True
+        if _faces_mod.available():
+            print("[faces] blur enabled - published snapshots will carry "
+                  "no recognizable faces")
+        else:
+            print("[faces] --blur-faces requested but FACE_MODEL is not "
+                  "set/loadable - blur is OFF (set FACE_MODEL to a YuNet "
+                  ".onnx)")
 
     # ONE shared camera pool for all slots: Konya first, then the preferred
     # Istanbul four, then the rest of the catalog - always N distinct cams.

@@ -320,7 +320,12 @@ budget 12% of the frame diagonal, class must match); a track whose foot point
 changes sides of the line counts as one crossing, split in/out (sign of the
 cross product vs the A→B direction) and person/vehicles. The burst observes
 ~2-3 s out of every 40 s, so these are a **sampled rate** - trend-comparable
-on the same camera over time, not a turnstile total.
+on the same camera over time, not a turnstile total. Two Konya cameras ship
+with calibrated lines (`konya_millet_caddesi` across the junction mouth,
+`otogar_kavsagi` across the diagonal road axis - both calibrated against the
+`docs/images/model_view_*.jpg` frames); the dashboard renders each tile's
+in/out the moment the field appears. `tools/roi_grid.py` overlays the
+normalized grid on any camera's frame when you calibrate your own.
 
 **Re-ID accumulators.** Per detection: crop → embedder → unit vector →
 cosine vs the ≤ 400 most-recently-seen same-camera same-class entities
@@ -500,6 +505,61 @@ brightness, JPEG q70) retrieved their own object as top-1; uploading the full
 kulturpark frame matched 5/6 of its objects above the identity threshold
 (93.8-99.8%). `tests/test_visual_search.py` covers the index/cache/registry
 behaviors without needing YOLO.
+
+---
+
+## Window analysis - pose, behavior labels, gestures, faces, target lock
+
+The dashboard's "Window analysis" panel (`POST /api/deep-analyze`, CLI:
+`tools/analyze_window.py`) grabs a longer window (default 12 frames ~0.5 s
+apart) from ONE camera, threads the detections into per-individual tracks
+(`app/tracker.py` - position + motion), and profiles each individual:
+path, distance, px/s + km/h estimate, moving fraction, direction, visited
+heatmap zones, closest same-class neighbor. On top of that base profile,
+three opt-in layers (checkboxes in the panel / query params on the API):
+
+- **Behavior labels** (`app/behavior_labels.py`, always on) - every
+  individual gets ONE readable verdict with its evidence
+  (`label_reasons`): `walking` / `standing` / `running` / `dwelling`
+  (moved but went nowhere) / `erratic` (≥ 3 sharp course reversals) for
+  people, `driving` / `parked` for vehicles. Verdicts worth walking to the
+  screen for (`erratic`, `fall_suspect`) carry `alert: true` and a ⚠ in
+  the table - deliberately a short list, the anomaly layer already taught
+  us a chatty badge gets ignored.
+- **Pose** (`pose=1`, `app/pose.py`) - a second pass with `yolov8n-pose`
+  (auto-downloaded; `POSE_WEIGHTS` overrides) whose skeletons are matched
+  onto the detector's `person` boxes by IoU - a pose-person with no
+  matching detection is discarded, so counts can never change because
+  pose ran. Matched boxes gain COCO-17 keypoints (drawn on the annotated
+  frame), which unlocks the posture labels - `crouching`, `fall_suspect`
+  (torso past 60° from vertical, ≥ 2 frames) - and the gesture pass:
+  **`hand_raised`, `both_hands_up`, `wave`** (`app/gestures.py`, a raised
+  wrist swinging across its elbow ≥ 2 times). Arm-level only, honestly:
+  at street-cam distance a hand is a few pixels, finger-level vocabulary
+  needs a close-range camera (mediapipe experiment noted in
+  requirements.txt, notebook-only).
+- **Faces** (`faces=1`, `app/faces.py`) - face **detection** boxes on the
+  final frame via OpenCV's bundled YuNet (point `FACE_MODEL` at the
+  ~230 KB `.onnx` from the opencv_zoo repo; silently off otherwise). This
+  is rectangles only - no embeddings, no face database, no identification;
+  "have I seen this person before?" stays answered by body-appearance
+  re-ID, which is the honest tool at these camera distances.
+- **Target lock** (`lock=auto` or `lock=<track id>`) - a crosshair
+  overlay locked on one individual: the first alerting one, else the
+  largest person in view. The result carries `{track_id, cx, cy, dx, dy}`
+  where `dx/dy` is the normalized offset from frame center - the error
+  signal a pan/tilt controller would zero out. These are read-only public
+  streams, so there is no actuator; the lock is an annotation plus that
+  hook, nothing more.
+
+The same pose/blur machinery is available to the 24/7 collector as two
+opt-in flags, both off by default so the shipped VM behaves bit-identically:
+`--pose` (skeletons on the published model view - loads a SECOND model, for
+hosts with ≥ 2 GB; do not enable on the 1 GB e2-micro) and `--blur-faces`
+(privacy mode: every published snapshot - model view, anomaly frames, event
+crop + full-frame pairs, heatmap base - has faces gaussian-blurred before
+the bytes leave the process; counting and re-ID always run on the unblurred
+in-memory frame, so the numbers don't move).
 
 ---
 

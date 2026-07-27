@@ -608,6 +608,15 @@
                min="4" max="24" style="width:60px" /></label>
         <label>every Nth frame <input type="number" id="deepwin-stride" value="12"
                min="4" max="40" style="width:60px" /></label>
+        <label title="run the skeleton pass too: posture labels (crouching, fall)
+and arm gestures (hand raised, wave). Doubles the inference cost">
+          <input type="checkbox" id="deepwin-pose" /> pose</label>
+        <label title="detect face boxes on the final frame (needs FACE_MODEL
+pointing at a YuNet .onnx; detection only, no identification)">
+          <input type="checkbox" id="deepwin-faces" /> faces</label>
+        <label title="crosshair overlay locked on one individual: the first
+alerting one, else the largest person in view">
+          <input type="checkbox" id="deepwin-lock" /> target lock</label>
         <button type="button" id="deepwin-go">analyze window</button>
         <span id="deepwin-status"></span>
       </div>
@@ -630,11 +639,17 @@
         if (!cam) { st.textContent = "enter a camera id"; return; }
         const frames = document.getElementById("deepwin-frames").value || 12;
         const stride = document.getElementById("deepwin-stride").value || 12;
+        const pose = document.getElementById("deepwin-pose").checked;
+        const faces = document.getElementById("deepwin-faces").checked;
+        const lock = document.getElementById("deepwin-lock").checked;
         go.disabled = true;
         st.textContent = "grabbing + analyzing (10-30s)…";
         try {
           const r = await fetch(`/api/deep-analyze?cam=${encodeURIComponent(cam)}`
-                                + `&frames=${frames}&stride=${stride}`,
+                                + `&frames=${frames}&stride=${stride}`
+                                + (pose ? "&pose=1" : "")
+                                + (faces ? "&faces=1" : "")
+                                + (lock ? "&lock=auto" : ""),
                                 { method: "POST" });
           const data = await r.json();
           if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
@@ -662,9 +677,20 @@
         } else {
           img.hidden = true;
         }
-        document.getElementById("deepwin-summary").textContent =
+        let summary =
           `${d.cam_name}: ${d.individuals} individual(s) over ${d.window_sec}s`
           + ` (${d.frames} frames) - ${d.moving} moving, ${d.stationary} standing still`;
+        if (d.labels && Object.keys(d.labels).length) {
+          summary += " · " + Object.entries(d.labels)
+            .map(([k, v]) => `${v} ${k}`).join(", ");
+        }
+        if (d.lock) summary += ` · locked on #${d.lock.track_id}`;
+        if (d.faces_available === false) {
+          summary += " · faces: model not configured (set FACE_MODEL)";
+        } else if (typeof d.faces === "number") {
+          summary += ` · ${d.faces} face(s)`;
+        }
+        document.getElementById("deepwin-summary").textContent = summary;
         const rows = (d.tracks || []).map((t) => `<tr>
           <td>#${t.id}</td><td>${esc(t.cls ?? "?")}</td>
           <td>${t.sightings}</td>
@@ -672,6 +698,10 @@
           <td>${t.stationary ? "standing" : esc(t.direction ?? "-")}</td>
           <td>${t.mean_speed_px_s ?? "-"}</td>
           <td>${t.kmh_est != null ? "~" + t.kmh_est : "-"}</td>
+          <td>${t.alert ? "⚠ " : ""}${esc(t.label ?? "-")}${
+            (t.pose_flags || []).length
+              ? " · " + esc(t.pose_flags.join(", ")) : ""}</td>
+          <td>${(t.gestures || []).length ? esc(t.gestures.join(", ")) : "-"}</td>
           <td>${t.nn_min_px != null ? Math.round(t.nn_min_px) : "-"}</td>
           <td>${(t.zones || []).length}</td>
         </tr>`).join("");
@@ -684,6 +714,8 @@
             <th title="dominant screen direction of its net movement">direction</th>
             <th title="mean speed, pixels per second">px/s</th>
             <th title="rough speed estimate for vehicles (class-length ruler, +-30-50%)">km/h</th>
+            <th title="behavior verdict (kinematics + posture when pose ran); ⚠ = worth a look">behavior</th>
+            <th title="arm-level gestures over the window (pose mode only)">gesture</th>
             <th title="closest same-class neighbor during the window, px">nearest</th>
             <th title="how many map zones it visited">zones</th>
           </tr></thead><tbody>${rows}</tbody></table>`;

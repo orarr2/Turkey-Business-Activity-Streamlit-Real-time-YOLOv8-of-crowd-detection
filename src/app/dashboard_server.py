@@ -443,12 +443,16 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
     def _deep_analyze(self) -> None:
         """POST /api/deep-analyze?cam=<id>[&frames=12][&stride=12][&imgsz=640]
+                                 [&pose=1][&faces=1][&lock=auto|<track id>]
 
         Operator-triggered deep window: grabs `frames` frames from ONE
         camera, tracks every individual (position + motion) and returns
-        the per-individual behavior profile + the trails image URL. Costs
-        `frames` inferences, so one analysis runs at a time - a second
-        request while one is in flight gets 409."""
+        the per-individual behavior profile + the trails image URL.
+        `pose=1` adds the skeleton pass (posture labels + gestures),
+        `faces=1` adds face-detection boxes on the final frame, `lock`
+        draws the crosshair target-lock overlay on one individual. Costs
+        `frames` inferences (double with pose), so one analysis runs at a
+        time - a second request while one is in flight gets 409."""
         from urllib.parse import parse_qs, urlparse
         q = parse_qs(urlparse(self.path).query)
 
@@ -465,6 +469,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         n_frames = _one("frames", int, 12, 4, 24)
         stride = _one("stride", int, 12, 4, 40)
         imgsz = _one("imgsz", int, 640, 320, 960)
+        pose = _one("pose", int, 0, 0, 1) == 1
+        want_faces = _one("faces", int, 0, 0, 1) == 1
+        lock = (q.get("lock") or [None])[0] or None
 
         state = _VISUAL_SEARCH.get()
         if state.model is None:
@@ -478,7 +485,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         try:
             from app.behavior import analyze_window
             result = analyze_window(cam, state.model, n_frames=n_frames,
-                                    stride=stride, imgsz=imgsz)
+                                    stride=stride, imgsz=imgsz,
+                                    pose=pose, lock=lock,
+                                    want_faces=want_faces)
             self._send_json(200, result)
         except ValueError as e:
             self._send_json(404, {"error": str(e)})

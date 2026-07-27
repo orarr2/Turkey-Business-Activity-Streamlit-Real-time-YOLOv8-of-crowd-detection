@@ -28,3 +28,16 @@ Pillow>=10.0
 # --- Optional at runtime (not installed by default) ---
 # onnxruntime>=1.17   # only if you point --reid-model at an OSNet .onnx you
 #                     # produced separately (histogram default needs nothing).
+#
+# Pose pass (--pose / deep-window "pose"): NO extra package - ultralytics
+# auto-downloads yolov8n-pose.pt on first use (override via POSE_WEIGHTS).
+#
+# Face boxes + --blur-faces privacy blurring: NO extra package - uses
+# OpenCV's bundled YuNet API. Download the ~230KB model once and point
+# FACE_MODEL at it:
+#   https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet
+#
+# mediapipe>=0.10     # optional, notebook-only: finger-level gesture
+#                     # experiments on close-range footage. The street-cam
+#                     # pipeline never needs it (arm-level gestures come
+#                     # from the pose keypoints).
