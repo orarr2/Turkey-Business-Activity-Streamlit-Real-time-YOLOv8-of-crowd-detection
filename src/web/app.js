@@ -316,6 +316,15 @@ function updateStripLabel(slotId, activeCamName, displayArea) {
 // ---------- 2. Video builder (re-runs when active_cam changes) --------------
 
 function buildVideoInto(st, cfg, slot) {
+  // Remember the build inputs so the keep-live watchdog can rebuild this
+  // tile from scratch when it detects a hard stall (stream died, YouTube
+  // rotated the live URL, hls.js wedged) - the exact failure the operator
+  // hit: a tile frozen on an hours-old frame with nothing left to revive it.
+  st.lastVideoBuild = { cfg, slot };
+  st._vLastTime = null;
+  st._vStrikes = 0;
+  st.ytLastTime = null;
+  st.ytLastAdvanceTs = null;
   // Tear down any existing hls.js instance so we don't leak network sockets
   // when a fallback swap replaces the <video> element.
   if (st.currentHlsInstance) {
@@ -402,6 +411,11 @@ function buildVideoInto(st, cfg, slot) {
 // live edge. We nudge a few times because the player only accepts commands
 // once it has finished loading.
 function forceYouTubeLive(iframe) {
+  // The command channel needs enablejsapi; catalog embeds carry it, but be
+  // defensive for any hand-built embed URL.
+  if (!/enablejsapi=1/.test(iframe.src)) {
+    iframe.src += (iframe.src.includes("?") ? "&" : "?") + "enablejsapi=1";
+  }
   const cmd = (func, args = []) => {
     try {
       iframe.contentWindow.postMessage(
@@ -409,7 +423,19 @@ function forceYouTubeLive(iframe) {
         "https://www.youtube.com");
     } catch (_) { /* not ready / cross-origin race - the interval retries */ }
   };
-  const nudge = () => { cmd("mute"); cmd("playVideo"); cmd("seekTo", [1e7, true]); };
+  const nudge = () => {
+    cmd("mute"); cmd("playVideo"); cmd("seekTo", [1e7, true]);
+    // "listening" opens the return channel: the player answers with a
+    // stream of infoDelivery messages (currentTime included), which is the
+    // watchdog's ONLY honest stall signal for a cross-origin iframe.
+    try {
+      iframe.contentWindow.postMessage(
+        JSON.stringify({ event: "listening",
+                         id: iframe.dataset.ytWatch || "1",
+                         channel: "widget" }), "*");
+    } catch (_) {}
+  };
+  iframe._ytNudge = nudge;   // the keep-live watchdog re-uses the same nudge
   iframe.addEventListener("load", () => setTimeout(nudge, 700));
   // 12 nudges over ~30s: Chrome staggers autoplay for several cross-origin
   // iframes and the old 6x2.5s window sometimes expired before the last
@@ -482,6 +508,99 @@ function attachHls(st, video, cfg) {
     fallbackToEmbed();
   }
 }
+
+// ---------- 2b. Keep-live watchdog -------------------------------------------
+// The startup burst above (12 nudges over ~30s) only covers page load. A
+// tile that stalls LATER - YouTube live hiccup, hls.js buffer wedge, the
+// stream's URL rotating server-side - previously froze forever on its last
+// frame (operator report 2026-07-29: a tile showing a 12-hour-old frame).
+// This watchdog runs for the page's whole life, every WATCH_EVERY_MS:
+//   * YouTube iframes: re-issue mute/play/seek-to-live (heals pauses and
+//     drift-behind-live) and read the player's infoDelivery currentTime -
+//     no advance for YT_STALL_MS while the tab is visible = hard stall ->
+//     reload the iframe with a cache-buster;
+//   * HLS <video>: currentTime not advancing across two consecutive checks
+//     (tab visible) -> first a play()/startLoad kick, then a full rebuild
+//     via the tile's remembered build inputs.
+// Background tabs legitimately throttle playback, so stall strikes only
+// count while the page is visible - returning to the tab re-kicks instead
+// of tearing down healthy players.
+const WATCH_EVERY_MS = 45_000;
+const YT_STALL_MS = 150_000;
+
+window.addEventListener("message", (ev) => {
+  if (typeof ev.data !== "string" || ev.data[0] !== "{") return;
+  let msg;
+  try { msg = JSON.parse(ev.data); } catch (_) { return; }
+  if (msg.event !== "infoDelivery" || !msg.info
+      || typeof msg.info.currentTime !== "number") return;
+  for (const st of Object.values(tileState)) {
+    const ifr = st.videoWrap &&
+        st.videoWrap.querySelector('iframe[src*="youtube"]');
+    if (!ifr || ifr.contentWindow !== ev.source) continue;
+    const t = msg.info.currentTime;
+    if (st.ytLastTime === null || Math.abs(t - st.ytLastTime) > 0.5) {
+      st.ytLastTime = t;
+      st.ytLastAdvanceTs = Date.now();
+    }
+    break;
+  }
+});
+
+function watchTilesLive() {
+  if (document.visibilityState !== "visible") return;
+  for (const st of Object.values(tileState)) {
+    if (!st.videoWrap) continue;
+    const video = st.videoWrap.querySelector("video[data-hls]");
+    const yt = st.videoWrap.querySelector('iframe[src*="youtube"]');
+    if (video) {
+      const t = video.currentTime;
+      if (st._vLastTime !== null && t <= st._vLastTime + 0.1) {
+        st._vStrikes = (st._vStrikes || 0) + 1;
+        if (st._vStrikes === 1) {
+          try { if (st.currentHlsInstance) st.currentHlsInstance.startLoad(); } catch (_) {}
+          const p = video.play();
+          if (p && p.catch) p.catch(() => {});
+        } else if (st._vStrikes >= 2 && st.lastVideoBuild) {
+          console.warn("keep-live: rebuilding stalled HLS tile", st.slot && st.slot.slot_id);
+          buildVideoInto(st, st.lastVideoBuild.cfg, st.lastVideoBuild.slot);
+          continue;
+        }
+      } else {
+        st._vStrikes = 0;
+      }
+      st._vLastTime = t;
+    } else if (yt) {
+      if (yt._ytNudge) { try { yt._ytNudge(); } catch (_) {} }
+      // Hard stall: the player was talking to us and stopped advancing.
+      if (st.ytLastAdvanceTs !== null
+          && Date.now() - st.ytLastAdvanceTs > YT_STALL_MS) {
+        console.warn("keep-live: reloading stalled YouTube tile",
+                     st.slot && st.slot.slot_id);
+        st.ytLastTime = null;
+        st.ytLastAdvanceTs = null;
+        const base = yt.src.replace(/&cachebust=\d+/, "");
+        yt.src = base + "&cachebust=" + Date.now();
+        forceYouTubeLive(yt);
+      }
+    }
+  }
+}
+setInterval(watchTilesLive, WATCH_EVERY_MS);
+
+// Console diagnostic: per-tile liveness at a glance.
+window.__tileLiveDebug = () => Object.fromEntries(
+  Object.entries(tileState).map(([sid, st]) => {
+    const video = st.videoWrap && st.videoWrap.querySelector("video[data-hls]");
+    const yt = st.videoWrap && st.videoWrap.querySelector('iframe[src*="youtube"]');
+    return [sid, {
+      kind: video ? "hls" : (yt ? "youtube" : "none"),
+      curTime: video ? Math.round(video.currentTime) : st.ytLastTime,
+      lastAdvanceAgoS: st.ytLastAdvanceTs
+          ? Math.round((Date.now() - st.ytLastAdvanceTs) / 1000) : null,
+      strikes: st._vStrikes || 0,
+    }];
+  }));
 
 // ---------- 3. Bail out cleanly if Firebase isn't configured -----------------
 
