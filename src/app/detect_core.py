@@ -123,6 +123,25 @@ def load_model(weights: str = "yolov8s.pt"):
 # future client break is a one-line change, not a redeploy.
 _YT_PLAYER_CLIENTS = (os.environ.get("YT_PLAYER_CLIENTS") or "android,ios,tv").split(",")
 
+# PO-token provider (2026-07-29): YouTube starves Google-datacenter IPs -
+# streams resolve, but googlevideo serves them no data ("opened but
+# produced no frames" on every YT camera from the VM, while the same
+# streams play 1080p from a residential IP). The remedy yt-dlp documents
+# is a PO token minted by the bgutil provider; in SCRIPT mode (a node
+# script invoked per resolution - nothing resident, which matters on the
+# 1 GB e2-micro) the plugin only needs this env var pointing at the
+# transpiled generate_once.js. Unset = the exact previous behavior; the
+# plugin package must also be pip-installed for the arg to matter (see
+# deploy/gcp-vm/setup_pot_provider.sh).
+_YT_POT_SCRIPT = (os.environ.get("YT_POT_SCRIPT") or "").strip()
+
+
+def _yt_extractor_args(client: str) -> dict:
+    args = {"youtube": {"player_client": [client.strip()]}}
+    if _YT_POT_SCRIPT:
+        args["youtubepot-bgutilscript"] = {"script_path": [_YT_POT_SCRIPT]}
+    return args
+
 
 def resolve_youtube(url: str) -> str:
     """Resolve a YouTube Live (or webcamera24 YouTube-backed) page to an HLS
@@ -136,7 +155,7 @@ def resolve_youtube(url: str) -> str:
     for client in _YT_PLAYER_CLIENTS:
         opts = {"quiet": True, "no_warnings": True,
                 "format": "best[protocol^=m3u8]/best",
-                "extractor_args": {"youtube": {"player_client": [client.strip()]}}}
+                "extractor_args": _yt_extractor_args(client)}
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)

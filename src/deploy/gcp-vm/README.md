@@ -129,6 +129,33 @@ sudo git -C /opt/turkey-footfall fetch origin main && \
 > ```
 > — never a wholesale copy from the repo.
 
+## YouTube cameras from the VM: the PO-token provider
+
+YouTube starves Google-datacenter IPs: every YouTube-backed camera (the
+Turkey YT tier, all of Thailand/Japan/USA) resolves a stream from the VM
+but receives no video data ("empty frame - stream: opened but produced
+no frames"), while the same streams play 1080p from any residential IP.
+The documented remedy is attaching a PO (proof-of-origin) token, minted
+by the bgutil provider - unauthenticated "cold" tokens, no Google
+account, no cookies to expire.
+
+One-shot setup (script mode - a short-lived node process per stream
+resolution, nothing resident; the 1 GB e2-micro cannot afford a
+standing server):
+
+```bash
+sudo bash /opt/turkey-footfall/src/deploy/gcp-vm/setup_pot_provider.sh
+```
+
+The script installs node, builds the provider under
+`/opt/bgutil-ytdlp-pot-provider`, pip-installs the yt-dlp plugin into
+the venv, appends `YT_POT_SCRIPT` + `YT_PLAYER_CLIENTS=web,mweb,android,ios`
+to `/etc/turkey-footfall/proxy.env` (the EnvironmentFile the service
+already loads) and restarts the collector. Remove those two lines from
+the env file and restart to disable. Success is not guaranteed - YouTube
+moves this fence regularly - which is why the whole path is opt-in env
+config on top of an unchanged default.
+
 ## Costs to watch
 
 - **VM**: `e2-micro` is **$0** on the Always Free tier (us-central1 /
