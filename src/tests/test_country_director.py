@@ -240,3 +240,62 @@ def test_switch_to_restores_full_width():
     assert d.n_active == 2
     d.switch_to("turkey")                     # pre-report probe succeeded
     assert d.active == "turkey" and d.n_active == 4
+
+
+# ---- country pin (--pin-country/--pin-until, 2026-07-29) --------------------
+# Requested after --country thailand survived exactly one round: at boot no
+# country carries strikes, so desired_state saw a "live" Turkey and
+# maybe_advance flipped straight back. The pin clips the ladder's top at
+# the pinned country until an absolute expiry.
+
+def test_pin_holds_against_healthy_higher_priority():
+    d = make_director()
+    now = 1000.0
+    assert d.set_pin("thailand", until_ts=now + 7 * 86400)
+    d.switch_to("thailand")
+    # Turkey is fully healthy (no strikes) - without the pin this advances.
+    assert d.maybe_advance(now) is None
+    assert d.active == "thailand"
+    country, cams = d.assign(now)
+    assert country == "thailand" and cams[0] == "th_sukhumvit"
+
+
+def test_pin_still_falls_back_below_when_pinned_country_dark():
+    d = make_director()
+    now = 1000.0
+    d.set_pin("thailand", until_ts=now + 7 * 86400)
+    d.switch_to("thailand")
+    kill_country(d, "thailand", now)
+    adv = d.maybe_advance(now)
+    assert adv == ("thailand", "japan")       # down past the pin: allowed
+    assert d.active == "japan"
+
+
+def test_pin_clips_recovery_candidates_at_the_pin():
+    d = make_director()
+    now = 1000.0
+    d.set_pin("thailand", until_ts=now + 7 * 86400)
+    d.switch_to("japan")
+    # Without a pin this would be [turkey, thailand]; the pin hides turkey.
+    assert d.countries_above(now=now) == ["thailand"]
+    d.switch_to("thailand")
+    assert d.countries_above(now=now) == []
+
+
+def test_pin_expires_and_the_full_ladder_returns():
+    d = make_director()
+    now = 1000.0
+    d.set_pin("thailand", until_ts=now + 3600)
+    d.switch_to("thailand")
+    assert d.maybe_advance(now) is None       # pinned: stays
+    later = now + 3601
+    adv = d.maybe_advance(later)              # expired: turkey reclaims
+    assert adv == ("thailand", "turkey")
+    assert d.countries_above("japan", now=later) == ["turkey", "thailand"]
+
+
+def test_pin_unknown_country_is_a_noop():
+    d = make_director()
+    assert not d.set_pin("atlantis", until_ts=2000.0)
+    assert d.maybe_advance(1000.0) is None    # unchanged behavior
+    assert d.active == "turkey"

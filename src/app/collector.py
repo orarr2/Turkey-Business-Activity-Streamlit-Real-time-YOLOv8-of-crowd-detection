@@ -524,6 +524,37 @@ class CountryDirector:
                 rest_minutes=breaker_rest_minutes)
         self.active = self.order[0]
         self.n_active = n_slots        # current grid width (spec rule 3)
+        # Country pin (--pin-country/--pin-until, 2026-07-29): while
+        # active, countries with HIGHER priority than the pin are removed
+        # from consideration everywhere - desired_state never re-aims
+        # above the pin and the pre-report recovery never probes above it.
+        # Fallback BELOW the pin stays fully intact (a dark pinned country
+        # still cascades to the next bench), and recovery back UP stops at
+        # the pin, so the grid returns to it - never past it. Expiry is an
+        # absolute timestamp: the moment now >= pin_until the full ladder
+        # is back, no restart needed. Absolute rather than boot-relative
+        # on purpose - Restart=always means OOM restarts are routine, and
+        # a boot-relative pin would silently re-arm forever.
+        self.pin_country: str | None = None
+        self.pin_until: float = 0.0
+
+    # ---- country pin -----------------------------------------------------
+    def set_pin(self, country: str, until_ts: float) -> bool:
+        """Pin the ladder's effective top at `country` until `until_ts`
+        (epoch). Returns False (no-op) for an unknown country."""
+        if country not in self.pools:
+            return False
+        self.pin_country = country
+        self.pin_until = until_ts
+        return True
+
+    def _pin_index(self, now: float) -> int:
+        """Index of the effective ladder top: the pin's position while the
+        pin is active, else 0 (the true top)."""
+        if (self.pin_country is not None and now < self.pin_until
+                and self.pin_country in self.pools):
+            return self.order.index(self.pin_country)
+        return 0
 
     # ---- per-round assignment -------------------------------------------
     def assign(self, now: float) -> tuple[str, list[str]]:
@@ -564,9 +595,11 @@ class CountryDirector:
         now, ties broken by priority order (spec rules 2-3). Width 0 means
         everything is dark. Pure bookkeeping - no network; blocked hosts
         are already excluded from live_count, so a geo-blocked Turkey is
-        skipped without a single request."""
+        skipped without a single request. A country pin clips the scan's
+        top: countries above the pin do not exist while it is active."""
+        order = self.order[self._pin_index(now):]
         for n in range(self.n_slots, 0, -1):
-            for country in self.order:
+            for country in order:
                 if self.live_count(country, now) >= n:
                     return country, n
         return self.active, 0
@@ -587,11 +620,15 @@ class CountryDirector:
         prev, self.active = self.active, country
         return prev, country
 
-    def countries_above(self, country: str | None = None) -> list[str]:
+    def countries_above(self, country: str | None = None,
+                        now: float | None = None) -> list[str]:
         """Higher-priority countries than the active one, best-first - the
-        recovery-probe candidates for the pre-report check."""
+        recovery-probe candidates for the pre-report check. While a pin is
+        active the list stops at the pin: from below it the grid recovers
+        back TO the pinned country, never past it."""
         idx = self.order.index(country or self.active)
-        return self.order[:idx]
+        top = self._pin_index(time.time() if now is None else now)
+        return self.order[top:idx]
 
     def switch_to(self, country: str) -> None:
         """Force the active country (used after a successful recovery probe).
@@ -1678,7 +1715,23 @@ def main() -> None:
                     help="start the grid on this country (turkey/thailand/"
                          "japan/usa). Default: the top of the priority ladder "
                          "(turkey). The collector still rotates to the next "
-                         "country automatically when the active one goes dark.")
+                         "country automatically when the active one goes dark "
+                         "- and back UP the moment a higher-priority country "
+                         "answers, so on its own this survives one round at "
+                         "most when the ladder's top is healthy. To HOLD a "
+                         "country, use --pin-country.")
+    ap.add_argument("--pin-country", default=None,
+                    help="pin the ladder's effective top at this country: "
+                         "the grid starts there, never advances above it, "
+                         "and the pre-report recovery probes stop at it. "
+                         "Fallback BELOW the pin still works when it goes "
+                         "dark. Requires --pin-until.")
+    ap.add_argument("--pin-until", default=None,
+                    help="UTC expiry for --pin-country, YYYY-MM-DD (the pin "
+                         "lifts at 00:00 UTC that day). Absolute on purpose: "
+                         "the collector restarts routinely (Restart=always), "
+                         "and a relative duration would re-arm on every "
+                         "restart and never expire.")
     ap.add_argument("--burst", type=int, default=3,
                     help="frames per sample; the reported count is the burst median")
     ap.add_argument("--burst-stride", type=int, default=25,
@@ -1800,6 +1853,24 @@ def main() -> None:
                                n_slots=len(GRID_SLOTS))
     if getattr(args, "country", None) and args.country in director.pools:
         director.switch_to(args.country)
+    if getattr(args, "pin_country", None):
+        if not args.pin_until:
+            ap.error("--pin-country requires --pin-until YYYY-MM-DD")
+        try:
+            _until = dt.datetime.strptime(
+                args.pin_until, "%Y-%m-%d").replace(tzinfo=dt.timezone.utc)
+        except ValueError:
+            ap.error(f"--pin-until {args.pin_until!r} is not YYYY-MM-DD")
+        if not director.set_pin(args.pin_country, _until.timestamp()):
+            ap.error(f"--pin-country {args.pin_country!r} unknown "
+                     f"(one of: {', '.join(director.order)})")
+        director.switch_to(args.pin_country)
+        _left_h = (_until.timestamp() - time.time()) / 3600
+        print(f"country pin: {args.pin_country} until {args.pin_until} "
+              f"00:00 UTC ({_left_h:.0f}h left) - the ladder above it is "
+              "ignored until then; fallback below it stays live.")
+        if _left_h <= 0:
+            print("  ! pin date is already past - running the normal ladder.")
     slot_ids = [s["slot_id"] for s in GRID_SLOTS]
     _pool0 = director.pools[director.active]
     print("country grid: "
