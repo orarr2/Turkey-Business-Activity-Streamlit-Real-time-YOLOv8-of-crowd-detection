@@ -543,6 +543,17 @@ window.addEventListener("message", (ev) => {
       st.ytLastTime = t;
       st.ytLastAdvanceTs = Date.now();
     }
+    // Live-edge bookkeeping (operator report: tiles "jump to offline").
+    // For a LIVE stream the player's duration ~= the live edge, so
+    // duration - currentTime is how far BEHIND live the tile is playing.
+    // A player that reloads into the DVR window plays 12-hour-old footage
+    // while currentTime advances happily - advance alone cannot catch it.
+    if (typeof msg.info.duration === "number" && msg.info.duration > 0) {
+      st.ytBehindS = Math.max(0, msg.info.duration - t);
+    }
+    if (typeof msg.info.playerState === "number") {
+      st.ytPlayerState = msg.info.playerState;   // 1 playing, 2 paused
+    }
     break;
   }
 });
@@ -572,13 +583,32 @@ function watchTilesLive() {
       st._vLastTime = t;
     } else if (yt) {
       if (yt._ytNudge) { try { yt._ytNudge(); } catch (_) {} }
+      // Snap-to-live (operator: "don't let tiles jump to offline"): a
+      // player paused, or playing from inside the DVR window (reloads
+      // land at the window START - 12h-old footage), is dragged back to
+      // the live edge. The nudge above already sent playVideo + a
+      // seekTo far past any buffer, which YouTube clamps to live; the
+      // book-keeping here only logs the state so reloads stay rare.
+      if (st.ytBehindS !== undefined && st.ytBehindS > 90) {
+        console.warn(`keep-live: ${st.slot && st.slot.slot_id} is `
+                     + `${Math.round(st.ytBehindS)}s behind live - snapping`);
+        st.ytBehindS = 0;              // credit the seek until told otherwise
+      }
       // Hard stall: the player was talking to us and stopped advancing.
+      // Reload is the LAST resort - a reload restarts at the DVR window
+      // start and needs the whole snap-to-live dance again, so it only
+      // fires when soft recovery failed for a full stall window AND this
+      // tile has not been reloaded in the past 10 minutes (prevents the
+      // reload<->DVR flapping the operator saw).
       if (st.ytLastAdvanceTs !== null
-          && Date.now() - st.ytLastAdvanceTs > YT_STALL_MS) {
+          && Date.now() - st.ytLastAdvanceTs > YT_STALL_MS
+          && Date.now() - (st.ytLastReloadTs || 0) > 600_000) {
         console.warn("keep-live: reloading stalled YouTube tile",
                      st.slot && st.slot.slot_id);
         st.ytLastTime = null;
         st.ytLastAdvanceTs = null;
+        st.ytBehindS = undefined;
+        st.ytLastReloadTs = Date.now();
         const base = yt.src.replace(/&cachebust=\d+/, "");
         yt.src = base + "&cachebust=" + Date.now();
         forceYouTubeLive(yt);
@@ -598,6 +628,8 @@ window.__tileLiveDebug = () => Object.fromEntries(
       curTime: video ? Math.round(video.currentTime) : st.ytLastTime,
       lastAdvanceAgoS: st.ytLastAdvanceTs
           ? Math.round((Date.now() - st.ytLastAdvanceTs) / 1000) : null,
+      behindLiveS: st.ytBehindS !== undefined ? Math.round(st.ytBehindS) : null,
+      playerState: st.ytPlayerState !== undefined ? st.ytPlayerState : null,
       strikes: st._vStrikes || 0,
     }];
   }));
