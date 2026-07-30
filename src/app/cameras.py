@@ -635,15 +635,20 @@ CAMERAS = {
 # CountryDirector re-probes higher-priority countries shortly before each
 # report and switches back if one has recovered.
 #
-# Turkey ladder (revised 2026-07-21 after the geo-block verification):
-# YouTube-backed cameras FIRST. tools/probe_country --country turkey from
-# the GCP VM returns HTTP 403 on every one of the 21 IBB/Konya/webcamera24-
-# tvkur entries; the only path that actually delivers Turkish frames from
-# us-east1 is YouTube-Live. TURKEY_YT sits at the head of the pool so the
-# collector starts on working cameras; the blocked tiers stay in place so
-# a future thaw (or a Turkey-routed VM) puts them right back into rotation
-# without a code change. Konya `tvkur` cams are the fast-fail lane
-# (see collector.CameraPool): one miss rests them.
+# Turkey ladder (re-revised 2026-07-29): IBB FIRST, YouTube second.
+# The 2026-07-21 revision put the YouTube tier at the head because IBB
+# returned 403 from GCP. Both facts have since flipped: IBB delivers
+# reliably through the Cloudflare-Worker relay, while YouTube starves
+# Google-datacenter IPs at the SEGMENT level - resolves succeed, then
+# googlevideo serves no data, so every YT attempt burns ~90s of open
+# timeouts before failing. With YT at the head that cost ~15-20 min of
+# empty grid after every service restart (measured live 2026-07-29,
+# including with the bgutil PO-token provider installed - the CDN
+# starvation beat the unauthenticated-token route too). IBB-first makes
+# every boot settle within one round; the YT tier stays next in line so
+# it is probed automatically whenever IBB thins, which is also the
+# passive detector for a future YouTube thaw. Konya `tvkur` cams are the
+# fast-fail lane (see collector.CameraPool): one miss rests them.
 TURKEY_YT = [
     "tr_bulancak_meydan", "tr_golden_horn", "tr_giresun_kalesi",
     "tr_ankara_kivircik_park",
@@ -664,7 +669,7 @@ TURKEY_TAIL = [
     "ulus_parki_yeni", "pierre_lotti_yeni", "emirgan_yeni", "kiz_kulesi_yeni",
     "hidiv_kasri_yeni", "dragos_yeni",
 ]
-TURKEY_POOL = TURKEY_YT + TURKEY_IBB + TURKEY_KONYA + TURKEY_TAIL
+TURKEY_POOL = TURKEY_IBB + TURKEY_YT + TURKEY_KONYA + TURKEY_TAIL
 
 # Foreign ladders: the operator's four per country first (verified live
 # 2026-07-17), then the spares discovered from the same webcamera24 country

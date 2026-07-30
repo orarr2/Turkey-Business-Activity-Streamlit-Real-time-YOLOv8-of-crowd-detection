@@ -33,7 +33,7 @@ def test_starts_on_top_priority_country():
     country, cams = d.assign(now=1000)
     assert country == "turkey"
     assert len(cams) == 4 and len(set(cams)) == 4
-    assert cams[0] == "tr_bulancak_meydan"   # Turkey ladder is YT-first (post-2026-07-21)
+    assert cams[0] == "taksim_yeni"          # Turkey ladder is IBB-first (post-2026-07-29)
 
 
 def test_full_turkey_stays_on_turkey():
@@ -124,7 +124,7 @@ def test_switch_to_forgives_strikes():
     d.switch_to("turkey")
     assert d.live_count("turkey", now) == len(d.pools["turkey"].pool)
     _, cams = d.assign(now)
-    assert cams[0] == "tr_bulancak_meydan"
+    assert cams[0] == "taksim_yeni"
 
 
 def test_record_routes_to_named_country():

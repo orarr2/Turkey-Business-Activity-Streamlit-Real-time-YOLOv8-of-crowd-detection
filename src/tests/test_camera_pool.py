@@ -20,17 +20,18 @@ import time
 from app.cameras import FALLBACK_POOL, GRID_SLOTS, country_pool
 from app.collector import CameraPool
 
-# Turkey ladder, operator-approved 2026-07-21: 3 YouTube-Live cameras on
-# top (the only ones that clear the GCP geo-block on the IBB CDN), then
-# IBB four, then Konya four, then the rest of the Turkish tail.
+# Turkey ladder, re-revised 2026-07-29: IBB four first (they deliver via
+# the Cloudflare-Worker relay), then the YouTube tier (starved by the
+# googlevideo CDN from GCP - kept next in line as the passive thaw
+# detector), then Konya, then the Turkish tail.
+IBB4 = ["taksim_yeni", "beyazit_meydan_yeni", "sarachane_yeni",
+        "sultanahmet_1_yeni"]
 YT4 = ["tr_bulancak_meydan", "tr_golden_horn", "tr_giresun_kalesi",
        "tr_ankara_kivircik_park"]
 YT3 = YT4[:3]                              # back-compat alias
-IBB4 = ["taksim_yeni", "beyazit_meydan_yeni", "sarachane_yeni",
-        "sultanahmet_1_yeni"]
 KONYA = ["konya_hukumet", "otogar_kavsagi", "konya_kulturpark",
          "konya_millet_caddesi"]
-TOP4 = YT4                                 # 4 healthy YT cams fill all 4 slots
+TOP4 = IBB4                                # 4 healthy IBB cams fill all 4 slots
 
 
 def make_pool(**kw):
@@ -46,8 +47,8 @@ def kill(pool, cam, now):
 
 
 def test_pool_layout_matches_operator_spec():
-    assert FALLBACK_POOL[:4] == YT4                   # YouTube tier first
-    assert FALLBACK_POOL[4:8] == IBB4
+    assert FALLBACK_POOL[:4] == IBB4                  # IBB tier first
+    assert FALLBACK_POOL[4:8] == YT4
     assert FALLBACK_POOL[8:12] == KONYA
     assert FALLBACK_POOL[12] == "buyuk_camlica_yeni"  # Turkish tail head
     assert len(FALLBACK_POOL) == len(set(FALLBACK_POOL))
@@ -81,14 +82,15 @@ def test_dead_top_promotes_next_tier_in_order():
     assert pool.assign(now=now) == KONYA
 
 
-def test_partial_ibb_outage_still_serves_yt_first():
+def test_partial_ibb_outage_backfills_from_yt_tier():
     pool = make_pool()
     now = 1000
-    # Kill the 3rd + 4th IBB cams of the new order (sarachane, sultanahmet_1).
+    # Kill the 3rd + 4th IBB cams (sarachane, sultanahmet_1): the surviving
+    # IBB pair keeps its slots and the YT tier backfills the rest in order.
     kill(pool, "sarachane_yeni", now)
     kill(pool, "sultanahmet_1_yeni", now)
-    # With YT4 healthy the top tier fills all 4 slots on its own.
-    assert pool.assign(now=now) == YT4
+    assert pool.assign(now=now) == ["taksim_yeni", "beyazit_meydan_yeni",
+                                    "tr_bulancak_meydan", "tr_golden_horn"]
 
 
 def test_yt_dead_partial_ibb_mixes_tiers_in_priority_order():
@@ -148,8 +150,8 @@ def test_cooldown_expiry_reprobes_higher_priority():
         kill(pool, cam, now)
     assert pool.assign(now=now) == KONYA
     later = now + 15 * 60 + 1
-    # The reprobe pulls the highest-priority tier - now YT3 - back first.
-    assert pool.assign(now=later)[0] == YT3[0]
+    # The reprobe pulls the highest-priority tier - IBB - back first.
+    assert pool.assign(now=later)[0] == IBB4[0]
 
 
 def test_probation_cameras_rest_after_a_single_miss():

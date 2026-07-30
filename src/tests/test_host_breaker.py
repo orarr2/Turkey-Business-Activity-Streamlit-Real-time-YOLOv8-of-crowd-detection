@@ -144,7 +144,7 @@ def test_pool_forgive_wipes_strikes_and_cooldowns():
 def test_forgive_ignores_unknown_camera():
     pool = CameraPool(FALLBACK_POOL, n_slots=4)
     pool.forgive(["not_in_pool"])
-    # Post-2026-07-22: the 4-camera YT tier fills all 4 slots.
-    YT4 = ["tr_bulancak_meydan", "tr_golden_horn", "tr_giresun_kalesi",
-           "tr_ankara_kivircik_park"]
-    assert pool.assign(now=1000) == YT4
+    # Post-2026-07-29: IBB leads the ladder and fills all 4 slots.
+    IBB4 = ["taksim_yeni", "beyazit_meydan_yeni", "sarachane_yeni",
+            "sultanahmet_1_yeni"]
+    assert pool.assign(now=1000) == IBB4
