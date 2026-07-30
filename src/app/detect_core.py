@@ -135,12 +135,32 @@ _YT_PLAYER_CLIENTS = (os.environ.get("YT_PLAYER_CLIENTS") or "android,ios,tv").s
 # deploy/gcp-vm/setup_pot_provider.sh).
 _YT_POT_SCRIPT = (os.environ.get("YT_POT_SCRIPT") or "").strip()
 
+# Authenticated-session cookies (YT_COOKIES_FILE, 2026-07-30): the last
+# free lever against the datacenter starvation, and the one YouTube's own
+# bot-check message points at ("Use --cookies-from-browser or --cookies").
+# A Netscape-format cookies.txt exported from a logged-in browser session;
+# the operator uploads it to the VM and points this env var at it. When
+# the var is unset or the file is missing, resolution behaves exactly as
+# before - every deployment without cookies keeps working unchanged.
+_YT_COOKIES_FILE = (os.environ.get("YT_COOKIES_FILE") or "").strip()
+
 
 def _yt_extractor_args(client: str) -> dict:
     args = {"youtube": {"player_client": [client.strip()]}}
     if _YT_POT_SCRIPT:
         args["youtubepot-bgutilscript"] = {"script_path": [_YT_POT_SCRIPT]}
     return args
+
+
+def _yt_opts(client: str) -> dict:
+    """yt-dlp options for one resolution attempt. Split out so tests pin
+    the exact shape (cookies attach only when the file really exists)."""
+    opts = {"quiet": True, "no_warnings": True,
+            "format": "best[protocol^=m3u8]/best",
+            "extractor_args": _yt_extractor_args(client)}
+    if _YT_COOKIES_FILE and os.path.isfile(_YT_COOKIES_FILE):
+        opts["cookiefile"] = _YT_COOKIES_FILE
+    return opts
 
 
 def resolve_youtube(url: str) -> str:
@@ -153,9 +173,7 @@ def resolve_youtube(url: str) -> str:
         url = f"https://www.youtube.com/watch?v={url}"
     last = None
     for client in _YT_PLAYER_CLIENTS:
-        opts = {"quiet": True, "no_warnings": True,
-                "format": "best[protocol^=m3u8]/best",
-                "extractor_args": _yt_extractor_args(client)}
+        opts = _yt_opts(client)
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
