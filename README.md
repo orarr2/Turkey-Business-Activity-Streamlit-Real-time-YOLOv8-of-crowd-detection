@@ -114,6 +114,19 @@ cd src && python serve.py                    # opens http://localhost:8000 with 
 Cloud deployment (for the maintainer only, requires a Firebase Admin
 service-account key) lives in [`src/deploy/gcp-vm/`](src/deploy/gcp-vm/README.md).
 
+**Connecting to the collector VM** (`turkey-collector`, zone `us-east1-c`,
+project `turkey-footfall`) - Console → Compute Engine → the **SSH** button,
+or from your own machine:
+
+```bash
+gcloud compute ssh turkey-collector --zone=us-east1-c
+```
+
+The deploy README has the full [connect + VM health-check battery](src/deploy/gcp-vm/README.md#connecting-to-the-vm)
+(service status, live sampling, memory, and an end-to-end "grab a real
+Turkey frame now" test) - the report is only as good as that collector,
+so those checks are the fastest way to confirm it before trusting a run.
+
 `serve.py` is a small no-cache static server that binds `web/` on port 8000 (override
 with `--port`, suppress the browser pop with `--no-browser`, auto-falls-back to the
 next free port if 8000 is busy).

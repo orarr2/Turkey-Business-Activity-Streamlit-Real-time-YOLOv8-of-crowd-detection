@@ -90,6 +90,83 @@ configured `--interval`/`--imgsz` — the dashboard tiles refresh every N
 seconds in that state, and the per-tile "counts from Ns ago" label on the
 dashboard turns red.
 
+## Connecting to the VM
+
+Three ways in, any time - all reach the same `turkey-collector` instance
+(zone `us-east1-c`, project `turkey-footfall`):
+
+1. **Browser SSH (no setup, what the maintainer uses)** - Console →
+   Compute Engine → VM instances → the **SSH** button next to
+   `turkey-collector`. Opens `ssh.cloud.google.com` in a new tab with a
+   full terminal. Also has **UPLOAD FILE / DOWNLOAD FILE** buttons.
+2. **`gcloud` CLI (from your own machine)** - once, `gcloud auth login &&
+   gcloud config set project turkey-footfall`; then, any time:
+   ```bash
+   gcloud compute ssh turkey-collector --zone=us-east1-c
+   ```
+   (First run creates and uploads an SSH key automatically.)
+3. **Mobile** - the Google Cloud app (iOS/Android) → Compute Engine →
+   `turkey-collector` → **SSH**.
+
+The VM's external IP is **ephemeral** and changes on stop/start. Read the
+current one, or rotate it (a fresh IP sometimes clears a CDN rate-block),
+from Cloud Shell or `gcloud`:
+
+```bash
+# current external IP
+gcloud compute instances describe turkey-collector --zone=us-east1-c \
+  --format="value(networkInterfaces[0].accessConfigs[0].natIP)"
+# rotate it (detach + reattach the access config -> new IP, no reboot)
+NAME=$(gcloud compute instances describe turkey-collector --zone=us-east1-c \
+  --format="value(networkInterfaces[0].accessConfigs[0].name)")
+gcloud compute instances delete-access-config turkey-collector \
+  --zone=us-east1-c --access-config-name="$NAME"
+gcloud compute instances add-access-config turkey-collector --zone=us-east1-c
+```
+
+### Health check - is the VM really feeding the report?
+
+The twice-daily report is only as good as the collector. This battery
+proves each link end to end; run it after any change or whenever a report
+looks off:
+
+```bash
+# 1. service alive, not crash-looping (want: active (running), uptime in min/h)
+sudo systemctl status collector --no-pager | head -12
+
+# 2. live sampling - want slot_1..4 on taksim/beyazit/sarachane/sultanahmet
+#    with real person/vehicle counts scrolling every ~40s (Ctrl+C to stop)
+sudo journalctl -u collector -f --no-hostname | grep --line-buffered -E "slot_|MISS|country"
+
+# 3. success vs miss, last 15 min (the digit in sultanahmet_1_yeni needs 0-9 in the class)
+sudo journalctl -u collector --since "15 min ago" \
+  | grep -oE "slot_[0-9] \([a-z0-9_]+\): (person|MISS)" | sort | uniq -c | sort -rn
+
+# 4. memory headroom on the 1 GB e2-micro (want current < max, available > 0)
+sudo systemctl show collector -p MemoryCurrent -p MemoryMax && free -h
+
+# 5. real out-of-memory kills only (want: NO 'oom-kill'/'Killed process' lines;
+#    ignore googlevideo HLS URL noise from any YouTube era)
+sudo journalctl -u collector --since "6 hours ago" | grep -iE "oom-kill|Killed process|out of memory"
+
+# 6. the IBB proxy env that keeps Turkey alive is wired (values redacted here)
+sudo grep -c -E "IBB_PROXY_URL|IBB_PROXY_SECRET" /etc/turkey-footfall/proxy.env   # want: 2
+
+# 7. DECISIVE end-to-end: the machine grabs a real Turkey frame right now
+sudo bash -c 'set -a; . /etc/turkey-footfall/proxy.env; set +a; \
+  cd /opt/turkey-footfall/src && timeout 90 .venv/bin/python - <<PY
+from app.cameras import CAMERAS
+from app.detect_core import resolve_stream, grab_burst
+url = resolve_stream(CAMERAS["taksim_yeni"])
+frames = grab_burst(url, n=2, stride=10)
+print("frames grabbed:", len(frames), "shape:", frames[0].shape if frames else None)
+PY'
+# want: frames grabbed: 2 shape: (1080, 1920, 3)
+
+# 8. deployed code is current
+sudo git -C /opt/turkey-footfall log --oneline -1
+```
+
 ## Managing the collector from your phone
 
 Google Cloud app (iOS/Android) → Compute Engine → `turkey-collector`:
