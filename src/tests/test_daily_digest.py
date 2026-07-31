@@ -224,3 +224,20 @@ def test_report_warns_when_every_peak_is_zero():
     assert "0 people and 0 vehicles" in text
     assert "streams may be dead" in text
     assert "0 people and 0 vehicles" in html
+
+
+def test_no_data_window_titles_honestly():
+    """2026-07-31 regression: an all-miss night fired a digest titled
+    'Japan' (the probe country at 12:00) with stale Turkey thumbnails.
+    With no_data the subject says what happened instead of naming the
+    probe country as if it delivered."""
+    import datetime as dt
+    now = dt.datetime(2026, 7, 31, 12, 0)
+    grid = {"country": "japan", "slots": []}
+    subject, text, _html = compose_digest(
+        now, 12, [], [], None, [], grid=grid, dominant=None, no_data=True)
+    assert subject.startswith("No live data (Japan grid) - Midday report")
+    # And the same window WITH data keeps the country title untouched.
+    subject2, *_ = compose_digest(
+        now, 12, [], [], None, [], grid=grid, dominant="thailand")
+    assert subject2.startswith("Thailand - Midday report")

@@ -311,6 +311,7 @@ def compose_digest(now_il: dt.datetime, window_hours: int,
                    grid: dict | None = None,
                    dominant: str | None = None,
                    prev: dict | None = None,
+                   no_data: bool = False,
                    ) -> tuple[str, str, str]:
     """Returns (subject, plain_text, html). English throughout, phone-first.
     `grid` is config/grid - the collector's CURRENT country; `dominant` is
@@ -319,8 +320,14 @@ def compose_digest(now_il: dt.datetime, window_hours: int,
     the data majority and mention the current grid as a footnote."""
     part = "Midday report" if now_il.hour < 16 else "Evening report"
     grid_label = _country_label(grid)
+    # no_data (2026-07-31): not one ok-sample in the whole window - the
+    # digest must not masquerade as whatever country the ladder happened
+    # to be PROBING when it fired (the 31.07 midday report titled itself
+    # "Japan" after an all-miss night). Say what actually happened.
     label = (_COUNTRY_LABELS.get(dominant, dominant.title())
              if dominant else grid_label)
+    if no_data:
+        label = f"No live data ({grid_label} grid)" if grid_label else "No live data"
     subject = f"{label} - {part} {now_il.strftime('%d.%m')}"
 
     lines: list[str] = [f"{part} - last {window_hours} hours", ""]
@@ -708,7 +715,8 @@ def _build_pdf(now_il: dt.datetime, window_hours: int,
                out_path: Path, grid: dict | None = None,
                dominant: str | None = None,
                prev: dict | None = None,
-               latest: list[dict] | None = None) -> Path | None:
+               latest: list[dict] | None = None,
+               no_data: bool = False) -> Path | None:
     """Compose the PDF; returns the path or None if reportlab is missing
     (the plain-text mail still ships in that case, which is the pre-PDF
     behavior and better than silently dropping the whole run)."""
@@ -728,6 +736,9 @@ def _build_pdf(now_il: dt.datetime, window_hours: int,
                                                    bucket)
     grid_label = (_COUNTRY_LABELS.get(dominant, dominant.title())
                   if dominant else _country_label(grid))
+    if no_data:
+        _gl = _country_label(grid)
+        grid_label = (f"No live data ({_gl} grid)" if _gl else "No live data")
     return report_pdf.compose_pdf(
         out_path,
         now_il=now_il, window_hours=window_hours,
@@ -773,16 +784,20 @@ def main() -> None:
     stale = stale_from_latest(latest, active_slots=active or None,
                               window_ok_by_slot=window_ok_by_slot)
     dominant = dominant_country(footfall)
+    no_data = not window_ok_by_slot          # not one ok-sample all window
     now_il = _israel_now()
 
     subject, text, html = compose_digest(
         now_il, args.window_hours, groups, cam_stats, training, stale,
         reviews=reviews, grid=grid, dominant=dominant,
-        prev=prev_state)
+        prev=prev_state, no_data=no_data)
 
     # Country slug for the PDF filename: the DATA majority when it exists,
-    # not the momentary grid - matches the report's subject line.
-    country_slug = dominant or str((grid or {}).get("country") or "grid")
+    # not the momentary grid - matches the report's subject line. An
+    # all-miss window is named for what it is, not for the probe country.
+    country_slug = dominant or (
+        "no-signal" if not window_ok_by_slot
+        else str((grid or {}).get("country") or "grid"))
     default_pdf = (Path("./daily_digest.pdf") if args.dry_run
                    else Path(tempfile.mkdtemp(prefix="digest-"))
                         / f"{country_slug}_report_{now_il.strftime('%Y%m%d_%H%M')}.pdf")
@@ -791,7 +806,7 @@ def main() -> None:
                        training, reviews, stale, len(footfall),
                        total_events=len(events), out_path=pdf_path,
                        grid=grid, dominant=dominant, prev=prev_state,
-                       latest=latest)
+                       latest=latest, no_data=no_data)
 
     if args.dry_run:
         print(f"SUBJECT: {subject}\n\n{text}")

@@ -326,6 +326,10 @@ def _event_caption(e: dict, kind_labels: dict[str, str]) -> str:
     return " · ".join(parts)
 
 
+# A slot thumbnail older than this is stale scenery, not a live preview.
+THUMB_MAX_AGE_S = 3 * 3600.0
+
+
 def fetch_grid_thumbnails(grid: dict | None, latest: list[dict],
                           bucket_name: str | None,
                           downloader=None) -> list[dict]:
@@ -345,9 +349,26 @@ def fetch_grid_thumbnails(grid: dict | None, latest: list[dict],
     out: list[dict] = []
     for s in (grid or {}).get("slots") or []:
         slot_id = str(s.get("slot_id") or "")
+        # Staleness gate (2026-07-31): slot_N.jpg is only overwritten on a
+        # SUCCESSFUL sample, so when a slot's latest doc is a miss (or old)
+        # the stored image is whatever camera last succeeded there - the
+        # Japan midday report attached Taksim/Beyazit frames under Japanese
+        # camera names after an all-miss night. No fresh success = no
+        # thumbnail; an honest gap beats a wrong picture.
+        d = latest_by_slot.get(slot_id) or {}
+        fresh = False
+        if d.get("ok") == 1 and d.get("ts"):
+            try:
+                age = (dt.datetime.now(dt.timezone.utc)
+                       - dt.datetime.fromisoformat(str(d["ts"]))).total_seconds()
+                fresh = 0 <= age <= THUMB_MAX_AGE_S
+            except ValueError:
+                fresh = False
+        if not fresh:
+            continue
         # The live-view URL when the collector wrote one; otherwise fall
         # back to the fixed Storage path each slot's live tile writes to.
-        live_url = ((latest_by_slot.get(slot_id) or {}).get("live_url")
+        live_url = (d.get("live_url")
                     or f"https://storage.googleapis.com/{bucket_name}/"
                        f"snapshots/live/{slot_id}.jpg")
         data = downloader(live_url)
