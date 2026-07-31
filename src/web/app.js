@@ -92,6 +92,16 @@ const COMBINED_BIN_MIN = 5;
 // tileState is keyed by slot_id (stable across fallback changes) — the video/
 // header re-renders when active_cam changes, but chart history is preserved.
 const tileState = {};
+
+// YouTube IFrame Player API state (declared up here because buildVideoInto,
+// which runs during the initial tile render below, calls withYouTubeAPI -
+// these must be initialized before that first call, not in the helper block
+// further down where a `let`/`const` TDZ would throw). See the block near
+// mountYouTubePlayer for what they drive.
+let _ytApiState = 0;              // 0 unloaded, 1 loading, 2 ready
+let _ytHostSeq = 1;              // fallback host-id counter
+const _ytReadyQ = [];
+const YT_LIVE_MAX_DRIFT_S = 20;  // seconds behind live before we snap forward
 let combinedChart = null;
 let currentGridConfig = null;   // last config/grid doc — {slots: [...]}
 
@@ -323,13 +333,20 @@ function buildVideoInto(st, cfg, slot) {
   st.lastVideoBuild = { cfg, slot };
   st._vLastTime = null;
   st._vStrikes = 0;
-  st.ytLastTime = null;
-  st.ytLastAdvanceTs = null;
+  st.ytBehindS = null;
+  st.ytPlayerState = null;
   // Tear down any existing hls.js instance so we don't leak network sockets
   // when a fallback swap replaces the <video> element.
   if (st.currentHlsInstance) {
     try { st.currentHlsInstance.destroy(); } catch (_) {}
     st.currentHlsInstance = null;
+  }
+  // Tear down any prior YouTube player (active-cam change / rebuild) so the
+  // watchdog never polls a detached player and we don't leak the iframe.
+  clearTimeout(st._ytStartTimer);
+  if (st.ytPlayer) {
+    try { st.ytPlayer.destroy(); } catch (_) {}
+    st.ytPlayer = null;
   }
   // Idle slot: the collector narrowed the grid because no country can
   // field this many live cameras right now (explicit idle flag from
@@ -368,16 +385,29 @@ function buildVideoInto(st, cfg, slot) {
     markup = `<video data-hls="${hlsUrl}" autoplay muted playsinline
                      controls controlsList="nodownload noremoteplayback"
                      preload="auto"></video>`;
-  } else if (embed && (embed.includes("player.tvkur.com")
-                       || embed.includes("youtube.com/embed")
+  } else if (embed && (embed.includes("youtube.com/embed")
                        || embed.includes("youtube-nocookie.com/embed"))) {
-    // Iframe players: the tvkur splash player AND YouTube embeds (the
-    // Thailand/Japan/USA street cams the local picker resolves to). YouTube's
-    // iframe autoplays muted from any origin - no proxy, no CORS, no geo-block
-    // (unlike the IBB HLS), so a locally-picked YouTube camera just plays.
-    // loading="lazy" postponed the iframe request until scroll, which is
-    // exactly the wrong behavior for the top row of the dashboard - one of
-    // the four cams could stay dark on a short viewport. Load eagerly.
+    // YouTube live embeds (the Thailand/Japan/USA street cams). These are
+    // mounted through the official IFrame Player API - NOT a raw iframe -
+    // so the live-edge pinning below has reliable getDuration()/seekTo()
+    // instead of the fire-and-forget postMessage that used to let a tile
+    // drift to the start of the 12h DVR window ("-11:59:xx / live"). We
+    // insert a placeholder div and hand it to mountYouTubePlayer once the
+    // API is ready; a data-yt-embed marker carries the URL across the
+    // API's async load.
+    const vid = _ytVideoId(embed);
+    if (vid) {
+      const hostId = `yt-${st.slot ? st.slot.slot_id : Math.floor(_ytHostSeq++)}`;
+      markup = `<div class="yt-host" id="${hostId}" data-yt-vid="${vid}"></div>`;
+      st._ytPendingHost = hostId;
+      st._ytPendingVid = vid;
+    } else {
+      markup = `<iframe src="${embed}" allow="autoplay; encrypted-media"
+                       allowfullscreen></iframe>`;
+    }
+  } else if (embed && embed.includes("player.tvkur.com")) {
+    // tvkur splash player (Konya) - a plain iframe; no DVR, no live-edge
+    // concern, so it stays a bare embed.
     markup = `<iframe src="${embed}" allow="autoplay; encrypted-media"
                      allowfullscreen></iframe>`;
   } else if (page) {
@@ -398,64 +428,118 @@ function buildVideoInto(st, cfg, slot) {
   st.videoWrap.insertAdjacentHTML("afterbegin", markup);
   const video = st.videoWrap.querySelector("video[data-hls]");
   if (video) attachHls(st, video, cfg);
-  const yt = st.videoWrap.querySelector('iframe[src*="youtube.com/embed"], iframe[src*="youtube-nocookie.com/embed"]');
-  if (yt) forceYouTubeLive(yt);
+  if (st._ytPendingHost) {
+    const hostId = st._ytPendingHost, vid = st._ytPendingVid;
+    st._ytPendingHost = st._ytPendingVid = null;
+    withYouTubeAPI(() => mountYouTubePlayer(st, hostId, vid));
+  }
 }
 
-// Force a YouTube-embed tile to autoplay AND sit at the LIVE edge - the two
-// things a bare autoplay iframe does not guarantee: (1) Chrome throttles
-// several cross-origin iframes trying to autoplay at once, so some tiles stay
-// paused; (2) a live stream with DVR can start behind "now". The iframe API's
-// postMessage command channel (enabled by &enablejsapi=1 on the src) lets us
-// mute + playVideo + seek far past the buffer, which YouTube clamps to the
-// live edge. We nudge a few times because the player only accepts commands
-// once it has finished loading.
-function forceYouTubeLive(iframe) {
-  // The command channel needs enablejsapi; catalog embeds carry it, but be
-  // defensive for any hand-built embed URL.
-  if (!/enablejsapi=1/.test(iframe.src)) {
-    iframe.src += (iframe.src.includes("?") ? "&" : "?") + "enablejsapi=1";
-  }
-  const cmd = (func, args = []) => {
-    try {
-      iframe.contentWindow.postMessage(
-        JSON.stringify({ event: "command", func, args }),
-        "https://www.youtube.com");
-    } catch (_) { /* not ready / cross-origin race - the interval retries */ }
-  };
-  const nudge = () => {
-    cmd("mute"); cmd("playVideo"); cmd("seekTo", [1e7, true]);
-    // "listening" opens the return channel: the player answers with a
-    // stream of infoDelivery messages (currentTime included), which is the
-    // watchdog's ONLY honest stall signal for a cross-origin iframe.
-    try {
-      iframe.contentWindow.postMessage(
-        JSON.stringify({ event: "listening",
-                         id: iframe.dataset.ytWatch || "1",
-                         channel: "widget" }), "*");
-    } catch (_) {}
-  };
-  iframe._ytNudge = nudge;   // the keep-live watchdog re-uses the same nudge
-  iframe.addEventListener("load", () => setTimeout(nudge, 700));
-  // 12 nudges over ~30s: Chrome staggers autoplay for several cross-origin
-  // iframes and the old 6x2.5s window sometimes expired before the last
-  // tile's player was ready - the operator found tiles frozen on load.
-  let n = 0;
-  const iv = setInterval(() => { nudge(); if (++n >= 12) clearInterval(iv); }, 2500);
-  // Re-kick when the user returns to the tab: background tabs get their
-  // timers and autoplay throttled, so a dashboard opened then revisited
-  // minutes later could sit paused until a manual click.
-  window.__ytNudges = (window.__ytNudges || []);
-  window.__ytNudges.push(nudge);
-  if (!window.__ytVisHooked) {
-    window.__ytVisHooked = true;
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") {
-        for (const f of window.__ytNudges) { try { f(); } catch (_) {} }
-      }
-    });
-  }
+// ---------- YouTube IFrame Player API: reliable live-edge pinning ----------
+// (state vars _ytApiState / _ytHostSeq / _ytReadyQ / YT_LIVE_MAX_DRIFT_S are
+// declared near tileState at the top - they must exist before the initial
+// render calls buildVideoInto.)
+
+function _ytVideoId(embed) {
+  const m = String(embed).match(/\/embed\/([\w-]{11})/);
+  return m ? m[1] : null;
 }
+
+// Load the IFrame API exactly once and run queued callbacks when YT.Player
+// exists. Multiple tiles share the single script load.
+function withYouTubeAPI(cb) {
+  if (_ytApiState === 2 && window.YT && window.YT.Player) return cb();
+  _ytReadyQ.push(cb);
+  if (_ytApiState !== 0) return;
+  _ytApiState = 1;
+  const prev = window.onYouTubeIframeAPIReady;
+  window.onYouTubeIframeAPIReady = () => {
+    if (typeof prev === "function") { try { prev(); } catch (_) {} }
+    _ytApiState = 2;
+    while (_ytReadyQ.length) { try { _ytReadyQ.shift()(); } catch (_) {} }
+  };
+  const s = document.createElement("script");
+  s.src = "https://www.youtube.com/iframe_api";
+  s.async = true;
+  document.head.appendChild(s);
+}
+
+function _seekLive(p) {
+  // getDuration() on a live stream is the live-edge position; seeking there
+  // is the reliable "jump to now" the postMessage seekTo(1e7) only
+  // approximated. Guarded because the API throws if the player is between
+  // states.
+  try {
+    if (typeof p.getDuration !== "function") return;
+    const d = p.getDuration();
+    if (d && isFinite(d) && d > 0) p.seekTo(d, true);
+    if (typeof p.playVideo === "function") p.playVideo();
+  } catch (_) { /* not ready this instant; the interval retries */ }
+}
+
+function mountYouTubePlayer(st, hostId, vid) {
+  const host = document.getElementById(hostId);
+  if (!host) return;                             // tile was rebuilt already
+  try { if (st.ytPlayer && st.ytPlayer.destroy) st.ytPlayer.destroy(); } catch (_) {}
+  st._ytStarted = false;
+  st.ytPlayer = new window.YT.Player(hostId, {
+    width: "100%", height: "100%",
+    videoId: vid,
+    host: "https://www.youtube.com",
+    playerVars: {
+      autoplay: 1, mute: 1, playsinline: 1, controls: 1,
+      modestbranding: 1, rel: 0,
+    },
+    events: {
+      onReady: (e) => {
+        try { e.target.mute(); } catch (_) {}
+        try { e.target.playVideo(); } catch (_) {}
+        _seekLive(e.target);
+      },
+      onStateChange: (e) => {
+        // BUFFERING (3) / PLAYING (1) both mean the player came alive.
+        if (e.data === 1 || e.data === 3) st._ytStarted = true;
+        // PAUSED (2) - Chrome throttles multi-iframe autoplay; resume + relive.
+        // PLAYING (1) - make sure we entered at the live edge, not DVR start.
+        if (e.data === 2 || e.data === 1) _seekLive(e.target);
+      },
+    },
+  });
+  // Autoplay safety net: the IFrame API player is the ONLY way to reliably
+  // seek to the live edge, but a few embedded contexts refuse to start it.
+  // If it hasn't come alive in 8s, fall back to the plain autoplaying embed
+  // (loses the live-pin, but is never worse than today's behavior and never
+  // a black tile). In a normal Chrome muted autoplay starts well inside 8s,
+  // so this fallback stays dormant.
+  clearTimeout(st._ytStartTimer);
+  st._ytStartTimer = setTimeout(() => {
+    let state = -1;
+    try { state = st.ytPlayer && st.ytPlayer.getPlayerState(); } catch (_) {}
+    if (st._ytStarted || state === 1 || state === 3) return;   // it's alive
+    console.warn("keep-live: YT API player did not start - plain-embed fallback", hostId);
+    try { st.ytPlayer && st.ytPlayer.destroy(); } catch (_) {}
+    st.ytPlayer = null;
+    const emb = `https://www.youtube.com/embed/${vid}`
+              + `?autoplay=1&mute=1&playsinline=1`;
+    for (const el of Array.from(st.videoWrap.children)) {
+      if (el !== st.overlay) el.remove();
+    }
+    st.videoWrap.insertAdjacentHTML("afterbegin",
+      `<iframe src="${emb}" allow="autoplay; encrypted-media" allowfullscreen></iframe>`);
+  }, 8000);
+}
+
+// Re-pin every live YouTube player to the live edge when the tab regains
+// focus - background tabs throttle timers + autoplay, so a dashboard left
+// in the background then revisited could sit paused mid-DVR. The periodic
+// watchdog covers the steady state; this makes the correction instant on
+// return.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") return;
+  for (const st of Object.values(tileState)) {
+    if (st.ytPlayer) _seekLive(st.ytPlayer);
+  }
+});
 
 function attachHls(st, video, cfg) {
   const src = video.dataset.hls;
@@ -510,63 +594,28 @@ function attachHls(st, video, cfg) {
 }
 
 // ---------- 2b. Keep-live watchdog -------------------------------------------
-// The startup burst above (12 nudges over ~30s) only covers page load. A
-// tile that stalls LATER - YouTube live hiccup, hls.js buffer wedge, the
-// stream's URL rotating server-side - previously froze forever on its last
-// frame (operator report 2026-07-29: a tile showing a 12-hour-old frame).
-// This watchdog runs for the page's whole life, every WATCH_EVERY_MS:
-//   * YouTube iframes: re-issue mute/play/seek-to-live (heals pauses and
-//     drift-behind-live) and read the player's infoDelivery currentTime -
-//     no advance for YT_STALL_MS while the tab is visible = hard stall ->
-//     reload the iframe with a cache-buster;
-//   * HLS <video>: currentTime not advancing across two consecutive checks
-//     (tab visible) -> first a play()/startLoad kick, then a full rebuild
-//     via the tile's remembered build inputs.
-// Background tabs legitimately throttle playback, so stall strikes only
-// count while the page is visible - returning to the tab re-kicks instead
-// of tearing down healthy players.
-const WATCH_EVERY_MS = 45_000;
-const YT_STALL_MS = 150_000;
-
-window.addEventListener("message", (ev) => {
-  if (typeof ev.data !== "string" || ev.data[0] !== "{") return;
-  let msg;
-  try { msg = JSON.parse(ev.data); } catch (_) { return; }
-  if (msg.event !== "infoDelivery" || !msg.info
-      || typeof msg.info.currentTime !== "number") return;
-  for (const st of Object.values(tileState)) {
-    const ifr = st.videoWrap &&
-        st.videoWrap.querySelector('iframe[src*="youtube"]');
-    if (!ifr || ifr.contentWindow !== ev.source) continue;
-    const t = msg.info.currentTime;
-    if (st.ytLastTime === null || Math.abs(t - st.ytLastTime) > 0.5) {
-      st.ytLastTime = t;
-      st.ytLastAdvanceTs = Date.now();
-    }
-    // Live-edge bookkeeping (operator report: tiles "jump to offline").
-    // For a LIVE stream the player's duration ~= the live edge, so
-    // duration - currentTime is how far BEHIND live the tile is playing.
-    // A player that reloads into the DVR window plays 12-hour-old footage
-    // while currentTime advances happily - advance alone cannot catch it.
-    if (typeof msg.info.duration === "number" && msg.info.duration > 0) {
-      st.ytBehindS = Math.max(0, msg.info.duration - t);
-    }
-    if (typeof msg.info.playerState === "number") {
-      st.ytPlayerState = msg.info.playerState;   // 1 playing, 2 paused
-    }
-    break;
-  }
-});
+// Runs for the page's whole life, every WATCH_EVERY_MS, while the tab is
+// visible (background tabs throttle playback - correcting them is pointless
+// and would fight the browser):
+//   * YouTube: through the real YT.Player - getDuration()-getCurrentTime()
+//     is the exact seconds-behind-live. More than YT_LIVE_MAX_DRIFT_S back
+//     (a DVR-window drift, the "-11:59 / live" bug) or a paused/ended state
+//     -> seekTo(getDuration()) drags it to the live edge. This is the
+//     reliable replacement for the old fire-and-forget postMessage seek
+//     that let tiles sit 12h behind.
+//   * HLS <video>: currentTime flat across two visible checks -> a
+//     play()/startLoad kick, then a full rebuild from the remembered
+//     build inputs.
+const WATCH_EVERY_MS = 8_000;   // tight enough that drift never shows for long
 
 function watchTilesLive() {
   if (document.visibilityState !== "visible") return;
   for (const st of Object.values(tileState)) {
     if (!st.videoWrap) continue;
     const video = st.videoWrap.querySelector("video[data-hls]");
-    const yt = st.videoWrap.querySelector('iframe[src*="youtube"]');
     if (video) {
       const t = video.currentTime;
-      if (st._vLastTime !== null && t <= st._vLastTime + 0.1) {
+      if (st._vLastTime != null && t <= st._vLastTime + 0.1) {
         st._vStrikes = (st._vStrikes || 0) + 1;
         if (st._vStrikes === 1) {
           try { if (st.currentHlsInstance) st.currentHlsInstance.startLoad(); } catch (_) {}
@@ -581,38 +630,20 @@ function watchTilesLive() {
         st._vStrikes = 0;
       }
       st._vLastTime = t;
-    } else if (yt) {
-      if (yt._ytNudge) { try { yt._ytNudge(); } catch (_) {} }
-      // Snap-to-live (operator: "don't let tiles jump to offline"): a
-      // player paused, or playing from inside the DVR window (reloads
-      // land at the window START - 12h-old footage), is dragged back to
-      // the live edge. The nudge above already sent playVideo + a
-      // seekTo far past any buffer, which YouTube clamps to live; the
-      // book-keeping here only logs the state so reloads stay rare.
-      if (st.ytBehindS !== undefined && st.ytBehindS > 90) {
-        console.warn(`keep-live: ${st.slot && st.slot.slot_id} is `
-                     + `${Math.round(st.ytBehindS)}s behind live - snapping`);
-        st.ytBehindS = 0;              // credit the seek until told otherwise
-      }
-      // Hard stall: the player was talking to us and stopped advancing.
-      // Reload is the LAST resort - a reload restarts at the DVR window
-      // start and needs the whole snap-to-live dance again, so it only
-      // fires when soft recovery failed for a full stall window AND this
-      // tile has not been reloaded in the past 10 minutes (prevents the
-      // reload<->DVR flapping the operator saw).
-      if (st.ytLastAdvanceTs !== null
-          && Date.now() - st.ytLastAdvanceTs > YT_STALL_MS
-          && Date.now() - (st.ytLastReloadTs || 0) > 600_000) {
-        console.warn("keep-live: reloading stalled YouTube tile",
-                     st.slot && st.slot.slot_id);
-        st.ytLastTime = null;
-        st.ytLastAdvanceTs = null;
-        st.ytBehindS = undefined;
-        st.ytLastReloadTs = Date.now();
-        const base = yt.src.replace(/&cachebust=\d+/, "");
-        yt.src = base + "&cachebust=" + Date.now();
-        forceYouTubeLive(yt);
-      }
+    } else if (st.ytPlayer && typeof st.ytPlayer.getDuration === "function") {
+      try {
+        const p = st.ytPlayer;
+        const dur = p.getDuration();
+        const cur = p.getCurrentTime ? p.getCurrentTime() : 0;
+        const state = p.getPlayerState ? p.getPlayerState() : 1;
+        st.ytBehindS = (dur && isFinite(dur) && dur > 0) ? Math.max(0, dur - cur) : null;
+        st.ytPlayerState = state;
+        // Paused/cued/ended, or drifted into the DVR window -> snap to live.
+        if (state === 2 || state === 5 || state === 0
+            || (st.ytBehindS != null && st.ytBehindS > YT_LIVE_MAX_DRIFT_S)) {
+          _seekLive(p);
+        }
+      } catch (_) { /* player between states; next tick retries */ }
     }
   }
 }
@@ -622,14 +653,21 @@ setInterval(watchTilesLive, WATCH_EVERY_MS);
 window.__tileLiveDebug = () => Object.fromEntries(
   Object.entries(tileState).map(([sid, st]) => {
     const video = st.videoWrap && st.videoWrap.querySelector("video[data-hls]");
-    const yt = st.videoWrap && st.videoWrap.querySelector('iframe[src*="youtube"]');
+    const p = st.ytPlayer;
+    let behind = null, state = null, cur = video ? Math.round(video.currentTime) : null;
+    if (p && typeof p.getDuration === "function") {
+      try {
+        const d = p.getDuration(), c = p.getCurrentTime ? p.getCurrentTime() : 0;
+        behind = (d && isFinite(d) && d > 0) ? Math.round(Math.max(0, d - c)) : null;
+        state = p.getPlayerState ? p.getPlayerState() : null;
+        cur = Math.round(c);
+      } catch (_) {}
+    }
     return [sid, {
-      kind: video ? "hls" : (yt ? "youtube" : "none"),
-      curTime: video ? Math.round(video.currentTime) : st.ytLastTime,
-      lastAdvanceAgoS: st.ytLastAdvanceTs
-          ? Math.round((Date.now() - st.ytLastAdvanceTs) / 1000) : null,
-      behindLiveS: st.ytBehindS !== undefined ? Math.round(st.ytBehindS) : null,
-      playerState: st.ytPlayerState !== undefined ? st.ytPlayerState : null,
+      kind: video ? "hls" : (p ? "youtube" : "none"),
+      curTime: cur,
+      behindLiveS: behind,       // seconds behind the live edge (want ~0-20)
+      playerState: state,        // YT: 1 playing, 2 paused, 3 buffering
       strikes: st._vStrikes || 0,
     }];
   }));
