@@ -127,6 +127,11 @@ The deploy README has the full [connect + VM health-check battery](src/deploy/gc
 Turkey frame now" test) - the report is only as good as that collector,
 so those checks are the fastest way to confirm it before trusting a run.
 
+**Disaster recovery** - the VM is disposable by design. Rebuilding it
+from nothing (identical machine on GCP, or the same stack on any other
+provider), including the re-mint path for every secret, is documented in
+[src/deploy/REBUILD.md](src/deploy/REBUILD.md).
+
 `serve.py` is a small no-cache static server that binds `web/` on port 8000 (override
 with `--port`, suppress the browser pop with `--no-browser`, auto-falls-back to the
 next free port if 8000 is busy).
