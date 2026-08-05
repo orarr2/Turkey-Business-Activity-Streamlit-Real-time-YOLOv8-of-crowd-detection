@@ -464,15 +464,43 @@ function withYouTubeAPI(cb) {
   document.head.appendChild(s);
 }
 
-function _seekLive(p) {
-  // getDuration() on a live stream is the live-edge position; seeking there
-  // is the reliable "jump to now" the postMessage seekTo(1e7) only
-  // approximated. Guarded because the API throws if the player is between
-  // states.
+// Honest seconds-behind-live for a YT.Player, or null when unknowable.
+// Measured on the live streams themselves (2026-08-05): getDuration() on a
+// manifestless live stream returns a FROZEN value ~1h past the real head, so
+// duration-minus-currentTime reports "an hour behind" for a player that is
+// exactly at the live edge. The player's own progressState is truthful:
+// seekableEnd tracks the real head at wall-clock rate and isAtLiveHead is
+// authoritative. Without progressState we return null - unknown - instead of
+// fabricating a drift that would trigger an endless seek storm.
+function _ytBehind(p) {
   try {
-    if (typeof p.getDuration !== "function") return;
-    const d = p.getDuration();
-    if (d && isFinite(d) && d > 0) p.seekTo(d, true);
+    const ps = p.playerInfo && p.playerInfo.progressState;
+    if (ps && ps.seekableEnd > 0) {
+      if (ps.isAtLiveHead) return 0;
+      const cur = p.getCurrentTime ? p.getCurrentTime() : ps.current;
+      return Math.max(0, ps.seekableEnd - cur);
+    }
+  } catch (_) {}
+  return null;
+}
+
+function _seekLive(p) {
+  // Jump to the live head. seekTo(progressState.seekableEnd) verifiably
+  // lands at the head; seekTo(getDuration()) is silently IGNORED on
+  // manifestless live streams (the frozen duration lies past the seekable
+  // range). Rate-limited per player: onStateChange fires after our own
+  // seeks too, and an unthrottled handler turns that into a feedback loop.
+  try {
+    const now = Date.now();
+    if (p._lastSeekTs && now - p._lastSeekTs < 5000) return;
+    p._lastSeekTs = now;
+    const ps = p.playerInfo && p.playerInfo.progressState;
+    if (ps && ps.seekableEnd > 0) {
+      p.seekTo(ps.seekableEnd - 1, true);
+    } else {
+      const d = typeof p.getDuration === "function" ? p.getDuration() : 0;
+      if (d && isFinite(d) && d > 0) p.seekTo(d, true);
+    }
     if (typeof p.playVideo === "function") p.playVideo();
   } catch (_) { /* not ready this instant; the interval retries */ }
 }
@@ -500,22 +528,40 @@ function mountYouTubePlayer(st, hostId, vid) {
         // BUFFERING (3) / PLAYING (1) both mean the player came alive.
         if (e.data === 1 || e.data === 3) st._ytStarted = true;
         // PAUSED (2) - Chrome throttles multi-iframe autoplay; resume + relive.
-        // PLAYING (1) - make sure we entered at the live edge, not DVR start.
-        if (e.data === 2 || e.data === 1) _seekLive(e.target);
+        // PLAYING (1) - re-pin only when measurably behind (or unknowable,
+        // e.g. the very first PLAYING before progressState exists); a player
+        // already at the head must not be re-seeked on every state change.
+        if (e.data === 2) {
+          _seekLive(e.target);
+        } else if (e.data === 1) {
+          const b = _ytBehind(e.target);
+          if (b == null || b > YT_LIVE_MAX_DRIFT_S) _seekLive(e.target);
+        }
       },
     },
   });
   // Autoplay safety net: the IFrame API player is the ONLY way to reliably
-  // seek to the live edge, but a few embedded contexts refuse to start it.
-  // If it hasn't come alive in 8s, fall back to the plain autoplaying embed
-  // (loses the live-pin, but is never worse than today's behavior and never
-  // a black tile). In a normal Chrome muted autoplay starts well inside 8s,
-  // so this fallback stays dormant.
+  // seek to the live edge, but a few VISIBLE embedded contexts still refuse
+  // to start it - those get the plain autoplaying embed after 8s (loses the
+  // live-pin, never a black tile). A HIDDEN tab is different: autoplay
+  // denial there is normal policy, and falling back would strand the tile
+  // on a click-to-play embed forever - so hidden tabs keep the API player
+  // armed and re-check until the tab is visible. In a normal foreground
+  // Chrome muted autoplay starts well inside 8s and none of this runs.
   clearTimeout(st._ytStartTimer);
-  st._ytStartTimer = setTimeout(() => {
+  const startCheck = () => {
     let state = -1;
     try { state = st.ytPlayer && st.ytPlayer.getPlayerState(); } catch (_) {}
     if (st._ytStarted || state === 1 || state === 3) return;   // it's alive
+    if (document.visibilityState !== "visible") {
+      // A hidden tab legitimately refuses autoplay - swapping to a plain
+      // embed NOW would freeze the tile on click-to-play forever (the
+      // black-tiles-after-background-open bug). Keep the API player and
+      // re-check; the visibilitychange handler starts it the moment the
+      // tab is seen again.
+      st._ytStartTimer = setTimeout(startCheck, 8000);
+      return;
+    }
     console.warn("keep-live: YT API player did not start - plain-embed fallback", hostId);
     try { st.ytPlayer && st.ytPlayer.destroy(); } catch (_) {}
     st.ytPlayer = null;
@@ -526,7 +572,8 @@ function mountYouTubePlayer(st, hostId, vid) {
     }
     st.videoWrap.insertAdjacentHTML("afterbegin",
       `<iframe src="${emb}" allow="autoplay; encrypted-media" allowfullscreen></iframe>`);
-  }, 8000);
+  };
+  st._ytStartTimer = setTimeout(startCheck, 8000);
 }
 
 // Re-pin every live YouTube player to the live edge when the tab regains
@@ -597,12 +644,11 @@ function attachHls(st, video, cfg) {
 // Runs for the page's whole life, every WATCH_EVERY_MS, while the tab is
 // visible (background tabs throttle playback - correcting them is pointless
 // and would fight the browser):
-//   * YouTube: through the real YT.Player - getDuration()-getCurrentTime()
-//     is the exact seconds-behind-live. More than YT_LIVE_MAX_DRIFT_S back
-//     (a DVR-window drift, the "-11:59 / live" bug) or a paused/ended state
-//     -> seekTo(getDuration()) drags it to the live edge. This is the
-//     reliable replacement for the old fire-and-forget postMessage seek
-//     that let tiles sit 12h behind.
+//   * YouTube: through the real YT.Player - _ytBehind() reads the player's
+//     progressState (the only truthful behind-live source; getDuration()
+//     is frozen garbage on manifestless streams). More than
+//     YT_LIVE_MAX_DRIFT_S back (a DVR-window drift, the "-11:59 / live"
+//     bug) or a paused/ended state -> _seekLive() snaps to the real head.
 //   * HLS <video>: currentTime flat across two visible checks -> a
 //     play()/startLoad kick, then a full rebuild from the remembered
 //     build inputs.
@@ -630,15 +676,15 @@ function watchTilesLive() {
         st._vStrikes = 0;
       }
       st._vLastTime = t;
-    } else if (st.ytPlayer && typeof st.ytPlayer.getDuration === "function") {
+    } else if (st.ytPlayer) {
       try {
         const p = st.ytPlayer;
-        const dur = p.getDuration();
-        const cur = p.getCurrentTime ? p.getCurrentTime() : 0;
         const state = p.getPlayerState ? p.getPlayerState() : 1;
-        st.ytBehindS = (dur && isFinite(dur) && dur > 0) ? Math.max(0, dur - cur) : null;
+        st.ytBehindS = _ytBehind(p);
         st.ytPlayerState = state;
-        // Paused/cued/ended, or drifted into the DVR window -> snap to live.
+        // Paused/cued/ended, or measurably drifted into the DVR window ->
+        // snap to live. An unknown drift (null) is NOT a snap trigger here:
+        // the steady state must be zero seeks, not a seek every 8s.
         if (state === 2 || state === 5 || state === 0
             || (st.ytBehindS != null && st.ytBehindS > YT_LIVE_MAX_DRIFT_S)) {
           _seekLive(p);
@@ -655,12 +701,12 @@ window.__tileLiveDebug = () => Object.fromEntries(
     const video = st.videoWrap && st.videoWrap.querySelector("video[data-hls]");
     const p = st.ytPlayer;
     let behind = null, state = null, cur = video ? Math.round(video.currentTime) : null;
-    if (p && typeof p.getDuration === "function") {
+    if (p) {
       try {
-        const d = p.getDuration(), c = p.getCurrentTime ? p.getCurrentTime() : 0;
-        behind = (d && isFinite(d) && d > 0) ? Math.round(Math.max(0, d - c)) : null;
+        const b = _ytBehind(p);
+        behind = b == null ? null : Math.round(b);
         state = p.getPlayerState ? p.getPlayerState() : null;
-        cur = Math.round(c);
+        cur = p.getCurrentTime ? Math.round(p.getCurrentTime()) : null;
       } catch (_) {}
     }
     return [sid, {
