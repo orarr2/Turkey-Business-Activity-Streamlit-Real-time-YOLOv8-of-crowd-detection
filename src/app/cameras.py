@@ -97,6 +97,19 @@ CAMERAS = {
         # The web/ dashboard plays this HLS directly with hls.js in its own <video>.
         "embed": None,
         "type": "square/retail",
+        # The metro entrance canopy + its "M" logo (bottom-right of the
+        # plaza) fired as bus/car for two straight weeks and owned the
+        # anomaly feed (registry entities 164830: 'bus', 1181 sightings;
+        # 165327: 'car', 254 sightings). Vehicles cannot stand on this
+        # pedestrian strip - the drivable lanes' foot points are far
+        # outside the polygon (measured live: canopy foot 0.62/1.00, the
+        # nearest real traffic foot 0.70/0.78). `person` is deliberately
+        # NOT excluded: people walk in front of the canopy all day.
+        "roi_exclude_class": {
+            "bus":   [[[0.55, 0.84], [0.80, 0.84], [0.80, 1.0], [0.55, 1.0]]],
+            "car":   [[[0.55, 0.84], [0.80, 0.84], [0.80, 1.0], [0.55, 1.0]]],
+            "truck": [[[0.55, 0.84], [0.80, 0.84], [0.80, 1.0], [0.55, 1.0]]],
+        },
     },
     "beyazit_meydan": {
         "name": "Beyazit Meydani",
@@ -780,9 +793,18 @@ def _merge_auto_blacklist() -> None:
         cam = CAMERAS.get(cam_id)
         if not cam:
             continue
-        existing = dict(cam.get("roi_exclude_class") or {})
+        # Deep-copy the class lists and dedupe before appending: this merge
+        # re-runs on the collector's hot-reload timer, and the old in-place
+        # extend() re-appended every auto polygon on every reload - the
+        # lists grew by one duplicate per cycle and static catalog entries
+        # shared their list objects with the merged result.
+        existing = {c: list(p)
+                    for c, p in (cam.get("roi_exclude_class") or {}).items()}
         for cls, polys in cls_map.items():
-            existing.setdefault(cls, []).extend(polys)
+            cur = existing.setdefault(cls, [])
+            for poly in polys:
+                if poly not in cur:
+                    cur.append(poly)
         cam["roi_exclude_class"] = existing
 
 

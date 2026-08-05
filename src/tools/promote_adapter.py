@@ -95,10 +95,10 @@ def main() -> None:
                     help="head artifact from tools/train_head.py")
     ap.add_argument("--data", default=str(_SRC_ROOT / "data" / "labels_export"
                                           / "dataset.yaml"))
-    ap.add_argument("--base", default="yolov8n.pt",
+    ap.add_argument("--base", default="yolov8s.pt",
                     help="same base the head was trained on AND the VM runs "
                          "(pinned in deploy/gcp-vm/collector.service)")
-    ap.add_argument("--imgsz", type=int, default=512)
+    ap.add_argument("--imgsz", type=int, default=640)
     ap.add_argument("--adapters-dir", default=str(adapters.ADAPTERS_DIR))
     ap.add_argument("--publish", action="store_true",
                     help="on promotion, upload head+pointer+history to "

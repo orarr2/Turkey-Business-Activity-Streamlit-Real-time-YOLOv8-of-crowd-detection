@@ -95,7 +95,15 @@ EVENTS_DIR     = SNAPSHOTS_ROOT / "events"
 
 # ---- Returning-visitor gates (each saved image is a real return event) -----
 RETURNING_GAP_SEC              = 300   # >= 5 min absence (the declared behavior)
-RETURNING_MIN_SIMILARITY       = 0.96  # >= 0.96 cosine
+# Similarity floor for SAVING a return event, per embedder family. 0.96 was
+# tuned on the HSV-histogram embedder's score distribution (match threshold
+# 0.92); the OSNet embedder scores the same physical entity anywhere in
+# 0.66-0.98 (measured on the live registry), so holding it to 0.96 turned
+# the gate into "only near-pixel-identical crops pass" - which is exactly
+# the static-structure population, the opposite of the intent. The default
+# now follows the ACTIVE embedder; --returning-min-similarity overrides.
+RETURNING_MIN_SIMILARITY        = 0.96  # histogram embedder
+RETURNING_MIN_SIMILARITY_OSNET  = 0.85  # osnet_onnx embedder
 RETURNING_MIN_PRIOR_SIGHTINGS  = 2     # entity must have been seen >= 2 times
 RETURNING_PER_ENTITY_COOLDOWN  = 1800  # same eid at most once per 30 min
 # A "return" is only meaningful if we were actually watching during the
@@ -1405,6 +1413,13 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
                 box = boxes[r.box_index] if r.box_index is not None else None
                 prev_box, _prev_ts = _ENTITY_LAST_BOX.get((cam_id, r.entity_id),
                                                           (None, None))
+                if prev_box is None:
+                    # First match after a restart: the in-memory dict is
+                    # empty, and box_iou(None, box)=0 used to slide the
+                    # static-object gate open exactly for the long-lived
+                    # parked/furniture entities it exists to block. The
+                    # registry now persists each entity's last box.
+                    prev_box = getattr(r, "prev_box", None)
                 if save_snapshots and box is not None:
                     # The obs-log scan is the expensive gate input; compute it
                     # only for entities whose gap can actually pass the cheap
@@ -1698,6 +1713,48 @@ def _restore_state(firebase, slot_ids: set[str]) -> None:
         print(f"  ! observation-log restore skipped ({e})")
 
 
+# Loiter clocks + static anchors used to be memory-only; with Restart=always
+# every service bounce zeroed them together, which (a) re-armed "just past
+# threshold" loiter alerts for permanent structures and (b) blinded the
+# furniture cross-check exactly when it was needed (it requires anchors OLDER
+# than the stay). Snapshot both to VM disk each few rounds, restore on boot.
+_ANALYSIS_STATE_PATH = Path("data/analysis_state.json")
+_ANALYSIS_STATE_EVERY_ROUNDS = 5
+
+
+def _save_analysis_state(presence, static_watch) -> None:
+    try:
+        state = {"v": 1, "saved_at": time.time()}
+        if presence is not None:
+            state["presence"] = presence.to_state()
+        if static_watch is not None:
+            state["static_watch"] = static_watch.to_state()
+        _ANALYSIS_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _ANALYSIS_STATE_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(state))
+        tmp.replace(_ANALYSIS_STATE_PATH)
+    except Exception as e:
+        print(f"  ! analysis-state save skipped ({type(e).__name__}: {e})")
+
+
+def _load_analysis_state(presence, static_watch) -> None:
+    try:
+        state = json.loads(_ANALYSIS_STATE_PATH.read_text())
+    except (OSError, ValueError):
+        return
+    try:
+        kept_p = kept_s = 0
+        if presence is not None and state.get("presence"):
+            kept_p = presence.load_state(state["presence"])
+        if static_watch is not None and state.get("static_watch"):
+            kept_s = static_watch.load_state(state["static_watch"])
+        if kept_p or kept_s:
+            print(f"  analysis state restored: {kept_p} stay(s), "
+                  f"{kept_s} static anchor(s)")
+    except Exception as e:
+        print(f"  ! analysis-state restore skipped ({type(e).__name__}: {e})")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Continuous YOLO footfall collector "
                                              "(writes to Firestore + Storage for the HTML dashboard)")
@@ -1774,7 +1831,11 @@ def main() -> None:
     rg.add_argument("--returning-gap-min",       type=float,
                     default=RETURNING_GAP_SEC / 60.0,
                     help="minimum absence (minutes) for a return event")
-    rg.add_argument("--returning-min-similarity", type=float, default=0.96)
+    rg.add_argument("--returning-min-similarity", type=float, default=None,
+                    help="similarity floor for saving a return event; "
+                         "default follows the active embedder (0.96 "
+                         "histogram, 0.85 OSNet - their score scales "
+                         "differ)")
     rg.add_argument("--returning-min-prior",     type=int, default=2)
     rg.add_argument("--returning-per-entity-cooldown-min", type=float, default=30.0)
     og = ap.add_argument_group("operational events (loitering, alert push)")
@@ -1945,9 +2006,21 @@ def main() -> None:
     save_snapshots          = not args.no_snapshots
     returning_gap_sec       = args.returning_gap_min * 60
     returning_cooldown_sec  = args.returning_per_entity_cooldown_min * 60
+    # Per-embedder default (see RETURNING_MIN_SIMILARITY_OSNET note above):
+    # an explicit --returning-min-similarity always wins.
+    returning_sim_min = args.returning_min_similarity
+    if returning_sim_min is None:
+        _emb_id = (getattr(reid.embedder, "embedder_id", "") if reid else "")
+        returning_sim_min = (RETURNING_MIN_SIMILARITY_OSNET
+                             if _emb_id.startswith("osnet")
+                             else RETURNING_MIN_SIMILARITY)
+        if reid:
+            print(f"returning gate: min similarity {returning_sim_min} "
+                  f"(embedder {_emb_id or 'histogram'})")
 
     print("Restoring analysis state from Firestore...")
     _restore_state(firebase, set(slot_ids))
+    _load_analysis_state(presence, static_watch)
 
     # Publish the initial grid config so the dashboard renders immediately.
     slots_meta = [_slot_metadata(s, assignment[s["slot_id"]]) for s in GRID_SLOTS]
@@ -2010,6 +2083,8 @@ def main() -> None:
                     reload_review_overrides()
                 except Exception as e:
                     print(f"  ! review overrides reload failed: {e}")
+            if _round_counter % _ANALYSIS_STATE_EVERY_ROUNDS == 0:
+                _save_analysis_state(presence, static_watch)
             if _round_counter % _ADAPTER_CHECK_EVERY_ROUNDS == 0:
                 try:
                     from app import adapters
@@ -2101,7 +2176,7 @@ def main() -> None:
                                  burst=args.burst, burst_stride=args.burst_stride,
                                  save_snapshots=save_snapshots,
                                  returning_gap_sec      = returning_gap_sec,
-                                 returning_sim_min      = args.returning_min_similarity,
+                                 returning_sim_min      = returning_sim_min,
                                  returning_min_prior    = args.returning_min_prior,
                                  returning_cooldown_sec = returning_cooldown_sec,
                                  write_reid_stats=(_round_counter
@@ -2202,6 +2277,7 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nStopped.")
     finally:
+        _save_analysis_state(presence, static_watch)
         if reid is not None:
             reid.close()
         try:

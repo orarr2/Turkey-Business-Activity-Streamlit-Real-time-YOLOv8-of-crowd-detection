@@ -31,27 +31,34 @@ EnvironmentFile=-/etc/turkey-footfall/proxy.env
 # the model - it's a one-shot ~5 MB download and safe to skip if you're
 # happy with the color-signature baseline.
 Environment=REID_MODEL=__INSTALL_DIR__/src/data/osnet_x0_25_msmt17.onnx
-ExecStart=__INSTALL_DIR__/src/.venv/bin/python -m app.collector --weights yolov8n.pt --interval 40 --imgsz 512 --burst 2 --burst-stride 13
-# --weights yolov8n.pt: the e2-micro (1 GB) runs the NANO model. Pinned
-# explicitly (2026-07-17) - the argparse default is yolov8s, which is heavier
-# and rides closer to MemoryMax on this host, so leaving it implicit risked
-# an OOM. The strong models (YOLO26-m etc.) live in the LOCAL notebook.
-# --interval 40s: 4 slots x 2 writes/round - the effective cadence is bounded
-# by the ROUND time on this host, not by the flag.
+ExecStart=__INSTALL_DIR__/src/.venv/bin/python -m app.collector --weights yolov8s.pt --interval 40 --imgsz 640 --burst 2 --burst-stride 13
+# --weights yolov8s.pt --imgsz 640 (2026-08-05, measured on the live VM):
+#   * the nano@512 era (below) was an OOM fix from the 5-camera + burst-3
+#     days; with 4 cams + burst 2 the service sits at ~410M RSS with 96-100%
+#     CPU idle (load avg 0.03) - the machine was doing ~0.8s of model work
+#     per 40s round while person counts read 0 on visibly crowded plazas
+#     (Sarachane peaked at 0 people in seven straight digests);
+#   * bench on this host, per 1080p pass: n@512 0.10s | n@640 0.15s |
+#     n@768 0.20s | s@512 0.26s | s@640 0.39s. s@640 x2 frames x4 cams
+#     = ~3s model time per round, still <8% of the interval;
+#   * same live frames, s@640 vs the old n@512: Taksim 5 people vs 0,
+#     Sarachane 7 vehicles vs 0. The undercount was the config, not the
+#     cameras.
+# FALLBACK if journal shows MemoryHigh pressure or oom-kills: drop to
+# `--weights yolov8n.pt --imgsz 768` (n@768 = 0.20s/pass, no RAM growth
+# vs n@512 worth mentioning) before touching anything else.
+# --interval 40s: 4 slots x 2 writes/round - the cadence is bounded by the
+# Firestore free write quota (~17.3k/day of 20k at 40s), not by CPU.
 #
-# --imgsz 512 --burst 2 --burst-stride 13 (2026-07, the 5-camera + OSNet era):
-#   * measured on the live VM: 640/burst-3 with 5 cams + the OSNet embedder
-#     pushed RSS past MemoryMax and the service entered a 4-minute oom-kill
-#     loop (boot -> RSS climb -> SIGKILL -> RestartSec, repeat) while rounds
-#     stretched past 7 minutes;
-#   * 512 cuts YOLO FLOPs ~36% vs 640 and shrinks peak activations;
+# History - the nano@512 era (2026-07, 5 cameras + OSNet + burst 3):
+#   * 640/burst-3 with FIVE cams pushed RSS past MemoryMax and the service
+#     entered a 4-minute oom-kill loop while rounds stretched past 7 min;
 #   * burst 2 @ stride 13 keeps two frames ~0.5s apart - the median still
 #     kills single-frame flicker and the speed estimator still gets its
-#     two points - while dropping a third of the model passes and ~2/3 of
-#     the H.264 decode work (detect_core also now picks the ~720p rendition
-#     of the master playlist instead of decoding 1080p for a 512px input).
-# On a host with more RAM (e2-small = 2 GB and up), restore
-# `--imgsz 640 --burst 3 --burst-stride 25` for the last bit of recall.
+#     two points (detect_core also picks the ~720p rendition of the master
+#     playlist instead of decoding 1080p).
+# On a host with more RAM (e2-small = 2 GB and up), raise to
+# `--imgsz 960 --burst 3 --burst-stride 25` for the last bit of recall.
 Restart=always
 RestartSec=15
 # Memory sizing for the e2-micro (1 GB, Always Free) this project runs on.

@@ -38,6 +38,7 @@ Honesty guards (each one maps to a real failure mode):
 """
 from __future__ import annotations
 
+import base64
 import time
 
 from app.detect_core import box_iou
@@ -226,6 +227,57 @@ class StaticWatch:
             dropped += len(anchors) - len(keep)
             self._anchors[cam_id] = keep
         return dropped
+
+    # -- restart persistence -----------------------------------------------
+    # _anchors and _next_id live in process memory; under Restart=always a
+    # bounce wiped every anchor's age, which broke the loiter path's
+    # furniture cross-check (settled_spot_age needs anchors OLDER than the
+    # stay - both restarted from zero together). The collector snapshots
+    # this each round and restores on boot. Crops ride along base64-encoded
+    # (small ones only) so a post-restart departure still carries evidence.
+
+    _STATE_CROP_MAX_B = 60_000
+
+    def to_state(self) -> dict:
+        cams: dict[str, list[dict]] = {}
+        for cam_id, anchors in self._anchors.items():
+            rows = []
+            for a in anchors:
+                d = dict(a)
+                crop = d.pop("crop_jpeg", None)
+                if crop and len(crop) <= self._STATE_CROP_MAX_B:
+                    d["crop_b64"] = base64.b64encode(crop).decode("ascii")
+                rows.append(d)
+            cams[cam_id] = rows
+        return {"next_id": self._next_id, "anchors": cams}
+
+    def load_state(self, state: dict, now: float | None = None,
+                   max_age_sec: float = STATIC_STALE_SEC) -> int:
+        """Restore anchors from to_state(). Returns how many were kept."""
+        now = time.time() if now is None else now
+        kept = 0
+        for cam_id, rows in (state.get("anchors") or {}).items():
+            keep: list[dict] = []
+            for d in rows:
+                try:
+                    if now - float(d["last_ts"]) > max_age_sec:
+                        continue
+                    a = dict(d)
+                    b64 = a.pop("crop_b64", None)
+                    a["crop_jpeg"] = base64.b64decode(b64) if b64 else None
+                    a["box"] = {k: float(a["box"][k])
+                                for k in ("x1", "y1", "x2", "y2")}
+                    keep.append(a)
+                    kept += 1
+                except (ValueError, TypeError, KeyError):
+                    continue
+            if keep:
+                self._anchors[cam_id] = keep
+        try:
+            self._next_id = max(int(state.get("next_id") or 1), self._next_id)
+        except (ValueError, TypeError):
+            pass
+        return kept
 
     def counts(self, cam_id: str | None = None) -> dict:
         """Observability: {"anchors": n, "settled": n} (one cam or all)."""

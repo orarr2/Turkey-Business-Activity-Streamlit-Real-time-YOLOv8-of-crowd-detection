@@ -66,6 +66,9 @@
                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .tile .city { color: #8b909a; font-size: 11px;
                   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    /* Local preview: the video is the picked camera, the NUMBERS stream from
+       the cloud collector's camera - make that source unmissable. */
+    .tile .city .counts-src { color: #f0a35e; }
     .tile-head-right { display: flex; gap: 6px; flex-wrap: nowrap;
                        align-items: center; flex-shrink: 0; }
 
@@ -923,7 +926,7 @@ alerting one, else the largest person in view">
        so the browser doesn't serve a stale ES-module from disk cache. -->
   <script type="module" src="./firebase-config.js?v=40"></script>
   <script type="module" src="./cameras.js?v=40"></script>
-  <script type="module" src="./app.js?v=45"></script>
+  <script type="module" src="./app.js?v=46"></script>
 
   <!-- Search UI. INLINE and NON-MODULE on purpose: it wires POST /api/search
        on this same server, has no Firebase dependency, and must keep working

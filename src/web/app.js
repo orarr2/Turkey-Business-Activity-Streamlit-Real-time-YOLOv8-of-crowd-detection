@@ -37,7 +37,13 @@ try {
 const statusEl = document.getElementById("status");
 const tilesEl  = document.getElementById("tiles");
 
-const HISTORY_LIMIT = 360;
+// Per-slot cap on the 24h footfall query. Must cover the collector's REAL
+// cadence or every "24h" widget silently shrinks: at the VM's 40s interval a
+// slot writes ~2160 docs/day, and the old cap of 360 meant the "24h" chart,
+// avg and peak were computed over the newest ~4 HOURS while labeled 24h.
+// 2160 x 4 slots = ~8.6k doc reads per page load - well inside the free
+// tier for an operator dashboard opened a handful of times a day.
+const HISTORY_LIMIT = 2160;
 // Shared staleness threshold: the header status pill and the per-tile age
 // label must agree, or the same screen claims "live" and "stale" at once.
 const STALE_AGE_S = 120;
@@ -274,6 +280,13 @@ if (stripEl) {
 function updateStrip(slotId, d) {
   const s = stripState[slotId];
   if (!s) return;
+  // The strip shows the CLOUD collector's annotated frames ("what the counts
+  // came from"), but its label was initialized from the LOCAL pick - so an
+  // Istanbul frame sat under a "Bangkok, Thailand" caption. Name the actual
+  // counts-source camera the moment a cloud sample identifies itself.
+  if (LOCAL_MODE && d.cam_name && s.lbl && s.lbl.textContent !== d.cam_name) {
+    s.lbl.textContent = d.cam_name;
+  }
   if (d.person   != null) s.p.textContent = d.person;
   if (d.vehicles != null) s.v.textContent = d.vehicles;
   if (d.heatmap_url && s.heatBtn) {
@@ -918,8 +931,11 @@ function setLatest(st, d) {
       st.camAreaEl.dataset.baseTxt = st.camAreaEl.textContent;
     const mismatch = st.camNameEl && st.camNameEl.textContent
         && st.camNameEl.textContent !== d.cam_name;
-    st.camAreaEl.textContent = st.camAreaEl.dataset.baseTxt
-        + (mismatch ? ` · counts: ${d.cam_name} (cloud grid)` : "");
+    st.camAreaEl.innerHTML = escapeHtml(st.camAreaEl.dataset.baseTxt)
+        + (mismatch
+           ? ` · <span class="counts-src">counts: ${escapeHtml(d.cam_name)}`
+             + ` (cloud grid)</span>`
+           : "");
   }
   // Vehicle speed chip: shown only when this sample tracked moving vehicles
   // (a burst-based estimate; the tooltip carries the honesty disclaimer).

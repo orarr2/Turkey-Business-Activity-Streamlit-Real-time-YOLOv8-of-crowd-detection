@@ -197,14 +197,17 @@ sudo git -C /opt/turkey-footfall fetch origin main && \
 > paths, not the project's). Overwriting the installed unit from the template
 > (`sed ... | tee /etc/systemd/system/collector.service`) DROPS those lines
 > and the collector then crash-loops with `FileNotFoundError: Firebase
-> service-account JSON not found`. If you must change a flag (e.g. add
-> `--weights yolov8n.pt`), edit the installed unit IN PLACE:
+> service-account JSON not found`. If you must change a flag (e.g. swap
+> `--weights` or `--imgsz`), edit the installed unit IN PLACE:
 > ```bash
-> sudo sed -i 's#-m app.collector#-m app.collector --weights yolov8n.pt#' \
->   /etc/systemd/system/collector.service   # only if --weights not already there
+> sudo sed -i 's#--weights yolov8n.pt --interval 40 --imgsz 512#--weights yolov8s.pt --interval 40 --imgsz 640#' \
+>   /etc/systemd/system/collector.service
 > sudo systemctl daemon-reload && sudo systemctl restart collector
 > ```
-> — never a wholesale copy from the repo.
+> - never a wholesale copy from the repo. Production flags since
+> 2026-08-05: `--weights yolov8s.pt --imgsz 640` (see the measured
+> rationale inside the repo `collector.service`); memory-pressure
+> fallback: `--weights yolov8n.pt --imgsz 768`.
 
 ## YouTube cameras from the VM: the PO-token provider
 
