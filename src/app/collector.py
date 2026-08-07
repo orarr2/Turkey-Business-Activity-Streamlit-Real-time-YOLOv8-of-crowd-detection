@@ -103,7 +103,13 @@ RETURNING_GAP_SEC              = 300   # >= 5 min absence (the declared behavior
 # the static-structure population, the opposite of the intent. The default
 # now follows the ACTIVE embedder; --returning-min-similarity overrides.
 RETURNING_MIN_SIMILARITY        = 0.96  # histogram embedder
-RETURNING_MIN_SIMILARITY_OSNET  = 0.85  # osnet_onnx embedder
+RETURNING_MIN_SIMILARITY_OSNET  = 0.85  # osnet_onnx embedder, vehicle classes
+# People need a stricter bar than structures/vehicles under OSNet: at 0.85
+# the 06-07.08 digests matched DIFFERENT tourists as one "returning"
+# entity (yellow-backpack vs white-umbrella person, x10 budget floods on
+# three cameras) - similar clothing crops score 0.85+ between strangers,
+# while a parked van vs itself scores the same. Structures keep 0.85.
+RETURNING_MIN_SIMILARITY_OSNET_PERSON = 0.92
 RETURNING_MIN_PRIOR_SIGHTINGS  = 2     # entity must have been seen >= 2 times
 RETURNING_PER_ENTITY_COOLDOWN  = 1800  # same eid at most once per 30 min
 # A "return" is only meaningful if we were actually watching during the
@@ -1266,6 +1272,7 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
                 save_snapshots: bool = True,
                 returning_gap_sec: float = RETURNING_GAP_SEC,
                 returning_sim_min: float = RETURNING_MIN_SIMILARITY,
+                returning_sim_min_person: float | None = None,
                 returning_min_prior: int  = RETURNING_MIN_PRIOR_SIGHTINGS,
                 returning_cooldown_sec: float = RETURNING_PER_ENTITY_COOLDOWN,
                 _returning_last_save: dict | None = None,
@@ -1428,8 +1435,15 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
                              if (r.gap_seconds is not None
                                  and r.gap_seconds >= returning_gap_sec)
                              else None)
+                    # People get their own (stricter) similarity floor when
+                    # configured - see RETURNING_MIN_SIMILARITY_OSNET_PERSON.
+                    _sim_min_eff = (returning_sim_min_person
+                                    if (returning_sim_min_person is not None
+                                        and box is not None
+                                        and box.get("cls") == "person")
+                                    else returning_sim_min)
                     passes, _why = _passes_returning_gates(
-                        r, returning_gap_sec, returning_sim_min,
+                        r, returning_gap_sec, _sim_min_eff,
                         returning_min_prior, returning_cooldown_sec,
                         _returning_last_save,
                         unobserved_sec=unobs,
@@ -2007,16 +2021,21 @@ def main() -> None:
     returning_gap_sec       = args.returning_gap_min * 60
     returning_cooldown_sec  = args.returning_per_entity_cooldown_min * 60
     # Per-embedder default (see RETURNING_MIN_SIMILARITY_OSNET note above):
-    # an explicit --returning-min-similarity always wins.
+    # an explicit --returning-min-similarity always wins, for every class.
     returning_sim_min = args.returning_min_similarity
+    returning_sim_min_person = None
     if returning_sim_min is None:
         _emb_id = (getattr(reid.embedder, "embedder_id", "") if reid else "")
-        returning_sim_min = (RETURNING_MIN_SIMILARITY_OSNET
-                             if _emb_id.startswith("osnet")
-                             else RETURNING_MIN_SIMILARITY)
+        if _emb_id.startswith("osnet"):
+            returning_sim_min = RETURNING_MIN_SIMILARITY_OSNET
+            returning_sim_min_person = RETURNING_MIN_SIMILARITY_OSNET_PERSON
+        else:
+            returning_sim_min = RETURNING_MIN_SIMILARITY
         if reid:
-            print(f"returning gate: min similarity {returning_sim_min} "
-                  f"(embedder {_emb_id or 'histogram'})")
+            print(f"returning gate: min similarity {returning_sim_min}"
+                  + (f" (person {returning_sim_min_person})"
+                     if returning_sim_min_person is not None else "")
+                  + f" (embedder {_emb_id or 'histogram'})")
 
     print("Restoring analysis state from Firestore...")
     _restore_state(firebase, set(slot_ids))
@@ -2177,6 +2196,7 @@ def main() -> None:
                                  save_snapshots=save_snapshots,
                                  returning_gap_sec      = returning_gap_sec,
                                  returning_sim_min      = returning_sim_min,
+                                 returning_sim_min_person = returning_sim_min_person,
                                  returning_min_prior    = args.returning_min_prior,
                                  returning_cooldown_sec = returning_cooldown_sec,
                                  write_reid_stats=(_round_counter

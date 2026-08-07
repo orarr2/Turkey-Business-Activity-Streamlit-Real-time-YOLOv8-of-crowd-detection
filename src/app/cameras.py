@@ -100,15 +100,20 @@ CAMERAS = {
         # The metro entrance canopy + its "M" logo (bottom-right of the
         # plaza) fired as bus/car for two straight weeks and owned the
         # anomaly feed (registry entities 164830: 'bus', 1181 sightings;
-        # 165327: 'car', 254 sightings). Vehicles cannot stand on this
-        # pedestrian strip - the drivable lanes' foot points are far
-        # outside the polygon (measured live: canopy foot 0.62/1.00, the
-        # nearest real traffic foot 0.70/0.78). `person` is deliberately
-        # NOT excluded: people walk in front of the canopy all day.
+        # 165327: 'car', 254 sightings). The first polygon stopped at
+        # x=0.80 and the canopy's 'bus' box kept escaping by widening to
+        # the frame edge (x 0.66-1.0 -> foot center 0.83, caught again in
+        # the 07.08 digest), so `bus` is now excluded across the WHOLE
+        # bottom strip - no real bus ever stands with its wheels on the
+        # pedestrian plaza (the terminal lanes' foot points sit at
+        # y 0.55-0.75). `car`/`truck` keep the left edge at 0.55 because
+        # real vans do park on the bottom-LEFT apron (seen 02.08).
+        # `person` is deliberately NOT excluded: people walk in front of
+        # the canopy all day.
         "roi_exclude_class": {
-            "bus":   [[[0.55, 0.84], [0.80, 0.84], [0.80, 1.0], [0.55, 1.0]]],
-            "car":   [[[0.55, 0.84], [0.80, 0.84], [0.80, 1.0], [0.55, 1.0]]],
-            "truck": [[[0.55, 0.84], [0.80, 0.84], [0.80, 1.0], [0.55, 1.0]]],
+            "bus":   [[[0.0, 0.84], [1.0, 0.84], [1.0, 1.0], [0.0, 1.0]]],
+            "car":   [[[0.55, 0.84], [1.0, 0.84], [1.0, 1.0], [0.55, 1.0]]],
+            "truck": [[[0.55, 0.84], [1.0, 0.84], [1.0, 1.0], [0.55, 1.0]]],
         },
     },
     "beyazit_meydan": {
