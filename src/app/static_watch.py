@@ -65,7 +65,8 @@ class StaticWatch:
                  depart_misses: int = STATIC_DEPART_MISSES,
                  evidence_gates: dict | None = None,
                  dark_luma: float = DARK_LUMA,
-                 max_anchors: int = STATIC_MAX_ANCHORS):
+                 max_anchors: int = STATIC_MAX_ANCHORS,
+                 skip_classes: tuple = ("person",)):
         self.min_stay_sec = min_stay_sec
         self.match_iou = match_iou
         self.min_hits = min_hits
@@ -76,6 +77,12 @@ class StaticWatch:
         self.evidence_gates = evidence_gates
         self.dark_luma = dark_luma
         self.max_anchors = max_anchors
+        # Classes that never become anchors. "Static object LEFT" means an
+        # unattended OBJECT (bag, stall, parked car) - a human sitting on a
+        # bench for six minutes and then walking away is not one, yet the
+        # 07.08 Bulancak digest carried 15 such person "departures" in one
+        # afternoon. People-dwelling is the loiter path's job.
+        self.skip_classes = tuple(skip_classes or ())
         self._anchors: dict[str, list[dict]] = {}
         self._next_id = 1
 
@@ -118,6 +125,9 @@ class StaticWatch:
                 now: float | None = None) -> list[dict]:
         """One successful sample. Returns `static_departed` event dicts."""
         now = time.time() if now is None else now
+        if self.skip_classes:
+            boxes = [b for b in boxes
+                     if b.get("cls") not in self.skip_classes]
         anchors = self._anchors.setdefault(cam_id, [])
 
         # Greedy same-class IoU matching, best overlap first - one
@@ -261,6 +271,11 @@ class StaticWatch:
             for d in rows:
                 try:
                     if now - float(d["last_ts"]) > max_age_sec:
+                        continue
+                    if d.get("cls") in self.skip_classes:
+                        # An anchor class we no longer track (e.g. person):
+                        # loading it would only produce a farewell-departure
+                        # event burst once its detections stop matching.
                         continue
                     a = dict(d)
                     b64 = a.pop("crop_b64", None)

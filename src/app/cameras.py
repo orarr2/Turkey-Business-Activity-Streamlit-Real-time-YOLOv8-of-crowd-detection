@@ -410,6 +410,11 @@ CAMERAS = {
         "kind": "youtube", "url": "https://www.youtube.com/watch?v=vn702Owd5Kk",
         "page": "https://webcamera24.com/camera/turkey/bulancak-square-cam/",
         "embed": "https://www.youtube.com/embed/vn702Owd5Kk?autoplay=1&mute=1&playsinline=1&enablejsapi=1",
+        # A bench-lined town square: sitting for 5+ minutes is the NORMAL
+        # use of the place, and the default 300s person threshold turned a
+        # summer afternoon into 10 loiter alerts (the full daily budget,
+        # 07.08). Alert-worthy dwell here starts at 15 minutes.
+        "loiter_person_sec": 900,
     },
     "tr_golden_horn": {
         "name": "Golden Horn (Istanbul)", "city": "Istanbul", "country": "turkey",

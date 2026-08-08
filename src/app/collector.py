@@ -120,7 +120,12 @@ RETURNING_MAX_UNOBSERVED_FRAC  = 0.5
 # Static objects (parked cars, banners detected as trucks) re-match in the
 # same spot forever; a genuine return walks/drives back INTO the scene. If the
 # entity's new box overlaps its previous box above this IoU, it never left.
-RETURNING_STATIC_IOU           = 0.5
+# 0.5 -> 0.35 (2026-08-08): on night IR frames a parked car's box drifts
+# enough that consecutive sightings overlap at only 0.35-0.5, and the same
+# parked sedan at Sarachane slid under the 0.5 bar ten times in one night
+# (the full daily budget). A vehicle that GENUINELY left and came back
+# parks with near-zero overlap; 0.35 keeps that while catching the drift.
+RETURNING_STATIC_IOU           = 0.35
 
 # How many anomaly verdicts per physical camera per day is "normal operations".
 # Beyond this the collector logs a loud warning - the gates are miscalibrated
@@ -1743,6 +1748,13 @@ def _save_analysis_state(presence, static_watch) -> None:
             state["presence"] = presence.to_state()
         if static_watch is not None:
             state["static_watch"] = static_watch.to_state()
+        # Daily event/anomaly budgets ride along: in-memory-only counters
+        # reset on every restart, and the 07.08 digest showed the result -
+        # 15 static-departed events on one camera in one day against a
+        # 10/day budget (5 before a maintenance restart + a fresh 10 after).
+        state["event_daycount"] = {f"{c}|{k}": v
+                                   for (c, k), v in _EVENT_DAYCOUNT.items()}
+        state["anomaly_daycount"] = dict(_ANOMALY_DAYCOUNT)
         _ANALYSIS_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         tmp = _ANALYSIS_STATE_PATH.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(state))
@@ -1762,9 +1774,23 @@ def _load_analysis_state(presence, static_watch) -> None:
             kept_p = presence.load_state(state["presence"])
         if static_watch is not None and state.get("static_watch"):
             kept_s = static_watch.load_state(state["static_watch"])
+        for key, cell in (state.get("event_daycount") or {}).items():
+            try:
+                cam, kind = key.rsplit("|", 1)
+                _EVENT_DAYCOUNT[(cam, kind)] = [str(cell[0]), int(cell[1]),
+                                                bool(cell[2])]
+            except (ValueError, TypeError, IndexError):
+                continue
+        for cam, cell in (state.get("anomaly_daycount") or {}).items():
+            try:
+                _ANOMALY_DAYCOUNT[cam] = [str(cell[0]), int(cell[1]),
+                                          bool(cell[2])]
+            except (ValueError, TypeError, IndexError):
+                continue
         if kept_p or kept_s:
             print(f"  analysis state restored: {kept_p} stay(s), "
-                  f"{kept_s} static anchor(s)")
+                  f"{kept_s} static anchor(s), "
+                  f"{len(_EVENT_DAYCOUNT)} budget cell(s)")
     except Exception as e:
         print(f"  ! analysis-state restore skipped ({type(e).__name__}: {e})")
 

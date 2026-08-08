@@ -205,3 +205,25 @@ def test_parking_car_loiter_still_fires():
 
 def test_furniture_gate_survives_missing_watch():
     assert not _loiter_is_furniture(None, "cam", _loiter_ev(), now=2000.0)
+
+
+def test_person_never_becomes_an_anchor():
+    """'Static object left' means an unattended OBJECT. A person sitting
+    still for six minutes and then walking off (the 07.08 Bulancak x15
+    flood) must produce neither an anchor nor a departure event."""
+    w = StaticWatch()
+    t = _settle(w, cls="person")
+    assert w.counts("cam") == {"anchors": 0, "settled": 0}
+    assert _feed(w, "cam", [], t) == []
+    assert _feed(w, "cam", [], t + 60) == []
+
+
+def test_skip_classes_dropped_on_state_load():
+    """Persisted person anchors from before the skip must not be revived -
+    loading them would only fire a farewell departure burst."""
+    keeper = StaticWatch(skip_classes=())
+    t = _settle(keeper, cls="person")
+    assert keeper.counts("cam")["settled"] == 1
+    w = StaticWatch()
+    assert w.load_state(keeper.to_state(), now=t) == 0
+    assert w.counts("cam") == {"anchors": 0, "settled": 0}
