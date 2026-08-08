@@ -569,8 +569,10 @@ three opt-in layers (checkboxes in the panel / query params on the API):
   needs a close-range camera (mediapipe experiment noted in
   requirements.txt, notebook-only).
 - **Faces** (`faces=1`, `app/faces.py`) - face **detection** boxes on the
-  final frame via OpenCV's bundled YuNet (point `FACE_MODEL` at the
-  ~230 KB `.onnx` from the opencv_zoo repo; silently off otherwise). This
+  final frame via OpenCV's bundled YuNet. Drop the ~230 KB
+  `face_detection_yunet_2023mar.onnx` from the opencv_zoo repo at
+  `data/face_detection_yunet_2023mar.onnx` (picked up automatically), or
+  point `FACE_MODEL` anywhere else; silently off without a model. This
   is rectangles only - no embeddings, no face database, no identification;
   "have I seen this person before?" stays answered by body-appearance
   re-ID, which is the honest tool at these camera distances.

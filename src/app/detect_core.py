@@ -60,6 +60,18 @@ def _open_cap(url_or_path: str) -> "cv2.VideoCapture":
                 cap.set(prop, ms)
             except cv2.error:
                 pass
+    # Record the container's real frame rate for the speed/track dt. Every
+    # km/h in the pipeline used to divide by an ASSUMED 25 fps - a 12.5 fps
+    # stream then reported doubled speeds systematically. The collector and
+    # the deep window both run grab -> analyze serially, so "fps of the last
+    # opened capture" is the fps of the frames being analyzed.
+    try:
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        if 4.0 <= fps <= 65.0:
+            global _LAST_STREAM_FPS
+            _LAST_STREAM_FPS = fps
+    except cv2.error:
+        pass
     return cap
 
 # COCO class ids we care about for *business activity* (footfall + vehicles
@@ -827,8 +839,19 @@ VEHICLE_LENGTH_M = {
     "motorcycle": 2.2, "bicycle": 1.8, "train": 22.0,
 }
 # Typical HLS street cam frame rate; grab_burst spaces frames `stride` frames
-# apart, so dt between burst frames = stride / fps.
+# apart, so dt between burst frames = stride / fps. Fallback only - _open_cap
+# records each stream's REAL container fps into _LAST_STREAM_FPS and
+# last_stream_fps() serves it to the speed/track dt computations.
 BURST_FPS_ASSUMED = 25.0
+_LAST_STREAM_FPS: float | None = None
+
+
+def last_stream_fps(default: float = BURST_FPS_ASSUMED) -> float:
+    """Frame rate of the most recently opened stream (sanity-clamped at
+    open time), or `default` when nothing was measured yet. Valid because
+    both callers (collector round, deep window) grab and analyze one
+    camera at a time."""
+    return _LAST_STREAM_FPS if _LAST_STREAM_FPS else default
 # Sanity band, km/h: below = parked/jitter (reported as 0), above = a track
 # mismatch (two different vehicles fused), discarded outright.
 SPEED_MIN_KMH = 3.0
@@ -868,6 +891,13 @@ def estimate_speeds(frames_boxes: list[list[dict]], frame_shape,
         # a size flicker between frames doesn't swing the scale).
         exts = [max(_box_wh(b)) for b in track if max(_box_wh(b)) > 0]
         if not exts:
+            return None
+        # Mismatch gate: a real vehicle's pixel extent barely changes over
+        # ~1s; a far car fused with a near one (the pairing error behind
+        # Beyazit's phantom "40 km/h typical" on a pedestrian plaza) shows
+        # up as a large size jump. Kill the pair instead of averaging two
+        # different rulers.
+        if max(exts) > 1.8 * min(exts):
             return None
         m_per_px = real_len / (sum(exts) / len(exts))
         (x0, y0), (x1, y1) = _centroid(track[0]), _centroid(track[-1])
@@ -1424,7 +1454,8 @@ def detect_burst(model, frames: list[np.ndarray], conf: float = 0.35,
     # shows the speed without a second model pass.
     if len(per) >= 2:
         speeds = estimate_speeds([b for _, b, _ in per], per[0][2].shape,
-                                 stride=burst_stride)
+                                 stride=burst_stride,
+                                 fps=last_stream_fps())
         summary = summarize_speeds(speeds)
         if summary:
             debug["speeds"] = summary
@@ -1451,7 +1482,7 @@ def detect_burst(model, frames: list[np.ndarray], conf: float = 0.35,
             from app.tracker import assign_burst_ids
             tracks = assign_burst_ids([b for _, b, _ in per],
                                       per[0][2].shape,
-                                      dt=burst_stride / BURST_FPS_ASSUMED)
+                                      dt=burst_stride / last_stream_fps())
             if tracks:
                 debug["individuals"] = len(tracks)
         except Exception as e:

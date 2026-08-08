@@ -105,7 +105,11 @@ def pose_flags_of(kps: list) -> list[str]:
     if sh_mid is not None and hip_mid is not None:
         dx, dy = hip_mid[0] - sh_mid[0], hip_mid[1] - sh_mid[1]
         torso_len = math.hypot(dx, dy)
-        if torso_len > 1.0:
+        # A torso under 8px is not anatomy - it is a skeleton hallucinated
+        # onto a distant blob, and its "tilt" fired fall_suspect on noise.
+        # Real crops that matter (>= 40px boxes via the top-down pose pass)
+        # always carry a torso well above this.
+        if torso_len >= 8.0:
             tilt = math.degrees(math.atan2(abs(dx), abs(dy)))
             if tilt > FALL_TORSO_DEG:
                 flags.append("fall_suspect")

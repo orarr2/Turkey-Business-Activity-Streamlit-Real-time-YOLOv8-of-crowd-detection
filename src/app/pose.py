@@ -158,6 +158,63 @@ def attach_keypoints(model, frame, boxes: list[dict],
     return len(pairs)
 
 
+def attach_keypoints_crops(model, frame, boxes: list[dict],
+                           imgsz: int = 256, pad_frac: float = 0.25,
+                           min_box_h: int = 40,
+                           conf: float = POSE_CONF) -> int:
+    """Top-down pose: one pass PER PERSON CROP instead of one full-frame
+    pass. Attaches `"kps"` (frame coordinates) in place; returns matches.
+
+    Why: on a street cam a pedestrian is 30-120 px tall; a full-frame pose
+    pass at 640 hands the model ~15 px of person and finds nothing, so
+    gestures/fall/crouch got no input at all on exactly the scenes they
+    exist for. Cropping each detector box (padded 25%) and letting the
+    pose model see it at `imgsz` multiplies the effective resolution per
+    person by 5-15x. The detector stays the source of truth for WHO
+    exists: only its `person` boxes are cropped, and the best pose-person
+    inside each crop claims that box - there is nothing else it could be.
+    Boxes shorter than `min_box_h` px are skipped - below that even a
+    dedicated crop holds no limbs, only upscaling artifacts.
+
+    Cost: one small inference per person, batched into a single
+    model.predict call. Deep-window-only economics, same as the full-frame
+    variant it replaces there.
+    """
+    persons = [b for b in boxes
+               if b.get("cls") == "person"
+               and (b["y2"] - b["y1"]) >= min_box_h]
+    if not persons:
+        return 0
+    H, W = frame.shape[:2]
+    crops, offsets = [], []
+    for b in persons:
+        bw, bh = b["x2"] - b["x1"], b["y2"] - b["y1"]
+        px, py = bw * pad_frac, bh * pad_frac
+        x1 = max(0, int(b["x1"] - px)); y1 = max(0, int(b["y1"] - py))
+        x2 = min(W, int(b["x2"] + px)); y2 = min(H, int(b["y2"] + py))
+        if x2 - x1 < 8 or y2 - y1 < 8:
+            continue
+        crops.append(frame[y1:y2, x1:x2])
+        offsets.append((b, x1, y1))
+    if not crops:
+        return 0
+    results = model.predict(crops, imgsz=imgsz, conf=conf, verbose=False)
+    matched = 0
+    for (b, ox, oy), res in zip(offsets, results):
+        if res.boxes is None or res.keypoints is None or len(res.boxes) == 0:
+            continue
+        # The crop is one person's neighborhood; take the pose-person with
+        # the highest box confidence (bystanders clipped at the crop edge
+        # score lower and lose).
+        confs = [float(c) for c in res.boxes.conf.tolist()]
+        qi = max(range(len(confs)), key=confs.__getitem__)
+        kps = res.keypoints.data.tolist()[qi]
+        b["kps"] = [[round(x + ox, 1), round(y + oy, 1), round(c, 3)]
+                    for x, y, c in kps]
+        matched += 1
+    return matched
+
+
 def draw_skeleton(img, boxes: list[dict], min_conf: float = KP_MIN_CONF):
     """Draw the skeleton of every box carrying `"kps"` onto `img` (in
     place, returns it). Call AFTER detect_core.draw_boxes - the bones sit

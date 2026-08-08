@@ -31,11 +31,12 @@ from pathlib import Path
 _SRC_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = _SRC_ROOT / "data"
 
-# Grid resolution. 32x18 (16:9) is coarse enough that a JSON stays a few
-# hundred KB across all dayparts and fine enough to see "this shop front",
-# and it matches the auto-blacklist's philosophy of learning ZONES, not
-# pixels.
-GRID_W, GRID_H = 32, 18
+# Grid resolution. 48x27 (16:9) - one cell is ~40px at 1080p, tight enough
+# to separate two adjacent shop fronts that the previous 32x18 (60px cells)
+# blurred into one hot blob, while a full state JSON stays ~200 KB. The
+# _load shape guard restarts any 32x18 file cleanly (decay half-life is
+# ~3 weeks anyway, so the map re-forms quickly).
+GRID_W, GRID_H = 48, 27
 
 # Local-time dayparts (camera timezone - a Bangkok evening is not an
 # Istanbul evening).

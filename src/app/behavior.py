@@ -48,13 +48,13 @@ from pathlib import Path
 
 from app.cameras import CAMERAS
 from app.detect_core import (
-    BURST_FPS_ASSUMED,
     DEFAULT_PER_CLASS_CONF,
     VEHICLE_LENGTH_M,
     detect_with_boxes,
     draw_boxes,
     filter_boxes_roi,
     grab_burst,
+    last_stream_fps,
     resolve_stream,
 )
 from app.heatmap import GRID_H, GRID_W
@@ -369,13 +369,18 @@ def analyze_window(cam_id: str, model,
     # track's box history carries its skeletons for free.
     pose_persons = 0
     if pose:
-        from app.pose import attach_keypoints, load_pose_model
+        # Top-down (per-crop) pose: the full-frame pass at window imgsz saw
+        # ~15px of person on wide street shots and attached nothing - the
+        # crop variant is what makes gestures/fall/crouch actually fire at
+        # street-cam distance.
+        from app.pose import attach_keypoints_crops, load_pose_model
         pose_model = load_pose_model()
         for fr, b in zip(frames, per_boxes):
-            pose_persons += attach_keypoints(pose_model, fr, b,
-                                             imgsz=imgsz or DEFAULT_IMGSZ)
+            pose_persons += attach_keypoints_crops(pose_model, fr, b)
 
-    dt = stride / BURST_FPS_ASSUMED
+    # Real container fps of the stream just grabbed (falls back to the
+    # 25fps assumption for direct-frame calls in tests/replays).
+    dt = stride / last_stream_fps()
     tracks = assign_burst_ids(per_boxes, frames[0].shape, dt=dt)
     stats = []
     for tr in tracks:
