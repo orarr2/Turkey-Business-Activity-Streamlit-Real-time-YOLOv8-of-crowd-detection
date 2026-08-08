@@ -153,6 +153,20 @@ class FirebaseStore:
         q = q.order_by("ts").limit(limit_docs)
         return [d.to_dict() for d in q.stream()]
 
+    def recent_events(self, since_iso: str, limit_docs: int = 2000) -> list[dict]:
+        """Operational events (loiter / returning / static_departed) with
+        ts >= since_iso, ascending. Used on startup to rebuild the daily
+        per-(cam, kind) event budgets - the on-disk snapshot alone resets
+        them whenever the previous process predates budget persistence."""
+        col = self.db.collection("events")
+        try:
+            from google.cloud.firestore_v1.base_query import FieldFilter
+            q = col.where(filter=FieldFilter("ts", ">=", since_iso))
+        except ImportError:   # older google-cloud-firestore
+            q = col.where("ts", ">=", since_iso)
+        q = q.order_by("ts").limit(limit_docs)
+        return [d.to_dict() for d in q.stream()]
+
     def upload_snapshot(self, path: str, jpeg_bytes: bytes) -> str | None:
         """Upload JPEG bytes to Storage at `snapshots/{path}`. Return public URL.
 

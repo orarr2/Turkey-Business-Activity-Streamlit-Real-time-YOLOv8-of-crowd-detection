@@ -177,6 +177,26 @@ def _save_last_report(state: dict) -> None:
         print(f"digest: could not persist last-report state: {e}")
 
 
+def _parse_any_ts(s) -> dt.datetime | None:
+    try:
+        return dt.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+def _op_ats_after(reviews: dict, sent_at) -> list[dt.datetime]:
+    """Operator-attributed review timestamps newer than the last report."""
+    cut = _parse_any_ts(sent_at)
+    out = []
+    for a in reviews.get("op_reviewed_ats") or []:
+        t = _parse_any_ts(a)
+        if t is None:
+            continue
+        if cut is None or t > cut:
+            out.append(t)
+    return out
+
+
 def _training_lines(training: dict | None,
                     reviews: dict | None,
                     prev: dict | None = None) -> list[str]:
@@ -186,11 +206,20 @@ def _training_lines(training: dict | None,
     with no new labels still read 'you have labeled 36 frames' - misleading
     progress signal. We now stash the last snapshot on disk and describe
     what moved. First-ever run prints the current totals as the baseline.
+
+    Two honesty rules (2026-08-08, after the midday report credited the
+    operator with 60 frames a script bulk-wrote in 3 minutes):
+      * frames carrying source == "auto" are reported as their own line
+        ("auto-labeled ... after approval"), never as "you labeled";
+      * an operator-attributed delta that arrived machine-fast (>= 10 frames
+        at under ~6s/frame) is called out as an unmarked bulk import
+        instead of being credited to the operator.
     """
     lines: list[str] = []
     r = reviews or {}
     prev = prev or {}
     cur_frames = r.get("frames_labeled", 0)
+    cur_auto = r.get("frames_auto", 0)
     cur_conf = r.get("boxes_confirmed", 0)
     cur_rej = r.get("boxes_rejected", 0)
     cur_miss = r.get("missed_marked", 0)
@@ -204,20 +233,41 @@ def _training_lines(training: dict | None,
         else:
             lines.append("No frames labeled yet - open the Reinforcement "
                          "Learning tab in the dashboard and start tagging.")
+        if cur_auto:
+            lines.append(f"Also on file: {cur_auto} auto-labeled frame(s) "
+                         f"(approved model-assisted batches).")
     else:
         d_frames = cur_frames - prev.get("frames_labeled", 0)
+        d_auto = cur_auto - prev.get("frames_auto", 0)
         d_conf = cur_conf - prev.get("boxes_confirmed", 0)
         d_rej = cur_rej - prev.get("boxes_rejected", 0)
         d_miss = cur_miss - prev.get("missed_marked", 0)
-        if d_frames > 0 or d_conf > 0 or d_rej > 0 or d_miss > 0:
+        bulk_note = None
+        if d_frames >= 10:
+            ats = _op_ats_after(r, prev.get("sent_at"))
+            if len(ats) >= 10:
+                span = (max(ats) - min(ats)).total_seconds()
+                if span < len(ats) * 6.0:
+                    bulk_note = (
+                        f"{len(ats)} frame review(s) appeared machine-fast "
+                        f"({span/60:.0f} min for {len(ats)} frames) from an "
+                        f"unmarked process - NOT counted as your labeling. "
+                        f"Bulk labeling must go through the approval flow.")
+        if bulk_note:
+            lines.append(bulk_note)
+        elif d_frames > 0 or d_conf > 0 or d_rej > 0 or d_miss > 0:
             lines.append(f"Since the last report you labeled {d_frames} new "
                          f"frame(s) (+{d_conf} confirmed, +{d_rej} rejected, "
                          f"+{d_miss} objects added). Running total: "
                          f"{cur_frames} frames.")
-        else:
+        elif d_auto <= 0:
             lines.append(f"No new labels since the last report - "
                          f"{cur_frames} frames on file. The trainer needs "
                          f"more diverse examples before the next promotion.")
+        if d_auto > 0:
+            lines.append(f"{d_auto} auto-labeled frame(s) added after "
+                         f"operator approval. Auto-labeled total: "
+                         f"{cur_auto} frames.")
 
     prev_train = prev.get("last_training") if prev else None
     if training and training != prev_train:
@@ -642,23 +692,35 @@ def fetch_review_stats() -> dict | None:
         data = json.loads(raw.decode("utf-8"))
         frame_reviews = data.get("frame_reviews") or []
         crops = data.get("reviews") or []
-        confirmed = sum(1 for fr in frame_reviews
+        # source == "auto" marks approved model-assisted batches; everything
+        # else (including legacy rows with no source) is operator work. The
+        # operator-facing counters below deliberately cover ONLY operator
+        # rows - "you labeled" must mean the operator did.
+        op = [fr for fr in frame_reviews
+              if (fr.get("source") or "operator") == "operator"]
+        auto = [fr for fr in frame_reviews
+                if (fr.get("source") or "operator") != "operator"]
+        confirmed = sum(1 for fr in op
                         for v in (fr.get("box_verdicts") or {}).values()
                         if v == "correct")
-        rejected = sum(1 for fr in frame_reviews
+        rejected = sum(1 for fr in op
                        for v in (fr.get("box_verdicts") or {}).values()
                        if v == "wrong")
-        relabeled = sum(1 for fr in frame_reviews
+        relabeled = sum(1 for fr in op
                         for v in (fr.get("box_verdicts") or {}).values()
                         if isinstance(v, str) and v.startswith("relabel:"))
         missed = sum(len(fr.get("missed_detections") or [])
-                     for fr in frame_reviews)
-        return {"frames_labeled": len(frame_reviews),
+                     for fr in op)
+        return {"frames_labeled": len(op),
+                "frames_auto":    len(auto),
                 "crop_reviews":   len(crops),
                 "boxes_confirmed": confirmed,
                 "boxes_rejected":  rejected,
                 "boxes_relabeled": relabeled,
-                "missed_marked":  missed}
+                "missed_marked":  missed,
+                "op_reviewed_ats": sorted(str(fr.get("reviewed_at") or "")
+                                          for fr in op
+                                          if fr.get("reviewed_at"))}
     except Exception:
         return None
 
@@ -821,6 +883,7 @@ def main() -> None:
     # unsent report's numbers.
     _save_last_report({
         "frames_labeled":  (reviews or {}).get("frames_labeled", 0),
+        "frames_auto":     (reviews or {}).get("frames_auto", 0),
         "boxes_confirmed": (reviews or {}).get("boxes_confirmed", 0),
         "boxes_rejected":  (reviews or {}).get("boxes_rejected", 0),
         "missed_marked":   (reviews or {}).get("missed_marked", 0),

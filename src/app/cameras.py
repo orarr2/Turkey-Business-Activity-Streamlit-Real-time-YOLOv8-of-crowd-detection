@@ -108,12 +108,19 @@ CAMERAS = {
         # pedestrian plaza (the terminal lanes' foot points sit at
         # y 0.55-0.75). `car`/`truck` keep the left edge at 0.55 because
         # real vans do park on the bottom-LEFT apron (seen 02.08).
+        # 08.08: the canopy escaped UPWARD too - the 05:39Z loiter box
+        # bottomed out at foot y=0.786, above the 0.84 strip - so a second
+        # polygon covers the canopy's right-shoulder drift range
+        # (x>=0.75, y>=0.70; the terminal lanes on the LEFT never enter it).
         # `person` is deliberately NOT excluded: people walk in front of
         # the canopy all day.
         "roi_exclude_class": {
-            "bus":   [[[0.0, 0.84], [1.0, 0.84], [1.0, 1.0], [0.0, 1.0]]],
-            "car":   [[[0.55, 0.84], [1.0, 0.84], [1.0, 1.0], [0.55, 1.0]]],
-            "truck": [[[0.55, 0.84], [1.0, 0.84], [1.0, 1.0], [0.55, 1.0]]],
+            "bus":   [[[0.0, 0.84], [1.0, 0.84], [1.0, 1.0], [0.0, 1.0]],
+                      [[0.75, 0.70], [1.0, 0.70], [1.0, 1.0], [0.75, 1.0]]],
+            "car":   [[[0.55, 0.84], [1.0, 0.84], [1.0, 1.0], [0.55, 1.0]],
+                      [[0.75, 0.70], [1.0, 0.70], [1.0, 1.0], [0.75, 1.0]]],
+            "truck": [[[0.55, 0.84], [1.0, 0.84], [1.0, 1.0], [0.55, 1.0]],
+                      [[0.75, 0.70], [1.0, 0.70], [1.0, 1.0], [0.75, 1.0]]],
         },
     },
     "beyazit_meydan": {
@@ -196,6 +203,13 @@ CAMERAS = {
         "page": "https://istanbuluseyret.ibb.gov.tr/sarachane-yeni/",
         "embed": None,
         "type": "civic square",
+        # The camera hangs far above the Valens aqueduct junction - people on
+        # the sidewalks are ~10px tall at the global imgsz 640, and the
+        # 07-08.08 digests peaked at "2 people" while the preview showed
+        # dozens (vehicles on the near road detected fine: 11-14). Running
+        # THIS cam at 960 recovers the pedestrian half of the scene for
+        # ~2.25x its share of round compute; the other cams stay at 640.
+        "imgsz": 960,
     },
     "sultanahmet_2_yeni": {
         "name": "Sultanahmet 2 (live)",

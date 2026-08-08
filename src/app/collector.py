@@ -126,6 +126,17 @@ RETURNING_MAX_UNOBSERVED_FRAC  = 0.5
 # (the full daily budget). A vehicle that GENUINELY left and came back
 # parks with near-zero overlap; 0.35 keeps that while catching the drift.
 RETURNING_STATIC_IOU           = 0.35
+# Returning-visitor EVENTS are person-only (2026-08-08). The 07-08.08 digests
+# were owned by vehicle "returns": 39 of the day's 40 returning events were
+# car/bus/truck/bicycle - city buses on fixed routes and Istanbul's identical
+# white taxis re-match at OSNet 0.85+ every few minutes, and each pass is a
+# timetable, not an anomaly. Re-ID keeps tracking vehicles (counting, gallery,
+# regulars stats); only the saved EVENT is scoped to people.
+RETURNING_EVENT_CLASSES        = {"person"}
+# A person's box must be at least this tall (px) to claim a return. The 08.08
+# beyazit chain matched a ~60px bollard against a passing couple - OSNet
+# embeddings of sub-64px crops are upscaling artifacts, not appearance.
+RETURNING_MIN_BOX_H_PX         = 64
 
 # How many anomaly verdicts per physical camera per day is "normal operations".
 # Beyond this the collector logs a loud warning - the gates are miscalibrated
@@ -1337,8 +1348,13 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
         gates = dict(cam.get("per_class_conf") or DEFAULT_PER_CLASS_CONF)
         if night:
             gates = night_adjusted_conf(gates)
+        # Per-camera imgsz override: a camera hung far above its scene (the
+        # Sarachane aqueduct junction) loses every distant pedestrian at the
+        # global 640 - its entry may request a larger inference size without
+        # taxing the other cams' share of the round.
+        eff_imgsz = cam.get("imgsz") or imgsz
         counts, boxes, frame, burst_dbg = detect_burst(
-            model, frames, conf=cam_conf, imgsz=imgsz,
+            model, frames, conf=cam_conf, imgsz=eff_imgsz,
             roi=cam.get("roi"), roi_exclude=cam.get("roi_exclude"),
             roi_exclude_class=cam.get("roi_exclude_class"),
             line=cam.get("line"), per_class_conf=gates,
@@ -1362,7 +1378,7 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
                 flip = None
                 if ((ls_due or rf_due)
                         and os.environ.get("UNCERTAINTY_FLIP") == "1"):
-                    flip = flip_delta(model, frame, boxes, imgsz)
+                    flip = flip_delta(model, frame, boxes, eff_imgsz)
                 attach_uncertainty(boxes, gates, flip)
         except Exception as _u_err:
             print(f"[{ts}] uncertainty skipped: {_u_err}")
@@ -1432,7 +1448,10 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
                     # parked/furniture entities it exists to block. The
                     # registry now persists each entity's last box.
                     prev_box = getattr(r, "prev_box", None)
-                if save_snapshots and box is not None:
+                if (save_snapshots and box is not None
+                        and box.get("cls") in RETURNING_EVENT_CLASSES
+                        and (float(box.get("y2", 0)) - float(box.get("y1", 0))
+                             >= RETURNING_MIN_BOX_H_PX)):
                     # The obs-log scan is the expensive gate input; compute it
                     # only for entities whose gap can actually pass the cheap
                     # short_gap check (~1% of matches on a busy cam).
@@ -1730,6 +1749,40 @@ def _restore_state(firebase, slot_ids: set[str]) -> None:
             print(f"  observation log seeded for {len(obs_epochs)} cam(s)")
     except Exception as e:
         print(f"  ! observation-log restore skipped ({e})")
+    # Daily event budgets: the analysis-state FILE is authoritative only when
+    # the previous process was actually persisting budgets. A process running
+    # pre-persistence code leaves a file with none - observed 08.08: the
+    # 08:31Z deploy restart restored "0 budget cell(s)" and sarachane
+    # immediately spent a second 10/day (x20 in the midday report). Firestore
+    # holds every emitted event, so rebuild today's per-(cam, kind) counts
+    # from it and keep the LARGER of file/Firestore per cell.
+    try:
+        since = (now - dt.timedelta(hours=26)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        rebuilt: dict[tuple[str, str], int] = {}
+        for e in firebase.recent_events(since):
+            cam = str(e.get("cam_id") or "")
+            kind = str(e.get("kind") or "")
+            ts = _parse_ts(e.get("ts"))
+            if not cam or not kind or ts is None:
+                continue
+            local_day = ts.astimezone(cam_tzinfo(cam)).date().isoformat()
+            today = now.astimezone(cam_tzinfo(cam)).date().isoformat()
+            if local_day != today:
+                continue
+            rebuilt[(cam, kind)] = rebuilt.get((cam, kind), 0) + 1
+        for (cam, kind), n in rebuilt.items():
+            today = now.astimezone(cam_tzinfo(cam)).date().isoformat()
+            cell = _EVENT_DAYCOUNT.setdefault((cam, kind), [today, 0, False])
+            if cell[0] != today:
+                cell[:] = [today, n, False]
+            elif cell[1] < n:
+                cell[1] = n
+        if rebuilt:
+            print(f"  event budgets rebuilt from Firestore: "
+                  f"{sum(rebuilt.values())} event(s) in "
+                  f"{len(rebuilt)} (cam, kind) cell(s)")
+    except Exception as e:
+        print(f"  ! event-budget rebuild skipped ({e})")
 
 
 # Loiter clocks + static anchors used to be memory-only; with Restart=always

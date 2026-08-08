@@ -115,6 +115,12 @@ class FrameReview:
     missed_detections: list[dict]  # [{"cls": str, "box": [x1,y1,x2,y2]}]
     note:        str | None
     reviewed_at: str
+    # Who produced the verdicts: "operator" (dashboard clicks) or "auto"
+    # (an approved model-assisted batch). The digest counts them separately -
+    # the 08.08 midday report credited the operator with 60 frames that a
+    # script bulk-wrote in 3 minutes, and nothing in the payload could tell
+    # the difference.
+    source:      str = "operator"
 
     def to_public(self) -> dict:
         d = {"frame_path":         self.frame_path,
@@ -124,6 +130,8 @@ class FrameReview:
              "reviewed_at":        self.reviewed_at}
         if self.note:
             d["note"] = self.note
+        if self.source and self.source != "operator":
+            d["source"] = self.source
         return d
 
 
@@ -182,7 +190,8 @@ class ReviewStore:
                                        if isinstance(m, dict)
                                        and m.get("cls") and m.get("box")],
                     note=row.get("note") or None,
-                    reviewed_at=str(row.get("reviewed_at", "")))
+                    reviewed_at=str(row.get("reviewed_at", "")),
+                    source=str(row.get("source") or "operator"))
                 self._frames_by_path[fr.frame_path] = fr
             except (KeyError, TypeError):
                 continue
@@ -236,7 +245,8 @@ class ReviewStore:
     def submit_frame(self, frame_path: str, cam_id: str,
                      box_verdicts: dict[str, str],
                      missed_detections: list[dict],
-                     note: str | None = None) -> FrameReview:
+                     note: str | None = None,
+                     source: str = "operator") -> FrameReview:
         clean_bv: dict[str, str] = {}
         for k, v in (box_verdicts or {}).items():
             if valid_box_verdict(str(v)):
@@ -260,7 +270,8 @@ class ReviewStore:
             box_verdicts=clean_bv,
             missed_detections=clean_missed,
             note=(str(note) if note else None),
-            reviewed_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+            reviewed_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            source=("auto" if source == "auto" else "operator"))
         with self._lock:
             self._frames_by_path[r.frame_path] = r
             self._save_locked()
