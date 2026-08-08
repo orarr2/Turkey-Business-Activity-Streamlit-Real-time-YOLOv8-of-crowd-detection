@@ -135,9 +135,19 @@ def footfall_stats(records: list[dict]) -> list[dict]:
         spd = (r.get("speeds") or {}).get("median_kmh")
         if isinstance(spd, (int, float)) and spd > 0:
             c["_spd"].append(float(spd))
+    # Typical-speed honesty gate (2026-08-08): a pedestrian square produces a
+    # handful of garbage speed pairs a day (two far-off or misclassified
+    # "vehicles" fused across burst frames), and their median printed as
+    # "~40 km/h typical" on Beyazit's plaza. Measured on live 12h windows:
+    # a real road carries speeds on 15-40% of its samples (Sarachane 419/1058,
+    # Taksim 156/1060), noise cams carry 3-4% (Beyazit 42/1059, Sultanahmet
+    # 36/1036). Show the stat only when >= 10% of the camera's good samples
+    # (and >= 5 absolute) produced a speed; otherwise render "-".
     for c in cams.values():
         spds = sorted(c.pop("_spd"))
-        c["typ_kmh"] = spds[len(spds) // 2] if spds else 0.0
+        enough = (len(spds) >= 5
+                  and len(spds) >= 0.10 * max(1, c["samples"]))
+        c["typ_kmh"] = spds[len(spds) // 2] if (spds and enough) else 0.0
     return sorted(cams.values(), key=lambda c: c["peak_person"], reverse=True)
 
 
