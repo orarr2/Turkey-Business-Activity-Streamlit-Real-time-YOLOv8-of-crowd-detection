@@ -4,16 +4,18 @@ The cloud collector runs the same `app/collector.py` you know locally, but as a
 systemd service on a small always-on VM.
 
 > **Machine sizing — measured on this deployment:** the VM is an `e2-micro`
-> (1 GB, Always Free — $0/month). Its measured peak is **~635 MB RSS** at the
-> default `--imgsz 960` (3-frame burst), inside the shipped
-> `MemoryHigh=700M`/`MemoryMax=850M` caps. Memory peaks can vary by torch
-> build; if `journalctl -u collector` ever shows reclaim throttling or
-> oom-kill restarts (rounds of minutes, dashboard numbers frozen between
-> updates), add `--imgsz 640` to `ExecStart` in
+> (1 GB, Always Free — $0/month). The shipped unit runs
+> `--weights yolov8s.pt --imgsz 640 --burst 2 --burst-stride 13` (the
+> 2026-08-05 accuracy overhaul: `s@640` recovers the small objects `n@512`
+> lost, at ~600 MB RSS inside the `MemoryHigh`/`MemoryMax` caps). A camera
+> entry may carry its own `"imgsz"` override in `app/cameras.py` — the far
+> wide-angle Sarachane cam runs at 960 while the rest stay at 640. If
+> `journalctl -u collector` ever shows reclaim throttling or oom-kill
+> restarts (rounds of minutes, dashboard numbers frozen between updates),
+> drop back to `yolov8n.pt` in `ExecStart` in
 > `/etc/systemd/system/collector.service`, then run
-> `sudo systemctl daemon-reload && sudo systemctl restart collector` —
-> roughly half the inference memory, at the cost of small/distant-object
-> recall. Check `systemctl status collector | grep -i memory` after a day.
+> `sudo systemctl daemon-reload && sudo systemctl restart collector`.
+> Check `systemctl status collector | grep -i memory` after a day.
 
 ## Prerequisites (do these once, from the GCP Console at console.cloud.google.com)
 

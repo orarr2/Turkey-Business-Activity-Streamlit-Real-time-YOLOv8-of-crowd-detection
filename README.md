@@ -276,8 +276,11 @@ hidden logic beyond this section. Values are the shipped defaults - the CLI
 flags / `cameras.py` keys named in each table override them.
 
 **Stage 0 - what a "sample" is.** Every round (`--interval`, 40 s shipped) and
-per camera: resolve the stream → grab a burst of 3 frames ~1 s apart → YOLOv8s
-at `imgsz 640` (systemd unit) or `960` (notebook / larger hosts), confidence
+per camera: resolve the stream → grab a burst of frames (`--burst 2` shipped,
+~0.5 s apart at the stream's measured fps) → YOLOv8s
+at `imgsz 640` (systemd unit) or `960` (notebook / larger hosts) - a camera
+entry may override with its own `"imgsz"` key (the far wide-angle Sarachane
+cam runs at 960 on the VM while the rest stay at 640), confidence
 ≥ 0.30 with `person`/`car`/`bus`/`train`/`truck` re-tightened to 0.35 and
 the person-shape gate active (see aspect gates above), COCO classes
 person/bicycle/car/motorcycle/bus/train/truck → optional ROI + per-class
@@ -557,14 +560,20 @@ three opt-in layers (checkboxes in the panel / query params on the API):
   the table - deliberately a short list, the anomaly layer already taught
   us a chatty badge gets ignored.
 - **Pose** (`pose=1`, `app/pose.py`) - a second pass with `yolov8n-pose`
-  (auto-downloaded; `POSE_WEIGHTS` overrides) whose skeletons are matched
-  onto the detector's `person` boxes by IoU - a pose-person with no
-  matching detection is discarded, so counts can never change because
-  pose ran. Matched boxes gain COCO-17 keypoints (drawn on the annotated
-  frame), which unlocks the posture labels - `crouching`, `fall_suspect`
-  (torso past 60° from vertical, ≥ 2 frames) - and the gesture pass:
+  (auto-downloaded; `POSE_WEIGHTS` overrides), run **top-down since
+  2026-08-08**: each detector `person` box is cropped (25% padding, boxes
+  ≥ 40 px tall only) and the pose model sees the crop at its own
+  resolution. The previous full-frame pass handed the model ~15 px of
+  person on wide street shots and attached ZERO skeletons; the crop pass
+  finds 9/10 on the same live Taksim frame. The detector stays the source
+  of truth for WHO exists - the best pose-person inside each crop claims
+  that box, so counts can never change because pose ran. Matched boxes
+  gain COCO-17 keypoints (drawn on the annotated frame), which unlocks
+  the posture labels - `crouching`, `fall_suspect` (torso past 60° from
+  vertical with ≥ 8 px of torso, ≥ 2 frames) - and the gesture pass:
   **`hand_raised`, `both_hands_up`, `wave`** (`app/gestures.py`, a raised
-  wrist swinging across its elbow ≥ 2 times). Arm-level only, honestly:
+  wrist swinging across its elbow ≥ 2 times, deadband scaled to shoulder
+  width). Arm-level only, honestly:
   at street-cam distance a hand is a few pixels, finger-level vocabulary
   needs a close-range camera (mediapipe experiment noted in
   requirements.txt, notebook-only).
