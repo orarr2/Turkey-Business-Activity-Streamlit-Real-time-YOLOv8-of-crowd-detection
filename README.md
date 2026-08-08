@@ -312,16 +312,25 @@ removed on 2026-07-18; their verdicts had been muted by design.)
 **Layer 2 - (removed).** Kept here as a numbered placeholder so older notes
 referencing "Layer 3/4" still line up.
 
-**Layer 3 - returning visitor (came back to the scene).** For every re-ID
-match, a saved return event requires ALL of, in order: not a new entity → has
-a previous sighting → absence ≥ **5 min** (`--returning-gap-min`) → match
-similarity ≥ 0.96 → ≥ 2 prior sightings → the camera was actually SAMPLED
-during ≥ 50% of the absence (an outage/fallback blind spot is not a
-departure; observation log seeded from Firestore history on restart) → the
-entity re-appeared AWAY from its previous position (IoU < 0.5 - a parked car
-re-matching in place never "returned") → ≥ 30 min since this entity's last
-saved return. Passing all ⇒ crop + full-frame snapshot, an `events` doc, and
-an alert push.
+**Layer 3 - returning visitor (came back to the scene).** Person-only since
+2026-08-08: a city bus on a fixed route "returns" every few minutes and
+Istanbul's look-alike white taxis re-match each other constantly - 39 of that
+day's 40 return events were vehicles, which is a timetable, not an anomaly.
+Vehicles keep their re-ID identities (counting, gallery, regulars stats);
+only the saved EVENT is scoped to people. For every re-ID match, a saved
+return event requires ALL of, in order: class `person` with box height ≥
+64 px (embeddings of smaller crops are upscaling noise) → not a new entity →
+has a previous sighting → absence ≥ **5 min** (`--returning-gap-min`) →
+match similarity ≥ 0.92 (OSNet person floor; 0.96 histogram) → ≥ 2 prior
+sightings → the camera was actually SAMPLED during ≥ 50% of the absence (an
+outage/fallback blind spot is not a departure; observation log seeded from
+Firestore history on restart) → the entity re-appeared AWAY from its
+previous position (IoU < 0.35 - a parked object re-matching in place never
+"returned") → ≥ 30 min since this entity's last saved return. Passing all ⇒
+crop + full-frame snapshot, an `events` doc, and an alert push. Each
+(camera, kind) is capped at 10 events/day; the counters persist to disk AND
+are rebuilt from Firestore's own `events` on startup, so a restart can no
+longer hand a flooding camera a fresh budget (the 08.08 midday report's x20).
 
 **Layer 4 - prolonged presence / loitering.** A stay = consecutive re-ID
 matches of the same entity whose boxes overlap (IoU ≥ 0.3) with no gap longer
@@ -400,8 +409,11 @@ EMA-drifts the stored embedding toward the fresh look; otherwise a new entity
 is inserted. Two detections in one frame can never match the same entity.
 
 **Returning-visitor events** (the saved snapshot pairs under
-`snapshots/returning/`) require ALL of: absence ≥ 5 min (`--returning-gap-min`),
-similarity ≥ 0.96, ≥ 2 prior sightings, a 30-min per-entity cooldown, **and two
+`snapshots/returning/`) are person-only (2026-08-08) and require ALL of:
+class `person` at box height ≥ 64 px, absence ≥ 5 min (`--returning-gap-min`),
+similarity ≥ 0.92 (OSNet person floor; 0.96 histogram), ≥ 2 prior sightings,
+a 30-min per-entity cooldown, a 10/day per-camera budget that survives
+restarts (disk snapshot + rebuild from Firestore `events`), **and two
 authenticity guards**: the camera must have actually been sampled during most
 of the absence (an outage or fallback episode is a blind spot, not a
 departure), and the entity must re-appear away from its previous position (a
