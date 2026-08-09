@@ -126,6 +126,14 @@ RETURNING_MAX_UNOBSERVED_FRAC  = 0.5
 # (the full daily budget). A vehicle that GENUINELY left and came back
 # parks with near-zero overlap; 0.35 keeps that while catching the drift.
 RETURNING_STATIC_IOU           = 0.35
+# A return must re-appear AWAY from the previous sighting: box center moved
+# at least this multiple of the larger box dimension. The IoU gate alone
+# let fixed structures through whenever their flickering detections
+# overlapped under 0.35 - the Beyazit university-gate arch (entity #166134,
+# a 260px "person") kept "returning" for three digests because its box
+# widened/narrowed around the SAME portal. A structure's center never
+# leaves its spot; a genuine returner walks in from somewhere else.
+RETURNING_MIN_MOVE_SCALE       = 1.2
 # Returning-visitor EVENTS are person-only (2026-08-08). The 07-08.08 digests
 # were owned by vehicle "returns": 39 of the day's 40 returning events were
 # car/bus/truck/bicycle - city buses on fixed routes and Istanbul's identical
@@ -1056,6 +1064,22 @@ def _passes_returning_gates(r, gap_min_sec: float, sim_min: float,
                                               return False, "unobserved_gap"
     if box_iou(prev_box, new_box) >= static_iou:
                                               return False, "static_object"
+    if prev_box and new_box:
+        # Same-spot gate (2026-08-09): see RETURNING_MIN_MOVE_SCALE. IoU
+        # misses a structure whose flickering boxes barely overlap; the
+        # center test does not - a fixed object's center stays put while
+        # a genuine returner appears meaningfully away from where it left.
+        pcx = (float(prev_box["x1"]) + float(prev_box["x2"])) / 2.0
+        pcy = (float(prev_box["y1"]) + float(prev_box["y2"])) / 2.0
+        ncx = (float(new_box["x1"]) + float(new_box["x2"])) / 2.0
+        ncy = (float(new_box["y1"]) + float(new_box["y2"])) / 2.0
+        scale = max(float(prev_box["x2"]) - float(prev_box["x1"]),
+                    float(prev_box["y2"]) - float(prev_box["y1"]),
+                    float(new_box["x2"]) - float(new_box["x1"]),
+                    float(new_box["y2"]) - float(new_box["y1"]), 1.0)
+        moved = ((ncx - pcx) ** 2 + (ncy - pcy) ** 2) ** 0.5
+        if moved < RETURNING_MIN_MOVE_SCALE * scale:
+            return False, "same_spot"
     now  = time.time()
     last = last_save_for_eid.get(r.entity_id, 0.0)
     if now - last < cooldown_sec:             return False, "per_entity_cooldown"

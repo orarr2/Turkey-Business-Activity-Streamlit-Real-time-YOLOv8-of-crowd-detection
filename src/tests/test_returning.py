@@ -68,6 +68,19 @@ def test_first_sighting_has_no_prev_box_and_can_save():
     assert passes and why == "save"
 
 
+def test_same_spot_flicker_rejected():
+    """A fixed structure's detection flickers (narrow <-> wide around the
+    same portal) so consecutive boxes overlap UNDER the IoU bar - but the
+    center never leaves the spot. The Beyazit university-gate arch rode
+    exactly this into three digests as a 260px returning 'person'
+    (entity #166134): IoU 0.17 here slips the static_object gate, the
+    center test still kills it."""
+    arch_now = {"x1": 30, "y1": 30, "x2": 42, "y2": 150}
+    assert box_iou(BOX_A, arch_now) < 0.35        # slips the IoU gate...
+    passes, why = gates(result(), prev_box=BOX_A, new_box=arch_now)
+    assert not passes and why == "same_spot"      # ...caught by the center
+
+
 def test_box_iou_sanity():
     assert box_iou(BOX_A, BOX_A) == pytest.approx(1.0)
     assert box_iou(BOX_A, BOX_FAR) == 0.0
