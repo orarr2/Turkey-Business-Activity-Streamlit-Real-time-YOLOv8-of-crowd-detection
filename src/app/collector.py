@@ -146,6 +146,15 @@ RETURNING_EVENT_CLASSES        = {"person"}
 # embeddings of sub-64px crops are upscaling artifacts, not appearance.
 RETURNING_MIN_BOX_H_PX         = 64
 
+# fix1-A12: crowd rush - this many persons at running pace (>= 0.12 frame
+# diagonals/sec, the deep window's running bar) within ONE burst reads as a
+# scene-level event: a crowd suddenly moving fast where strolling is the
+# norm. One event per camera per cooldown; the daily event budget applies
+# on top.
+CROWD_RUSH_MIN_FAST = 4
+CROWD_RUSH_COOLDOWN_SEC = 1800.0
+_CROWD_RUSH_LAST: dict[str, float] = {}
+
 # How many anomaly verdicts per physical camera per day is "normal operations".
 # Beyond this the collector logs a loud warning - the gates are miscalibrated
 # for that scene and the operator should know before trusting the feed.
@@ -1188,10 +1197,12 @@ def _handle_loiter(firebase, alerts: AlertSink | None, slot: dict,
             print(f"  ! loiter snapshot save failed: {e}")
     minutes = loiter["duration_sec"] / 60
     fh, fw = (frame.shape[:2] if hasattr(frame, "shape") else (0, 0))
+    fall = loiter.get("fall") is True
     _emit_event(firebase, alerts, {
         "kind": "loiter", "slot": slot["slot_id"], "cam_id": cam_id, "ts": ts,
         "cls": loiter["cls"], "entity_id": loiter["entity_id"],
         "duration_sec": loiter["duration_sec"],
+        "fall_suspect": fall,
         "snapshot_url": crop_url, "fullframe_url": full_url,
         # Box coordinates + frame dimensions so the emailed report can draw
         # a red overlay on the fullframe. Without this the operator sees
@@ -1199,9 +1210,11 @@ def _handle_loiter(firebase, alerts: AlertSink | None, slot: dict,
         "box": [float(box.get("x1", 0)), float(box.get("y1", 0)),
                 float(box.get("x2", 0)), float(box.get("y2", 0))],
         "frame_w": int(fw), "frame_h": int(fh),
-    }, title=f"Prolonged presence @ {slot['display_area']}",
-       body=(f"{loiter['cls']} #{loiter['entity_id']} stationary "
-             f"for {minutes:.0f} min"),
+    }, title=(f"Possible FALL @ {slot['display_area']}" if fall
+              else f"Prolonged presence @ {slot['display_area']}"),
+       body=(f"{loiter['cls']} #{loiter['entity_id']} "
+             + ("HORIZONTAL and stationary" if fall else "stationary")
+             + f" for {minutes:.0f} min"),
        image_jpeg=crop_bytes)
     print(f"  ! LOITER {loiter['cls']} eid{loiter['entity_id']} "
           f"@ {slot['slot_id']}/{cam_id} for {minutes:.0f} min")
@@ -1209,28 +1222,34 @@ def _handle_loiter(firebase, alerts: AlertSink | None, slot: dict,
 
 def _save_static_departed_images(slot_id: str, base: str,
                                  crop_bytes: bytes | None, after_frame,
-                                 firebase) -> tuple[str | None, str | None]:
-    """Persist a static_departed event's evidence pair.
+                                 firebase,
+                                 before_bytes: bytes | None = None,
+                                 prefix: str = "static",
+                                 ) -> tuple[str | None, str | None, str | None]:
+    """Persist a static/unattended event's evidence set.
 
-    The object is GONE from the current frame, so the crop is the one the
-    watch captured at settle time (the last good look); the CURRENT frame
-    is saved alongside as the "after" shot - the empty spot."""
+    The crop is the settle-time look at the object; the CURRENT frame is
+    the "after"/"now" shot; `before_bytes` (fix1-A6) is the full SCENE at
+    settle time - the image that shows what stood where, in context."""
     after_bytes = None
     if after_frame is not None:
         okf, full_buf = cv2.imencode(".jpg", _maybe_blur(after_frame),
                                      [cv2.IMWRITE_JPEG_QUALITY, 80])
         if okf:
             after_bytes = full_buf.tobytes()
-    crop_url = after_url = None
+    crop_url = after_url = before_url = None
     if firebase.storage is not None:
         if crop_bytes:
             crop_url = firebase.upload_snapshot(
-                f"events/static/{slot_id}/{base}.jpg", crop_bytes)
+                f"events/{prefix}/{slot_id}/{base}.jpg", crop_bytes)
         if after_bytes:
             after_url = firebase.upload_snapshot(
-                f"events/static/{slot_id}/{base}_after.jpg", after_bytes)
+                f"events/{prefix}/{slot_id}/{base}_after.jpg", after_bytes)
+        if before_bytes:
+            before_url = firebase.upload_snapshot(
+                f"events/{prefix}/{slot_id}/{base}_before.jpg", before_bytes)
     else:
-        cam_dir = EVENTS_DIR / "static" / slot_id
+        cam_dir = EVENTS_DIR / prefix / slot_id
         cam_dir.mkdir(parents=True, exist_ok=True)
         rel = str(cam_dir.relative_to(SNAPSHOTS_ROOT)).replace("\\", "/")
         if crop_bytes:
@@ -1239,7 +1258,10 @@ def _save_static_departed_images(slot_id: str, base: str,
         if after_bytes:
             (cam_dir / f"{base}_after.jpg").write_bytes(after_bytes)
             after_url = f"/snapshots/{rel}/{base}_after.jpg"
-    return crop_url, after_url
+        if before_bytes:
+            (cam_dir / f"{base}_before.jpg").write_bytes(before_bytes)
+            before_url = f"/snapshots/{rel}/{base}_before.jpg"
+    return crop_url, after_url, before_url
 
 
 # A loiter candidate is FURNITURE when a settled static-watch anchor of the
@@ -1254,6 +1276,34 @@ def _save_static_departed_images(slot_id: str, base: str,
 # alerts - the first-vs-current static gate cannot catch that wander,
 # anchor age can).
 LOITER_FURNITURE_MARGIN_SEC = 240.0
+
+# fix1-A11: when FALL_CHECK=1, a person loiter event triggers ONE pose pass
+# on that person's crop (top-down, app/pose.py) and the loiter is upgraded
+# to "possible fall" when the torso reads horizontal. Lazy: the pose model
+# loads on the first such event, never in the ordinary round - person
+# loiters are rare (budgeted 10/day/cam), so the steady-state RAM cost on
+# the 1 GB VM is zero until one actually fires.
+_FALL_POSE_MODEL = None
+
+
+def _fall_check(frame, box: dict) -> bool | None:
+    """True = the loitering person's torso is horizontal (possible fall),
+    False = upright, None = pose unavailable/no verdict."""
+    global _FALL_POSE_MODEL
+    try:
+        from app.pose import attach_keypoints_crops, load_pose_model
+        from app.behavior_labels import pose_flags_of
+        if _FALL_POSE_MODEL is None:
+            _FALL_POSE_MODEL = load_pose_model()
+        probe = dict(box)
+        n = attach_keypoints_crops(_FALL_POSE_MODEL, frame, [probe],
+                                   min_box_h=32)
+        if not n or not probe.get("kps"):
+            return None
+        return "fall_suspect" in pose_flags_of(probe["kps"])
+    except Exception as e:
+        print(f"  ! fall check skipped ({type(e).__name__}: {e})")
+        return None
 
 
 def _loiter_is_furniture(static_watch, cam_id: str, loiter: dict,
@@ -1272,14 +1322,15 @@ def _loiter_is_furniture(static_watch, cam_id: str, loiter: dict,
 def _handle_static_departed(firebase, alerts: AlertSink | None, slot: dict,
                             cam_id: str, ts: str, frame, dep: dict,
                             save_snapshots: bool = True) -> None:
-    crop_url = after_url = None
+    crop_url = after_url = before_url = None
     crop_bytes = dep.get("crop_jpeg")
     if save_snapshots:
         try:
             base = (f"static_a{dep['anchor_id']:04d}_"
                     f"{int(dep['dwell_sec'])}s_{_ts_filename(ts)}")
-            crop_url, after_url = _save_static_departed_images(
-                slot["slot_id"], base, crop_bytes, frame, firebase)
+            crop_url, after_url, before_url = _save_static_departed_images(
+                slot["slot_id"], base, crop_bytes, frame, firebase,
+                before_bytes=dep.get("before_jpeg"))
         except Exception as e:
             print(f"  ! static-departed snapshot save failed: {e}")
     minutes = dep["dwell_sec"] / 60
@@ -1290,6 +1341,7 @@ def _handle_static_departed(firebase, alerts: AlertSink | None, slot: dict,
         "cam_id": cam_id, "ts": ts, "cls": dep["cls"],
         "dwell_sec": dep["dwell_sec"], "sightings": dep.get("hits"),
         "snapshot_url": crop_url, "fullframe_url": after_url,
+        "before_url": before_url,
         # Where the object USED to stand, on the "after" frame - the
         # report can circle the now-empty spot.
         "box": [float(box["x1"]), float(box["y1"]),
@@ -1300,6 +1352,43 @@ def _handle_static_departed(firebase, alerts: AlertSink | None, slot: dict,
        image_jpeg=crop_bytes)
     print(f"  ! STATIC-DEPARTED {dep['cls']} a{dep['anchor_id']} "
           f"@ {slot['slot_id']}/{cam_id} after {minutes:.0f} min")
+
+
+def _handle_unattended(firebase, alerts: AlertSink | None, slot: dict,
+                       cam_id: str, ts: str, frame, ev: dict,
+                       save_snapshots: bool = True) -> None:
+    """fix1-A1: a bag-class anchor settled with no person nearby. The
+    evidence set: settle-time scene (before, the bag in context), the
+    bag's crop, and the CURRENT frame (the bag still there, boxed)."""
+    crop_url = now_url = before_url = None
+    crop_bytes = ev.get("crop_jpeg")
+    if save_snapshots:
+        try:
+            base = (f"unattended_a{ev['anchor_id']:04d}_"
+                    f"{int(ev['dwell_sec'])}s_{_ts_filename(ts)}")
+            crop_url, now_url, before_url = _save_static_departed_images(
+                slot["slot_id"], base, crop_bytes, frame, firebase,
+                before_bytes=ev.get("before_jpeg"), prefix="unattended")
+        except Exception as e:
+            print(f"  ! unattended snapshot save failed: {e}")
+    minutes = ev["dwell_sec"] / 60
+    fh, fw = (frame.shape[:2] if hasattr(frame, "shape") else (0, 0))
+    box = ev["box"]
+    _emit_event(firebase, alerts, {
+        "kind": "unattended_object", "slot": slot["slot_id"],
+        "cam_id": cam_id, "ts": ts, "cls": ev["cls"],
+        "dwell_sec": ev["dwell_sec"], "sightings": ev.get("hits"),
+        "snapshot_url": crop_url, "fullframe_url": now_url,
+        "before_url": before_url,
+        "box": [float(box["x1"]), float(box["y1"]),
+                float(box["x2"]), float(box["y2"])],
+        "frame_w": int(fw), "frame_h": int(fh),
+    }, title=f"Unattended {ev['cls']} @ {slot['display_area']}",
+       body=(f"{ev['cls']} standing alone for {minutes:.0f} min - "
+             f"no person nearby"),
+       image_jpeg=crop_bytes)
+    print(f"  ! UNATTENDED {ev['cls']} a{ev['anchor_id']} "
+          f"@ {slot['slot_id']}/{cam_id} for {minutes:.0f} min")
 
 
 def sample_slot(model, slot: dict, cam_id: str, firebase,
@@ -1447,17 +1536,63 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
         # fake a departure; dark frames and scene wipes are guarded inside.
         try:
             if static_watch is not None:
+                _persons = [b for b in boxes if b.get("cls") == "person"]
                 for _dep in static_watch.observe(cam_id, boxes, frame.shape,
-                                                 luma=luma, frame=frame):
+                                                 luma=luma, frame=frame,
+                                                 person_boxes=_persons):
                     _pseudo = dict(_dep["box"], cls=_dep["cls"],
                                    conf=_dep["conf_median"])
-                    if _event_evidence_ok(_pseudo, "static_departed",
-                                          cam_id):
+                    _kind = _dep.get("kind") or "static_departed"
+                    if not _event_evidence_ok(_pseudo, _kind, cam_id):
+                        continue
+                    if _kind == "unattended_object":
+                        _handle_unattended(
+                            firebase, alerts, slot, cam_id, ts, frame,
+                            _dep, save_snapshots=save_snapshots)
+                    else:
                         _handle_static_departed(
                             firebase, alerts, slot, cam_id, ts, frame,
                             _dep, save_snapshots=save_snapshots)
         except Exception as _sw_err:
             print(f"[{ts}] static watch skipped: {_sw_err}")
+        # fix1-A12: crowd rush from the burst's own person tracks.
+        try:
+            _rush = (burst_dbg or {}).get("rush") or {}
+            if _rush.get("fast_persons", 0) >= CROWD_RUSH_MIN_FAST:
+                _now_r = time.time()
+                if (_now_r - _CROWD_RUSH_LAST.get(cam_id, 0.0)
+                        >= CROWD_RUSH_COOLDOWN_SEC
+                        and _event_evidence_ok({"cls": "person", "conf": 1.0},
+                                               "crowd_rush", cam_id)):
+                    _CROWD_RUSH_LAST[cam_id] = _now_r
+                    rush_url = None
+                    if save_snapshots:
+                        try:
+                            okr, rbuf = cv2.imencode(
+                                ".jpg", _maybe_blur(frame),
+                                [cv2.IMWRITE_JPEG_QUALITY, 80])
+                            if okr and firebase.storage is not None:
+                                rush_url = firebase.upload_snapshot(
+                                    f"events/rush/{slot_id}/"
+                                    f"{_ts_filename(ts)}.jpg",
+                                    rbuf.tobytes())
+                        except Exception as _re:
+                            print(f"  ! rush snapshot save failed: {_re}")
+                    fh_, fw_ = frame.shape[:2]
+                    _emit_event(firebase, alerts, {
+                        "kind": "crowd_rush", "slot": slot_id,
+                        "cam_id": cam_id, "ts": ts,
+                        "fast_persons": _rush.get("fast_persons"),
+                        "tracked_persons": _rush.get("tracked_persons"),
+                        "snapshot_url": rush_url, "fullframe_url": rush_url,
+                        "frame_w": int(fw_), "frame_h": int(fh_),
+                    }, title=f"Crowd rush @ {slot['display_area']}",
+                       body=(f"{_rush.get('fast_persons')} people moving at "
+                             f"running pace simultaneously"))
+                    print(f"  ! CROWD RUSH {_rush.get('fast_persons')} "
+                          f"runners @ {slot_id}/{cam_id}")
+        except Exception as _cr_err:
+            print(f"[{ts}] crowd-rush check skipped: {_cr_err}")
         if reid is not None and boxes:
             results = reid.update_from_frame(cam_id, frame, boxes)
             for r in results:
@@ -1555,6 +1690,10 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
                               f"@ {cam_id} - a settled static anchor predates "
                               f"the stay")
                         loiter = None
+                    if (loiter is not None
+                            and box.get("cls") == "person"
+                            and os.environ.get("FALL_CHECK") == "1"):
+                        loiter["fall"] = _fall_check(frame, box)
                     if loiter is not None:
                         _handle_loiter(firebase, alerts, slot, cam_id, ts,
                                        frame, box, loiter,
@@ -2102,8 +2241,13 @@ def main() -> None:
             _stay_s = float(os.environ.get("STATIC_MIN_STAY_SEC") or 300)
         except ValueError:
             _stay_s = 300.0
+        # Bag classes fire an unattended-object event at SETTLE time (fix1-A1);
+        # they only exist when EXTRA_CLASSES enables them - with the stock
+        # seven classes the tuple is inert.
         static_watch = StaticWatch(min_stay_sec=_stay_s,
-                                   evidence_gates=DEFAULT_PER_CLASS_CONF)
+                                   evidence_gates=DEFAULT_PER_CLASS_CONF,
+                                   unattended_classes=("backpack", "handbag",
+                                                       "suitcase"))
         print(f"static watch: on (settle >= {_stay_s:.0f}s; "
               "STATIC_WATCH=0 to disable)")
 

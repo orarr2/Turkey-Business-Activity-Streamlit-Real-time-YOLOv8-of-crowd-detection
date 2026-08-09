@@ -59,7 +59,16 @@ KIND_LABELS = {
     "loiter":            "Loitering",
     "returning":         "Returning visitor",
     "static_departed":   "Static object left",
+    "unattended_object": "Unattended object",
+    "crowd_rush":        "Crowd rush",
 }
+
+# The seven-class business set + the aggregate; anything else in a sample's
+# counts dict is an EXTRA_CLASSES addition (birds, bags, umbrellas...) and
+# gets its own compact "other objects" line under the peaks table (fix1-A5)
+# - without it the extras are counted but invisible in the report.
+_BASE_COUNT_KEYS = {"person", "bicycle", "car", "motorcycle", "bus",
+                    "train", "truck", "vehicles"}
 
 
 def _israel_now() -> dt.datetime:
@@ -113,7 +122,9 @@ def footfall_stats(records: list[dict]) -> list[dict]:
                                   "samples": 0, "misses": 0,
                                   "peak_person": 0, "peak_person_ts": "",
                                   "peak_vehicles": 0, "typ_kmh": 0.0,
-                                  "_spd": []})
+                                  "extra_peaks": {},
+                                  "cross_in": 0, "cross_out": 0,
+                                  "has_line": False, "_spd": []})
         p = r.get("person")
         v = r.get("vehicles")
         # A "sample" is a round that actually produced usable frames. A MISS
@@ -132,6 +143,17 @@ def footfall_stats(records: list[dict]) -> list[dict]:
             c["peak_person_ts"] = str(r.get("ts") or "")
         if isinstance(v, (int, float)) and v > c["peak_vehicles"]:
             c["peak_vehicles"] = int(v)
+        for cls, n in (r.get("counts") or {}).items():
+            if (cls not in _BASE_COUNT_KEYS
+                    and isinstance(n, (int, float)) and n > 0
+                    and n > c["extra_peaks"].get(cls, 0)):
+                c["extra_peaks"][cls] = int(n)
+        # fix1-A10: per-window flow totals for cameras with a counting line.
+        cr = r.get("crossings")
+        if isinstance(cr, dict):
+            c["has_line"] = True
+            c["cross_in"] += int(cr.get("in") or 0)
+            c["cross_out"] += int(cr.get("out") or 0)
         spd = (r.get("speeds") or {}).get("median_kmh")
         if isinstance(spd, (int, float)) and spd > 0:
             c["_spd"].append(float(spd))
@@ -490,24 +512,45 @@ def compose_digest(now_il: dt.datetime, window_hours: int,
         html.append(f"<h3 style='margin:14px 0 6px'>{title}</h3>")
         html.append("<table cellpadding='4' style='border-collapse:collapse'>"
                     "<tr><th align='left'>Camera</th><th>Peak people</th>"
-                    "<th>Peak vehicles</th><th>Typical traffic</th></tr>")
+                    "<th>Peak vehicles</th><th>Typical traffic</th>"
+                    "<th>Crossings in/out</th></tr>")
         for c in rows:
             when = f" at {_fmt_ts(c['peak_person_ts'])}" if c["peak_person_ts"] else ""
             spd = (f"~{c['typ_kmh']:.0f} km/h typical"
                    if c["typ_kmh"] > 0 else "-")
+            cross = (f"{c.get('cross_in', 0)} / {c.get('cross_out', 0)}"
+                     if c.get("has_line") else "-")
             lines.append(f"  - {c['cam']}: up to {c['peak_person']} people{when}, "
-                         f"up to {c['peak_vehicles']} vehicles, {spd}")
+                         f"up to {c['peak_vehicles']} vehicles, {spd}"
+                         + (f", crossings in/out {cross}"
+                            if c.get("has_line") else ""))
             html.append(f"<tr><td>{c['cam']}</td>"
                         f"<td align='center'>{c['peak_person']}{when}</td>"
                         f"<td align='center'>{c['peak_vehicles']}</td>"
-                        f"<td align='center'>{spd}</td></tr>")
+                        f"<td align='center'>{spd}</td>"
+                        f"<td align='center'>{cross}</td></tr>")
         html.append("</table>")
+
+    def _extras_note(rows):
+        parts = []
+        for c in rows:
+            ep = c.get("extra_peaks") or {}
+            if ep:
+                inner = ", ".join(f"{cls} {n}" for cls, n in
+                                  sorted(ep.items(), key=lambda kv: -kv[1]))
+                parts.append(f"{c['cam']}: {inner}")
+        if parts:
+            note = "Other objects (window peaks) - " + "; ".join(parts)
+            lines.append("  " + note)
+            html.append(f"<p style='color:#475569;font-size:13px'>{note}</p>")
 
     if act_rows:
         _peaks_table(act_rows, f"Activity peaks - {label}")
+        _extras_note(act_rows)
     if other_rows:
         _peaks_table(other_rows,
                      "Earlier in this window (before the grid settled here)")
+        _extras_note(other_rows)
     if not visible:
         lines.append("Activity peaks:")
         lines.append("  No footfall samples in this window - check the VM journal.")

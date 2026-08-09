@@ -53,6 +53,15 @@ STATIC_MAX_ANCHORS = 60       # per camera - a packed lot stays bounded
 SCENE_WIPE_MIN = 2            # a wipe needs at least this many settled...
 SCENE_WIPE_FRAC = 0.5         # ...and >= this fraction gone at once
 DARK_LUMA = 40.0              # below this the frame can't testify
+# Unattended-object gate (fix1-A1): a bag-class anchor that settles emits
+# an event ONLY when no person stands near it - a bag at its owner's feet
+# is luggage, not a threat. "Near" = a person foot point within this
+# multiple of the bag's larger dimension from the bag's center.
+UNATTENDED_PERSON_DIST_SCALE = 2.0
+# Scene frames captured at settle time (fix1-A6) are memory-only evidence
+# (settled anchors are bounded by STATIC_MAX_ANCHORS); downscale to keep
+# the worst case a few MB per camera.
+BEFORE_FRAME_MAX_W = 960
 
 
 class StaticWatch:
@@ -66,7 +75,8 @@ class StaticWatch:
                  evidence_gates: dict | None = None,
                  dark_luma: float = DARK_LUMA,
                  max_anchors: int = STATIC_MAX_ANCHORS,
-                 skip_classes: tuple = ("person",)):
+                 skip_classes: tuple = ("person",),
+                 unattended_classes: tuple = ()):
         self.min_stay_sec = min_stay_sec
         self.match_iou = match_iou
         self.min_hits = min_hits
@@ -83,6 +93,9 @@ class StaticWatch:
         # 07.08 Bulancak digest carried 15 such person "departures" in one
         # afternoon. People-dwelling is the loiter path's job.
         self.skip_classes = tuple(skip_classes or ())
+        # Classes whose SETTLING (not departing) is itself the event - an
+        # unattended bag. Empty tuple = the pre-fix1 behavior, byte for byte.
+        self.unattended_classes = tuple(unattended_classes or ())
         self._anchors: dict[str, list[dict]] = {}
         self._next_id = 1
 
@@ -98,6 +111,42 @@ class StaticWatch:
             if med < float(self.evidence_gates.get(a["cls"], 0.35)):
                 return False
         return True
+
+    @staticmethod
+    def _full_jpeg(frame, max_w: int = BEFORE_FRAME_MAX_W) -> bytes | None:
+        """Downscaled full-scene JPEG captured at settle time - the
+        "before" evidence a departure/unattended card shows (fix1-A6).
+        Memory-only: not persisted to the analysis-state snapshot (a
+        restart degrades the card to the old crop-only layout)."""
+        if frame is None:
+            return None
+        try:
+            import cv2
+            H, W = frame.shape[:2]
+            img = frame
+            if W > max_w:
+                img = cv2.resize(frame, (max_w, int(H * max_w / W)))
+            ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 72])
+            return buf.tobytes() if ok else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _person_nearby(box: dict, person_boxes: list[dict] | None,
+                       scale: float = UNATTENDED_PERSON_DIST_SCALE) -> bool:
+        """Is any person's foot point within `scale` x the object's larger
+        dimension of the object's center? Owner-nearby = not unattended."""
+        if not person_boxes:
+            return False
+        cx = (box["x1"] + box["x2"]) / 2.0
+        cy = (box["y1"] + box["y2"]) / 2.0
+        reach = scale * max(box["x2"] - box["x1"], box["y2"] - box["y1"], 1.0)
+        for p in person_boxes:
+            fx = (float(p["x1"]) + float(p["x2"])) / 2.0
+            fy = float(p["y2"])
+            if ((fx - cx) ** 2 + (fy - cy) ** 2) ** 0.5 <= reach:
+                return True
+        return False
 
     @staticmethod
     def _crop_jpeg(frame, box: dict) -> bytes | None:
@@ -122,8 +171,13 @@ class StaticWatch:
 
     def observe(self, cam_id: str, boxes: list[dict], frame_shape,
                 luma: float | None = None, frame=None,
-                now: float | None = None) -> list[dict]:
-        """One successful sample. Returns `static_departed` event dicts."""
+                now: float | None = None,
+                person_boxes: list[dict] | None = None) -> list[dict]:
+        """One successful sample. Returns event dicts - `static_departed`
+        for settled anchors that vanished, `unattended_object` for
+        bag-class anchors that settled with no person nearby
+        (`person_boxes` = the sample's person detections, which observe
+        itself never anchors)."""
         now = time.time() if now is None else now
         if self.skip_classes:
             boxes = [b for b in boxes
@@ -163,6 +217,9 @@ class StaticWatch:
                 a["settled"] = True
                 a["settle_ts"] = now
                 a["crop_jpeg"] = self._crop_jpeg(frame, a["box"])
+                a["before_jpeg"] = self._full_jpeg(frame)
+                if a["cls"] in self.unattended_classes:
+                    a["unattended_pending"] = True
 
         # New candidates from unmatched detections. Anchors born this very
         # sample sit at index >= n_before and are exempt from this sample's
@@ -181,8 +238,33 @@ class StaticWatch:
             })
             self._next_id += 1
 
-        # Miss accounting. A dark frame can't testify about absence.
         events: list[dict] = []
+        # Unattended objects (fix1-A1): a settled bag-class anchor fires
+        # once, the first sample where NO person stands near it. While the
+        # owner lingers the anchor stays pending; if the bag departs first,
+        # the pending flag simply dies with it.
+        for a in anchors:
+            if not a.get("unattended_pending"):
+                continue
+            if self._person_nearby(a["box"], person_boxes):
+                continue
+            a["unattended_pending"] = False
+            confs = sorted(a["confs"])
+            events.append({
+                "kind": "unattended_object",
+                "cls": a["cls"],
+                "anchor_id": a["id"],
+                "box": dict(a["box"]),
+                "dwell_sec": round(now - a["first_ts"], 1),
+                "first_ts": a["first_ts"],
+                "settle_ts": a["settle_ts"],
+                "hits": a["hits"],
+                "conf_median": confs[len(confs) // 2] if confs else 0.0,
+                "crop_jpeg": a["crop_jpeg"],
+                "before_jpeg": a.get("before_jpeg"),
+            })
+
+        # Miss accounting. A dark frame can't testify about absence.
         dark = luma is not None and luma < self.dark_luma
         settled_ids = [a["id"] for a in anchors if a["settled"]]
         settled_missed = [a["id"] for ai, a in enumerate(anchors[:n_before])
@@ -212,6 +294,7 @@ class StaticWatch:
                         "conf_median": (confs[len(confs) // 2]
                                         if confs else 0.0),
                         "crop_jpeg": a["crop_jpeg"],
+                        "before_jpeg": a.get("before_jpeg"),
                     })
                     continue                       # departed: retire
                 if not a["settled"] and a["misses"] >= self.depart_misses:
@@ -255,6 +338,7 @@ class StaticWatch:
             for a in anchors:
                 d = dict(a)
                 crop = d.pop("crop_jpeg", None)
+                d.pop("before_jpeg", None)   # scene frames are memory-only
                 if crop and len(crop) <= self._STATE_CROP_MAX_B:
                     d["crop_b64"] = base64.b64encode(crop).decode("ascii")
                 rows.append(d)

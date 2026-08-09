@@ -31,6 +31,15 @@ EnvironmentFile=-/etc/turkey-footfall/proxy.env
 # the model - it's a one-shot ~5 MB download and safe to skip if you're
 # happy with the color-signature baseline.
 Environment=REID_MODEL=__INSTALL_DIR__/src/data/osnet_x0_25_msmt17.onnx
+# fix1 (2026-08-09): opt-in extra COCO classes - bags feed the
+# unattended-object watch, animals and cafe parasols get their own counts
+# ("other objects" line in the report). Detection-only: never the training
+# chain. Night gates apply automatically (night_adjusted_conf is generic).
+Environment=EXTRA_CLASSES=bird:0.35,dog:0.35,cat:0.40,backpack:0.35,handbag:0.40,suitcase:0.35,umbrella:0.35
+# fix1-A11: a person loiter event triggers ONE pose pass on that person's
+# crop; horizontal torso upgrades the alert to "Possible FALL". Lazy-loaded
+# on first use only - person loiters are budgeted 10/day/cam.
+Environment=FALL_CHECK=1
 ExecStart=__INSTALL_DIR__/src/.venv/bin/python -m app.collector --weights yolov8s.pt --interval 40 --imgsz 640 --burst 2 --burst-stride 13
 # --weights yolov8s.pt --imgsz 640 (2026-08-05, measured on the live VM):
 #   * the nano@512 era (below) was an OOM fix from the 5-camera + burst-3

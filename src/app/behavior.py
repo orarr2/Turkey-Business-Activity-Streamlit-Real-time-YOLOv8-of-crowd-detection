@@ -79,6 +79,14 @@ STATIONARY_NET_FRAC = 0.02
 _DIRECTIONS = ("right", "down-right", "down", "down-left",
                "left", "up-left", "up", "up-right")
 
+# fix1-B: the analysis-picker layers. The dashboard lets the operator pick
+# up to four; each renders as its own tile from ONE shared detection (and,
+# when needed, pose) pass - selection changes what is DRAWN, never what
+# was computed.
+ANALYSIS_LAYERS = ("paths", "pose", "gestures", "body", "faces", "heat")
+MAX_ANALYSIS_LAYERS = 4
+_POSE_LAYERS = {"pose", "gestures", "body"}
+
 
 def _foot(b: dict) -> tuple[float, float]:
     return (b["x1"] + b["x2"]) / 2.0, b["y2"]
@@ -227,19 +235,29 @@ def render_window(frames, tracks: list[Track], stats: list[dict] | None = None,
     return out
 
 
-def _draw_label_chips(out, last_boxes: list[dict], stats: list[dict]) -> None:
+def _draw_label_chips(out, last_boxes: list[dict], stats: list[dict],
+                      text_of=None) -> None:
     """Behavior verdict under each surviving individual's box - the demo
-    convention (a colored chip with the label), red when alerting."""
+    convention (a colored chip with the label), red when alerting.
+    `text_of(stats_row) -> str | None` overrides the chip text (the
+    gestures layer shows only gestures, the body layer only the label)."""
     import cv2
 
+    def _default_text(s):
+        txt = s.get("label") or ""
+        if s.get("gestures"):
+            txt += " +" + "+".join(s["gestures"])
+        return txt or None
+
+    text_of = text_of or _default_text
     by_id = {s.get("id"): s for s in stats}
     for b in last_boxes:
         s = by_id.get(b.get("track_id"))
-        if not s or not s.get("label"):
+        if not s:
             continue
-        txt = s["label"]
-        if s.get("gestures"):
-            txt += " +" + "+".join(s["gestures"])
+        txt = text_of(s)
+        if not txt:
+            continue
         color = (0, 0, 220) if s.get("alert") else (90, 90, 90)
         x1, y2 = int(b["x1"]), int(b["y2"])
         (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
@@ -248,6 +266,73 @@ def _draw_label_chips(out, last_boxes: list[dict], stats: list[dict]) -> None:
         cv2.putText(out, txt, (x1 + 3, y2 + th + 4),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1,
                     cv2.LINE_AA)
+
+
+def render_layer(frames, tracks: list[Track], stats: list[dict],
+                 layer: str, faces: list[dict] | None = None,
+                 cam_id: str | None = None):
+    """One analysis-picker tile: the final frame annotated with exactly one
+    layer's information. The heavy work (detection, tracking, pose) was
+    already done by analyze_window - this only draws."""
+    import cv2
+
+    last_boxes = _boxes_of_last_frame(tracks)
+
+    if layer == "heat":
+        # The VM publishes its live dwell overlay to Storage continuously
+        # (snapshots/heatmaps/<cam>.jpg) - that is THE production heat
+        # signature. Fall back to rendering the local accumulation onto
+        # the current frame when the download fails (offline/notebook).
+        try:
+            from app.pool_sync import _bucket_name, _http_get
+            import numpy as np
+            b = _bucket_name()
+            if b:
+                raw = _http_get(f"https://storage.googleapis.com/{b}"
+                                f"/snapshots/heatmaps/{cam_id}.jpg"
+                                f"?t={int(time.time())}")
+                img = cv2.imdecode(np.frombuffer(raw, np.uint8),
+                                   cv2.IMREAD_COLOR)
+                if img is not None:
+                    return img
+        except Exception:
+            pass
+        from app.heatmap import render as _hm_render
+        return _hm_render(cam_id or "?", base_frame=frames[-1])
+
+    out = frames[-1].copy()
+    if layer == "paths":
+        for tr in tracks:
+            color = _TRAIL_COLORS[(tr.tid - 1) % len(_TRAIL_COLORS)]
+            pts = [(int(cx), int(cy))
+                   for cx, cy in (_centroid(b) for b in tr.boxes)]
+            for p0, p1 in zip(pts, pts[1:]):
+                cv2.line(out, p0, p1, color, 2, cv2.LINE_AA)
+            if pts:
+                cv2.circle(out, pts[0], 4, color, -1, cv2.LINE_AA)
+        return draw_boxes(out, last_boxes)
+
+    out = draw_boxes(out, last_boxes)
+    if layer == "pose":
+        from app.pose import draw_skeleton
+        return draw_skeleton(out, last_boxes)
+    if layer == "gestures":
+        from app.pose import draw_skeleton
+        out = draw_skeleton(out, last_boxes)
+        _draw_label_chips(out, last_boxes, stats,
+                          text_of=lambda s: "+".join(s.get("gestures") or [])
+                          or None)
+        return out
+    if layer == "body":
+        _draw_label_chips(out, last_boxes, stats,
+                          text_of=lambda s: s.get("label"))
+        return out
+    if layer == "faces":
+        if faces:
+            from app.faces import draw_faces
+            out = draw_faces(out, faces)
+        return out
+    return out
 
 
 def _draw_target_lock(out, lock: dict) -> None:
@@ -334,7 +419,8 @@ def analyze_window(cam_id: str, model,
                    frames=None,
                    pose: bool = False,
                    lock: str | None = None,
-                   want_faces: bool = False) -> dict:
+                   want_faces: bool = False,
+                   layers: list[str] | None = None) -> dict:
     """Grab a window from `cam_id`, profile every individual in it.
 
     `frames` overrides the live grab (tests / offline replays feed frames
@@ -367,6 +453,14 @@ def analyze_window(cam_id: str, model,
     # Optional pose pass: attach keypoints to the person boxes BEFORE the
     # tracker threads them - the tracker keeps the same dicts, so every
     # track's box history carries its skeletons for free.
+    # fix1-B: layer selection implies its inputs - pose layers need the
+    # keypoint pass, the faces layer needs the face detector.
+    layers = [l for l in (layers or []) if l in ANALYSIS_LAYERS]
+    layers = layers[:MAX_ANALYSIS_LAYERS]
+    if layers:
+        pose = pose or any(l in _POSE_LAYERS for l in layers)
+        want_faces = want_faces or "faces" in layers
+
     pose_persons = 0
     if pose:
         # Top-down (per-crop) pose: the full-frame pass at window imgsz saw
@@ -442,13 +536,35 @@ def analyze_window(cam_id: str, model,
         BEHAVIOR_DIR.mkdir(parents=True, exist_ok=True)
         stem = (f"{cam_id}_"
                 f"{time.strftime('%Y%m%d_%H%M%S', time.gmtime())}")
-        annotated = render_window(frames, tracks, stats=stats,
-                                  lock=lock_info, faces=faces_list or None)
-        okj, buf = cv2.imencode(".jpg", annotated,
-                                [cv2.IMWRITE_JPEG_QUALITY, 85])
-        if okj:
-            (BEHAVIOR_DIR / f"{stem}.jpg").write_bytes(buf.tobytes())
-            result["image_url"] = f"/snapshots/behavior/{stem}.jpg"
+        if layers:
+            # fix1-B: one tile per selected layer, all drawn from the same
+            # already-computed pass.
+            layer_urls: dict[str, str] = {}
+            for layer in layers:
+                try:
+                    img = render_layer(frames, tracks, stats, layer,
+                                       faces=faces_list or None,
+                                       cam_id=cam_id)
+                    okj, buf = cv2.imencode(".jpg", img,
+                                            [cv2.IMWRITE_JPEG_QUALITY, 85])
+                    if okj:
+                        fn = f"{stem}_{layer}.jpg"
+                        (BEHAVIOR_DIR / fn).write_bytes(buf.tobytes())
+                        layer_urls[layer] = f"/snapshots/behavior/{fn}"
+                except Exception as _le:
+                    print(f"analyze_window: layer {layer!r} skipped "
+                          f"({type(_le).__name__}: {_le})")
+            result["layers"] = layers
+            result["layer_images"] = layer_urls
+        else:
+            annotated = render_window(frames, tracks, stats=stats,
+                                      lock=lock_info,
+                                      faces=faces_list or None)
+            okj, buf = cv2.imencode(".jpg", annotated,
+                                    [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if okj:
+                (BEHAVIOR_DIR / f"{stem}.jpg").write_bytes(buf.tobytes())
+                result["image_url"] = f"/snapshots/behavior/{stem}.jpg"
         (BEHAVIOR_DIR / f"{stem}.json").write_text(
             json.dumps(result, indent=1), encoding="utf-8")
         result["json_url"] = f"/snapshots/behavior/{stem}.json"

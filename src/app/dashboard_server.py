@@ -472,6 +472,12 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         pose = _one("pose", int, 0, 0, 1) == 1
         want_faces = _one("faces", int, 0, 0, 1) == 1
         lock = (q.get("lock") or [None])[0] or None
+        # fix1-B: the analysis picker - up to MAX_ANALYSIS_LAYERS comma-
+        # separated layer names; unknown names are dropped, extras beyond
+        # the cap are ignored (validated again inside analyze_window).
+        layers_raw = (q.get("layers") or [""])[0]
+        layers = [l.strip() for l in layers_raw.split(",") if l.strip()] \
+            if layers_raw else None
 
         state = _VISUAL_SEARCH.get()
         if state.model is None:
@@ -487,7 +493,8 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             result = analyze_window(cam, state.model, n_frames=n_frames,
                                     stride=stride, imgsz=imgsz,
                                     pose=pose, lock=lock,
-                                    want_faces=want_faces)
+                                    want_faces=want_faces,
+                                    layers=layers)
             self._send_json(200, result)
         except ValueError as e:
             self._send_json(404, {"error": str(e)})

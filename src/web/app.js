@@ -128,6 +128,8 @@ for (const slot of GRID_SLOTS) {
         <div class="city" data-cam-area>${escapeHtml(slot.display_area)}</div>
       </div>
       <div class="tile-head-right">
+        <button class="analyze-btn" data-analyze title="ניתוח מתקדם - בחירת שכבות"
+                style="cursor:pointer;border:1px solid #334155;background:#1e293b;color:#e2e8f0;border-radius:6px;padding:2px 8px;font-size:13px">🔬</button>
         <span class="activity-badge act-unknown" data-activity>
           <span class="dot"></span><span data-activity-text>-/10</span>
         </span>
@@ -196,6 +198,153 @@ for (const slot of GRID_SLOTS) {
     { active_hls: slot.placeholder_hls, active_embed: slot.placeholder_embed,
       active_page: slot.placeholder_page },
     slot);
+  tile.querySelector("[data-analyze]").addEventListener("click", () =>
+    openAnalysisPicker(tileState[slot.slot_id]));
+}
+
+// ---------- 1c. fix1-B: advanced-analysis picker ------------------------------
+// The operator picks up to four analysis layers for ONE camera; the live
+// grid MORPHS into the analysis tiles (never two grids at once) and the
+// back button restores the live view.
+const ANALYSIS_LAYER_DEFS = [
+  ["heat",     "חתימת חום"],
+  ["paths",    "מסלולים ומהירויות"],
+  ["pose",     "תנוחה ושלד"],
+  ["gestures", "מחוות ידיים"],
+  ["body",     "אנומליות גוף"],
+  ["faces",    "זיהוי פנים"],
+];
+const MAX_ANALYSIS_LAYERS = 4;
+
+const analysisPanel = document.createElement("div");
+analysisPanel.dir = "rtl";
+analysisPanel.style.cssText =
+  "display:none;position:fixed;inset:0;z-index:60;background:rgba(2,6,23,.72);" +
+  "align-items:center;justify-content:center";
+analysisPanel.innerHTML = `
+  <div style="background:#0f172a;border:1px solid #334155;border-radius:12px;
+              padding:20px 22px;max-width:420px;width:92%;color:#e2e8f0;
+              font-size:15px">
+    <h3 style="margin:0 0 4px;font-size:17px">ניתוח מתקדם -
+      <span data-an-cam></span></h3>
+    <div style="color:#94a3b8;font-size:13px;margin-bottom:12px">
+      בחר עד ${MAX_ANALYSIS_LAYERS} שכבות ניתוח; הגריד הראשי יוחלף בתוצאה</div>
+    <div data-an-boxes style="display:grid;grid-template-columns:1fr 1fr;
+         gap:8px 14px;margin-bottom:14px"></div>
+    <div data-an-err style="color:#f87171;font-size:13px;min-height:18px"></div>
+    <div style="display:flex;gap:10px;justify-content:flex-start">
+      <button data-an-run style="cursor:pointer;background:#2563eb;border:0;
+              color:#fff;border-radius:8px;padding:7px 18px;font-size:14px">
+        נתח עכשיו</button>
+      <button data-an-cancel style="cursor:pointer;background:#1e293b;
+              border:1px solid #334155;color:#e2e8f0;border-radius:8px;
+              padding:7px 14px;font-size:14px">ביטול</button>
+    </div>
+  </div>`;
+document.body.appendChild(analysisPanel);
+
+const analysisView = document.createElement("section");
+analysisView.dir = "rtl";
+analysisView.style.cssText = "display:none";
+document.body.appendChild(analysisView);
+
+const _anBoxes = analysisPanel.querySelector("[data-an-boxes]");
+for (const [key, label] of ANALYSIS_LAYER_DEFS) {
+  const lab = document.createElement("label");
+  lab.style.cssText = "display:flex;gap:7px;align-items:center;cursor:pointer";
+  lab.innerHTML = `<input type="checkbox" value="${key}"> ${label}`;
+  _anBoxes.appendChild(lab);
+}
+_anBoxes.addEventListener("change", () => {
+  const checked = _anBoxes.querySelectorAll("input:checked").length;
+  for (const cb of _anBoxes.querySelectorAll("input"))
+    cb.disabled = !cb.checked && checked >= MAX_ANALYSIS_LAYERS;
+});
+
+let _anTarget = null;   // tileState entry the picker is open for
+
+function openAnalysisPicker(st) {
+  _anTarget = st;
+  analysisPanel.querySelector("[data-an-cam]").textContent =
+    st.camNameEl.textContent || st.slot.display_area;
+  analysisPanel.querySelector("[data-an-err]").textContent = "";
+  analysisPanel.style.display = "flex";
+}
+
+analysisPanel.querySelector("[data-an-cancel]").addEventListener("click",
+  () => { analysisPanel.style.display = "none"; });
+
+analysisPanel.querySelector("[data-an-run]").addEventListener("click",
+  async () => {
+    const errEl = analysisPanel.querySelector("[data-an-err]");
+    const layers = [..._anBoxes.querySelectorAll("input:checked")]
+      .map((cb) => cb.value);
+    if (!layers.length) {
+      errEl.textContent = "בחר לפחות שכבה אחת";
+      return;
+    }
+    const cam = _anTarget?.currentActiveCam || _anTarget?.cloudCamId
+        || _anTarget?.slot?.primary;
+    if (!cam) {
+      errEl.textContent = "למצלמה הזו אין מזהה פעיל כרגע";
+      return;
+    }
+    const runBtn = analysisPanel.querySelector("[data-an-run]");
+    runBtn.disabled = true;
+    runBtn.textContent = "מנתח... (~חצי דקה)";
+    errEl.textContent = "";
+    try {
+      const r = await fetch(
+        `/api/deep-analyze?cam=${encodeURIComponent(cam)}` +
+        `&layers=${encodeURIComponent(layers.join(","))}`,
+        { method: "POST" });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || r.status);
+      renderAnalysisView(data, _anTarget);
+      analysisPanel.style.display = "none";
+    } catch (e) {
+      errEl.textContent = "הניתוח נכשל: " + e.message;
+    } finally {
+      runBtn.disabled = false;
+      runBtn.textContent = "נתח עכשיו";
+    }
+  });
+
+function renderAnalysisView(data, st) {
+  const labelOf = Object.fromEntries(ANALYSIS_LAYER_DEFS);
+  const imgs = data.layer_images || {};
+  const tiles = (data.layers || []).filter((l) => imgs[l]);
+  const cols = tiles.length >= 2 ? 2 : 1;
+  analysisView.innerHTML = `
+    <div style="display:flex;align-items:center;gap:14px;margin:10px 0">
+      <button data-an-back style="cursor:pointer;background:#1e293b;
+              border:1px solid #334155;color:#e2e8f0;border-radius:8px;
+              padding:7px 16px;font-size:14px">→ חזרה לשידור חי</button>
+      <h2 style="margin:0;font-size:18px;color:#e2e8f0">ניתוח מתקדם -
+        ${escapeHtml(data.cam_name || st.camNameEl.textContent
+                     || st.slot.display_area)}
+        <span style="color:#94a3b8;font-size:13px">
+          (${data.individuals ?? 0} פרטים בחלון, ${data.window_sec ?? "?"} שניות)
+        </span></h2>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(${cols},1fr);
+                gap:12px">
+      ${tiles.map((l) => `
+        <figure style="margin:0;background:#0f172a;border:1px solid #334155;
+                       border-radius:10px;overflow:hidden">
+          <figcaption style="padding:6px 10px;color:#e2e8f0;font-size:14px">
+            ${labelOf[l] || l}</figcaption>
+          <img src="${imgs[l]}" alt="${l}" style="width:100%;display:block">
+        </figure>`).join("")}
+    </div>`;
+  analysisView.querySelector("[data-an-back]").addEventListener("click", () => {
+    analysisView.style.display = "none";
+    analysisView.innerHTML = "";
+    tilesEl.style.display = "";
+  });
+  tilesEl.style.display = "none";
+  tilesEl.parentNode.insertBefore(analysisView, tilesEl);
+  analysisView.style.display = "block";
 }
 
 // ---------- 1b. Model-view strip skeleton -----------------------------------
@@ -922,6 +1071,10 @@ function setLatest(st, d) {
   };
   set("person",   d.person);
   set("vehicles", d.vehicles);
+  // The cloud collector's camera for this slot - the analysis picker
+  // targets it even in local-preview mode (where the VIDEO is the local
+  // pick but every number on the tile already belongs to this cam).
+  if (d.cam_id) st.cloudCamId = d.cam_id;
   // Honesty label (local preview): the video is YOUR picked camera, but
   // counts/KPIs stream from whatever camera the CLOUD collector has in
   // this slot. When the two differ, say so on the tile instead of letting

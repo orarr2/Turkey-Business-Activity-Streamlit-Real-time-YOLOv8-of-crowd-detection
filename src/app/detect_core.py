@@ -1485,6 +1485,24 @@ def detect_burst(model, frames: list[np.ndarray], conf: float = 0.35,
                                       dt=burst_stride / last_stream_fps())
             if tracks:
                 debug["individuals"] = len(tracks)
+                # fix1-A12 input: how many PERSONS moved at running pace
+                # within this burst (EMA track velocity as a fraction of
+                # the frame diagonal per second; 0.12/s is the same
+                # running bar the deep window uses). Many simultaneous
+                # runners = the crowd-rush scene signal - computed from
+                # tracks that already exist, zero extra inference.
+                H_, W_ = per[0][2].shape[:2]
+                diag = (H_ * H_ + W_ * W_) ** 0.5 or 1.0
+                n_p = fast = 0
+                for tr in tracks:
+                    if tr.cls != "person" or len(tr.times) < 2:
+                        continue
+                    n_p += 1
+                    if ((tr.vx ** 2 + tr.vy ** 2) ** 0.5 / diag) >= 0.12:
+                        fast += 1
+                if n_p:
+                    debug["rush"] = {"tracked_persons": n_p,
+                                     "fast_persons": fast}
         except Exception as e:
             print(f"detect_burst: tracker skipped ({type(e).__name__}: {e})")
     return counts, best[1], best[2], debug

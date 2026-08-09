@@ -133,6 +133,10 @@ CAMERAS = {
         # half simply does not exist at 640). Same per-cam mechanism as
         # Sarachane; Sultanahmet measured no gain and stays on the global.
         "imgsz": 960,
+        # fix1-A10: pedestrian flow line across the plaza's main walking
+        # axis. A->B left-to-right => "in" = crossing DOWN-screen (toward
+        # the metro / McDonald's side).
+        "line": [[0.15, 0.74], [0.85, 0.74]],
     },
     "beyazit_meydan": {
         "name": "Beyazit Meydani",
@@ -170,6 +174,10 @@ CAMERAS = {
         "page": "https://istanbuluseyret.ibb.gov.tr/sultanahmet-1-yeni/",
         "embed": None,
         "type": "tourist square",
+        # fix1-A10: the main promenade at the bottom of the park view.
+        # A->B left-to-right => "in" = crossing down-screen (toward the
+        # camera / tram side).
+        "line": [[0.05, 0.82], [0.95, 0.82]],
     },
     # --- Three more IBB kamerayayin cameras added 2026-07-14 after the
     # Konya tvkur backend went 404. All three verified HTTP 200 at add time
@@ -187,6 +195,10 @@ CAMERAS = {
         # university plaza gains meaningfully; same per-cam mechanism as
         # Sarachane/Taksim.
         "imgsz": 960,
+        # fix1-A10: gate corridor line by the university entrance (left
+        # side). A->B bottom-to-top => "in" = crossing left-to-right =
+        # out of the gate INTO the plaza.
+        "line": [[0.33, 0.95], [0.33, 0.40]],
     },
     "eyup_sultan_yeni": {
         "name": "Eyup Sultan (live)",
@@ -225,6 +237,9 @@ CAMERAS = {
         # THIS cam at 960 recovers the pedestrian half of the scene for
         # ~2.25x its share of round compute; the other cams stay at 640.
         "imgsz": 960,
+        # fix1-A10: vertical tripwire across the main road - counts the
+        # traffic flow. A->B bottom-to-top => "in" = left-to-right traffic.
+        "line": [[0.35, 0.62], [0.35, 0.42]],
     },
     "sultanahmet_2_yeni": {
         "name": "Sultanahmet 2 (live)",
