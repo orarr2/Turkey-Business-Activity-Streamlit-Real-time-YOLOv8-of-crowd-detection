@@ -284,6 +284,19 @@ def render(cam_id: str, base_frame=None, layer: str = "person",
            root: Path | None = None):
     """Colormap overlay of a camera's accumulated map (BGR ndarray).
 
+    Thin wrapper over overlay(): loads this camera's persisted grid and
+    hands it to the shared renderer.
+    """
+    return overlay(grid_for(cam_id, layer=layer, daypart=daypart),
+                   base_frame=base_frame, alpha=alpha, size=size)
+
+
+def overlay(grid, base_frame=None, alpha: float = 0.45,
+            size: tuple[int, int] = (640, 360)):
+    """Colormap overlay of ANY dwell grid (GRID_H rows x GRID_W cols of
+    floats) - the renderer shared by render() (persisted per-camera maps)
+    and the live-analysis heat layer (session-local accumulation).
+
     `base_frame` (BGR) gives the overlay its scene context; without one
     the map renders on a dark canvas at `size`. cv2/numpy import lives
     here so the accumulation path stays dependency-free.
@@ -291,8 +304,7 @@ def render(cam_id: str, base_frame=None, layer: str = "person",
     import cv2
     import numpy as np
 
-    grid = np.asarray(grid_for(cam_id, layer=layer, daypart=daypart),
-                      dtype=np.float32)
+    grid = np.asarray(grid, dtype=np.float32)
     if base_frame is not None:
         H, W = base_frame.shape[:2]
         canvas = base_frame.copy()

@@ -541,6 +541,33 @@ behaviors without needing YOLO.
 
 ---
 
+## Live analysis - one layer per camera, on the tile itself
+
+The private dashboard's 🔬 button (visible only where the local server
+answers `/api/ping`) runs a **continuous live analysis on the exact
+camera whose tile was clicked**: the tile morphs in place into a stream
+of analyzed frames (client polls `GET /api/analysis/frame` at ~1 fps)
+while the other tiles keep playing normal video and the cloud VM runs
+untouched. Engine: `app/live_analysis.py`; endpoints:
+`POST /api/analysis/start?cam&layer`, `GET /api/analysis/frame?cam`,
+`POST /api/analysis/stop?cam`.
+
+Semantics: **one layer per camera, up to four live analyses across the
+grid** (duplicates fine). Layers - `paths` (trails + id boxes + km/h),
+`pose` (skeletons ONLY, on people close enough - never detection boxes),
+`gestures` (skeleton + chip only for detected gestures), `body`
+(fall/erratic/running chips), `faces` (YuNet rectangles), `heat` (the
+SESSION'S own dwell accumulation on this camera), `line` (counting line
++ live in/out). Every layer states an empty result honestly ("no
+gestures detected right now"). Switching layers mutates the running
+session - stream, tracker, heat grid, line counters and gesture history
+all survive, so heat -> gestures -> heat resumes the accumulated map.
+
+Compute honesty: sessions share ONE YOLO (`yolov8s`) behind a lock; on
+an operator CPU a single session runs ~1-2 fps, four concurrent
+~0.3-0.5 fps each, frames trail the live edge by a few seconds. A
+session with no poller for 60 s shuts itself down.
+
 ## Window analysis - pose, behavior labels, gestures, faces, target lock
 
 The dashboard's "Window analysis" panel (`POST /api/deep-analyze`, CLI:

@@ -106,18 +106,25 @@ class _VisualSearchState:
         # would race the entries dict and double-embed the same backlog.
         self.refresh_lock = threading.Lock()
         self._ready = False
+        self._model_lock = threading.Lock()
+        self._model_ready = False
         self.embedder = None
         self.model = None
         self.index = None
         self.db_path = None
 
-    def get(self):
-        with self._lock:
-            if not self._ready:
-                from app.visual_search import DEFAULT_DB, SnapshotIndex
-                from app.reid_embed import make_embedder
-                self.embedder = make_embedder(os.environ.get("REID_MODEL") or None)
-                self.db_path = os.environ.get("REID_DB") or DEFAULT_DB
+    def get_model(self):
+        """The YOLO model ALONE, loaded on first call (~5-15s).
+
+        Live analysis and the deep window need only the model; the full
+        get() also builds the search index + crop bootstraps, which can
+        take minutes on a cold start with a large synced pool - fix 2
+        decouples them so an analysis click never waits on embedding
+        backlogs. get() reuses this loader, so the model is still loaded
+        exactly once per process.
+        """
+        with self._model_lock:
+            if not self._model_ready:
                 weights = os.environ.get("SEARCH_YOLO", "yolov8s.pt")
                 if weights.lower() not in ("off", "none", ""):
                     try:
@@ -127,6 +134,17 @@ class _VisualSearchState:
                         print(f"visual-search: YOLO unavailable ({e}) - "
                               f"uploads will be embedded whole (no object "
                               f"extraction). pip install ultralytics to fix.")
+                self._model_ready = True
+        return self.model
+
+    def get(self):
+        with self._lock:
+            if not self._ready:
+                from app.visual_search import DEFAULT_DB, SnapshotIndex
+                from app.reid_embed import make_embedder
+                self.embedder = make_embedder(os.environ.get("REID_MODEL") or None)
+                self.db_path = os.environ.get("REID_DB") or DEFAULT_DB
+                self.get_model()
                 self.index = SnapshotIndex(SNAPSHOTS_DIR, embedder=self.embedder)
                 # Extract per-object crops from the accumulated anomaly frames
                 # so search + review can see them. Safe to fail silently: the
@@ -291,6 +309,16 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._proxy_tvkur()
             return
         path = self.path.split("?")[0]
+        if path == "/api/ping":
+            # Capability probe: only THIS private server answers it, so the
+            # frontend can tell "operator dashboard with a backend" from the
+            # hosted public copy without sniffing hostnames (which lied
+            # behind proxies). Gates the send-report field + live analysis.
+            self._send_json(200, {"ok": True, "private": True})
+            return
+        if path == "/api/analysis/frame":
+            self._analysis_frame()
+            return
         if path == "/api/review-sample":
             self._review_sample()
             return
@@ -359,6 +387,12 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             return
         if path == "/api/deep-analyze":
             self._deep_analyze()
+            return
+        if path == "/api/analysis/start":
+            self._analysis_start()
+            return
+        if path == "/api/analysis/stop":
+            self._analysis_stop()
             return
         if path == "/api/send-report":
             self._send_report()
@@ -574,8 +608,8 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         layers = [l.strip() for l in layers_raw.split(",") if l.strip()] \
             if layers_raw else None
 
-        state = _VISUAL_SEARCH.get()
-        if state.model is None:
+        model = _VISUAL_SEARCH.get_model()
+        if model is None:
             self._send_json(503, {"error": "no detection model loaded "
                                            "(SEARCH_YOLO=off?)"})
             return
@@ -585,11 +619,17 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             return
         try:
             from app.behavior import analyze_window
-            result = analyze_window(cam, state.model, n_frames=n_frames,
-                                    stride=stride, imgsz=imgsz,
-                                    pose=pose, lock=lock,
-                                    want_faces=want_faces,
-                                    layers=layers)
+            from app.live_analysis import INFER_LOCK
+            # INFER_LOCK: the live-analysis sessions share this exact model
+            # object; ultralytics predict is not thread-safe, so the deep
+            # window holds the same lock (live tiles pause for its ~10-20s
+            # and resume - visible as a longer gap, never a crash).
+            with INFER_LOCK:
+                result = analyze_window(cam, model, n_frames=n_frames,
+                                        stride=stride, imgsz=imgsz,
+                                        pose=pose, lock=lock,
+                                        want_faces=want_faces,
+                                        layers=layers)
             self._send_json(200, result)
         except ValueError as e:
             self._send_json(404, {"error": str(e)})
@@ -597,6 +637,85 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json(502, {"error": f"{type(e).__name__}: {e}"})
         finally:
             _DEEP_ANALYZE_LOCK.release()
+
+    # -- fix 2: live advanced analysis (app/live_analysis.py) --------------
+
+    def _analysis_start(self) -> None:
+        """POST /api/analysis/start?cam=<id>&layer=<layer>
+
+        Starts a live-analysis session on ONE camera (registry id or a
+        local-picker slot id), or switches the layer of a running session
+        in place - stream, tracker and accumulators survive the switch.
+        At most live_analysis.MAX_SESSIONS run concurrently (409 beyond).
+        """
+        from urllib.parse import parse_qs, urlparse
+        q = parse_qs(urlparse(self.path).query)
+        cam = (q.get("cam") or [""])[0]
+        layer = (q.get("layer") or [""])[0]
+        if not cam or not layer:
+            self._send_json(400, {"error": "need ?cam= and ?layer="})
+            return
+        model = _VISUAL_SEARCH.get_model()
+        if model is None:
+            self._send_json(503, {"error": "no detection model loaded "
+                                           "(SEARCH_YOLO=off?)"})
+            return
+        from app.live_analysis import MANAGER, BusyError
+        try:
+            info = MANAGER.start(cam, layer, model)
+            self._send_json(200, {"ok": True, **info})
+        except BusyError as e:
+            self._send_json(409, {"error": str(e)})
+        except ValueError as e:
+            self._send_json(404, {"error": str(e)})
+        except Exception as e:
+            self._send_json(502, {"error": f"{type(e).__name__}: {e}"})
+
+    def _analysis_frame(self) -> None:
+        """GET /api/analysis/frame?cam=<id>
+
+        Latest analyzed JPEG of the session (200 image/jpeg with X-Seq /
+        X-Layer / X-Note headers), 202 JSON while the first frame is
+        still being produced, 404 when no session runs for this camera.
+        Polling this keeps the session's idle clock alive.
+        """
+        from urllib.parse import parse_qs, urlparse
+        q = parse_qs(urlparse(self.path).query)
+        cam = (q.get("cam") or [""])[0]
+        from app.live_analysis import MANAGER
+        fr = MANAGER.frame(cam) if cam else None
+        if fr is None:
+            self._send_json(404, {"error": "no live analysis for this "
+                                           "camera"})
+            return
+        if not fr["jpeg"]:
+            self._send_json(202, {"ok": True, "pending": True,
+                                  "note": fr["note"] or "starting..."})
+            return
+        body = fr["jpeg"]
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Seq", str(fr["seq"]))
+        self.send_header("X-Layer", fr["layer"])
+        note = (fr["note"] or "").encode("ascii", "replace").decode("ascii")
+        if note:
+            self.send_header("X-Note", note)
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # poller gave up mid-frame - the next poll catches up
+
+    def _analysis_stop(self) -> None:
+        """POST /api/analysis/stop?cam=<id> - back to plain video."""
+        from urllib.parse import parse_qs, urlparse
+        q = parse_qs(urlparse(self.path).query)
+        cam = (q.get("cam") or [""])[0]
+        from app.live_analysis import MANAGER
+        stopped = MANAGER.stop(cam) if cam else False
+        self._send_json(200, {"ok": True, "stopped": stopped})
 
     def _visual_search(self) -> None:
         """POST /api/search  (or /api/visual-search - the legacy alias).

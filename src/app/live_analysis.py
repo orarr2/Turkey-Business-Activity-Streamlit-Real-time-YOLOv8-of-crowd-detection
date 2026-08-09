@@ -1,0 +1,667 @@
+"""Live advanced-analysis engine for the private dashboard (fix 2).
+
+The fix1-B picker returned ONE static analyzed frame (and aimed it at the
+CLOUD camera paired with the tile, not the camera the operator was
+watching). The fix 2 requirement replaces that completely: analysis is
+LIVE and CONTINUOUS on the exact camera whose tile was clicked - the tile
+morphs in place into a stream of analyzed frames while the VM collector
+runs untouched. This module owns that:
+
+  * one LiveSession per camera (max MAX_SESSIONS = the four grid tiles),
+    holding the SAME stream the tile plays (registry camera or a
+    local-picker slot resolved from web/local_grid.json), pacing one
+    detection tick roughly every TICK_TARGET_S;
+  * ONE analysis layer per session - the fix 2 semantics: a single layer
+    per camera, up to four live analyses across the grid, duplicates
+    fine. Switching the layer MUTATES the running session: the stream,
+    the tracker and every accumulator survive, so heat -> gestures ->
+    heat resumes the accumulated map instead of restarting;
+  * per-layer rendering that draws ONLY that layer's semantics (pose =
+    skeletons on close-enough people, never detection boxes) and says
+    so honestly when a layer finds nothing ("none detected right now");
+  * a latest-JPEG buffer the dashboard polls (~1/s). The client never
+    touches the model directly and the VM is never involved.
+
+Compute reality on an operator PC (CPU): one active session runs about
+1-2 fps; four concurrent sessions about 0.3-0.5 fps each - INFER_LOCK
+serializes model access so four sessions degrade gracefully instead of
+thrashing the same weights from four threads.
+
+The draw_* functions are pure (frame + data in, frame out) and shared
+with app/behavior.py's one-shot render_layer, so the on-demand API and
+the live tiles can never diverge in what a layer means.
+"""
+from __future__ import annotations
+
+import json
+import re
+import threading
+import time
+from pathlib import Path
+
+from app.heatmap import GRID_H, GRID_W
+
+_SRC_ROOT = Path(__file__).resolve().parent.parent
+
+# The seven analysis layers an operator can run live. "line" is new in
+# fix 2 (threshold-crossing was explicitly requested); the other six match
+# behavior.ANALYSIS_LAYERS.
+LIVE_LAYERS = ("paths", "pose", "gestures", "body", "faces", "heat", "line")
+LAYER_TITLES = {
+    "paths":    "Paths & speeds",
+    "pose":     "Pose & skeleton",
+    "gestures": "Hand gestures",
+    "body":     "Body anomalies",
+    "faces":    "Face detection",
+    "heat":     "Heat signature",
+    "line":     "Line crossing",
+}
+
+MAX_SESSIONS = 4          # one per grid tile - the fix 2 cap
+IDLE_STOP_S = 60.0        # no client poll this long -> session shuts down
+TICK_TARGET_S = 0.8       # pacing floor between inference ticks
+LIVE_IMGSZ = 640
+JPEG_MAX_W = 960
+JPEG_QUALITY = 80
+TRACK_KEEP = 48           # per-track box history cap (live runs are open-ended)
+TRAIL_MAX_PTS = 40
+GRAB_FAIL_REFRESH = 3     # consecutive grab failures before re-resolving
+# Default counting line for cameras without a configured "line" (the local
+# picker's cameras): horizontal, at 62% height - the sidewalk band on a
+# typical street view. Same normalized [[x,y],[x,y]] convention as
+# cameras.py; crossing negative -> positive side of A->B counts as "in".
+DEFAULT_LINE = [[0.10, 0.62], [0.90, 0.62]]
+
+# Serializes EVERY model call in this process (detection + pose, live
+# sessions + the one-shot deep window): ultralytics predict is not
+# thread-safe on a shared model object.
+INFER_LOCK = threading.Lock()
+
+# Body-anomaly layer: which behavior labels count as an anomaly worth
+# drawing (everything else - walking/standing/dwelling/driving/parked -
+# is normal street life).
+BODY_ANOMALY_LABELS = frozenset({"fall_suspect", "erratic", "running"})
+
+
+class BusyError(RuntimeError):
+    """All MAX_SESSIONS live-analysis slots are taken."""
+
+
+# ---------------------------------------------------------------------------
+# Camera resolution: registry cameras by id, local-picker slots by slot_id.
+# ---------------------------------------------------------------------------
+
+def resolve_cam(cam_id: str, grid_path: Path | None = None) -> dict:
+    """Return an analyzable camera dict for `cam_id`.
+
+    Registry cameras (app/cameras.py) win; otherwise the local picker's
+    web/local_grid.json is searched by slot_id and a stream-resolvable
+    dict is synthesized from the slot's embed/HLS/page fields. Raises
+    ValueError when the id is unknown or the slot has no usable stream.
+    """
+    from app.cameras import CAMERAS
+    cam = CAMERAS.get(cam_id)
+    if cam is not None:
+        return {"id": cam_id, **cam}
+    p = grid_path or (_SRC_ROOT / "web" / "local_grid.json")
+    if p.exists():
+        try:
+            slots = json.loads(p.read_text(encoding="utf-8")).get("slots") or []
+        except (OSError, ValueError):
+            slots = []
+        for slot in slots:
+            if slot.get("slot_id") == cam_id:
+                return _cam_from_slot(slot)
+    raise ValueError(f"unknown camera {cam_id!r}")
+
+
+def _cam_from_slot(slot: dict) -> dict:
+    cam_id = slot["slot_id"]
+    name = slot.get("placeholder_name") or cam_id
+    emb = slot.get("placeholder_embed") or ""
+    m = re.search(r"/embed/([\w-]{11})", emb)
+    if m:
+        return {"id": cam_id, "name": name, "kind": "youtube",
+                "url": f"https://www.youtube.com/watch?v={m.group(1)}"}
+    hls = slot.get("placeholder_hls") or ""
+    m = re.match(r"^/tvkur/([^/]+)/", hls)
+    if m:
+        # The dashboard plays tvkur through its local proxy; the analysis
+        # loop talks to the upstream directly (grab_frame carries the
+        # Referer/Origin the host demands).
+        return {"id": cam_id, "name": name, "kind": "hls",
+                "url": f"https://content.tvkur.com/l/{m.group(1)}/master.m3u8"}
+    if hls.startswith("http"):
+        return {"id": cam_id, "name": name, "kind": "hls", "url": hls}
+    page = slot.get("placeholder_page") or ""
+    if "youtube.com/watch" in page:
+        return {"id": cam_id, "name": name, "kind": "youtube", "url": page}
+    if "webcamera24.com" in page:
+        return {"id": cam_id, "name": name, "kind": "webcamera24",
+                "url": page, "page": page}
+    raise ValueError(f"camera {cam_id!r} has no analyzable stream")
+
+
+# ---------------------------------------------------------------------------
+# Shared accumulators (pure - unit-testable without streams or a model).
+# ---------------------------------------------------------------------------
+
+def bump_heat(grid: list, boxes: list[dict], frame_shape, weight: float) -> None:
+    """Bank each box's foot point into the session dwell grid."""
+    H, W = frame_shape[:2]
+    if not (H and W):
+        return
+    for b in boxes:
+        fx = (b["x1"] + b["x2"]) / 2.0
+        fy = b["y2"]
+        if not (0 <= fx <= W and 0 <= fy <= H):
+            continue
+        gx = min(GRID_W - 1, int(fx / W * GRID_W))
+        gy = min(GRID_H - 1, int(fy / H * GRID_H))
+        grid[gy][gx] += weight
+
+
+def grid_from_tracks(tracks, frame_shape) -> list:
+    """One-shot dwell grid from a closed window's tracks (behavior.py's
+    heat layer - same accumulation, no session)."""
+    grid = [[0.0] * GRID_W for _ in range(GRID_H)]
+    for tr in tracks:
+        bump_heat(grid, tr.boxes, frame_shape, 1.0)
+    return grid
+
+
+def update_crossings(side_state: dict, tracks, frame_shape, line: list,
+                     cross: dict) -> None:
+    """Advance the session in/out counters from each visible track's
+    NEWEST foot point. `side_state` remembers the last signed side per
+    track id; a sign flip is one crossing. Same convention as
+    detect_core.count_line_crossings: negative -> positive side of the
+    A->B line = "in"."""
+    from app.detect_core import _line_side
+    H, W = frame_shape[:2]
+    if not (H and W):
+        return
+    for tr in tracks:
+        if getattr(tr, "misses", 0):
+            continue
+        b = tr.boxes[-1]
+        fx = (b["x1"] + b["x2"]) / 2.0
+        fy = b["y2"]
+        side = _line_side(fx / W, fy / H, line)
+        prev = side_state.get(tr.tid)
+        side_state[tr.tid] = side
+        if prev is None:
+            continue
+        if prev < 0 <= side:
+            cross["in"] = cross.get("in", 0) + 1
+        elif prev >= 0 > side:
+            cross["out"] = cross.get("out", 0) + 1
+
+
+# ---------------------------------------------------------------------------
+# Layer renderers - each draws ONLY its layer's semantics + an honest
+# caption. All mutate/return the given BGR frame.
+# ---------------------------------------------------------------------------
+
+def _caption(img, lines) -> "object":
+    """Darkened strip at the top with the layer verdict ("no gestures
+    detected right now" is a legitimate, expected outcome - fix 2)."""
+    import cv2
+    if isinstance(lines, str):
+        lines = [lines]
+    lh, pad = 22, 8
+    h = min(img.shape[0], pad * 2 + lh * len(lines) - 8)
+    img[0:h] = (img[0:h] * 0.35).astype(img.dtype)
+    y = pad + 12
+    for i, t in enumerate(lines):
+        cv2.putText(img, t, (10, y), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55 if i == 0 else 0.46,
+                    (255, 255, 255) if i == 0 else (205, 205, 205),
+                    1, cv2.LINE_AA)
+        y += lh
+    return img
+
+
+def _chip(img, b: dict, txt: str, color) -> None:
+    import cv2
+    x1, y2 = int(b["x1"]), int(b["y2"])
+    (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+    cv2.rectangle(img, (x1, y2 + 2), (x1 + tw + 6, y2 + th + 8), color, -1)
+    cv2.putText(img, txt, (x1 + 3, y2 + th + 4),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1,
+                cv2.LINE_AA)
+
+
+def draw_paths_layer(img, tracks, last_boxes: list[dict],
+                     stats_by_id: dict):
+    """Trails + id boxes + km/h chips - the one layer that legitimately
+    shows detection boxes for every class."""
+    import cv2
+    from app.behavior import _TRAIL_COLORS
+    from app.detect_core import draw_boxes
+    for tr in tracks:
+        color = _TRAIL_COLORS[(tr.tid - 1) % len(_TRAIL_COLORS)]
+        pts = [(int((b["x1"] + b["x2"]) / 2), int((b["y1"] + b["y2"]) / 2))
+               for b in tr.boxes[-TRAIL_MAX_PTS:]]
+        for p0, p1 in zip(pts, pts[1:]):
+            cv2.line(img, p0, p1, color, 2, cv2.LINE_AA)
+        if pts:
+            cv2.circle(img, pts[0], 4, color, -1, cv2.LINE_AA)
+    img = draw_boxes(img, last_boxes)
+    for b in last_boxes:
+        s = stats_by_id.get(b.get("track_id"))
+        if s and s.get("kmh_est"):
+            _chip(img, b, f"{s['kmh_est']} km/h", (90, 90, 90))
+    note = (f"Paths & speeds - {len(last_boxes)} tracked now"
+            if last_boxes else "Paths & speeds - nothing tracked yet")
+    return _caption(img, [note])
+
+
+def draw_pose_layer(img, boxes: list[dict]):
+    """Skeletons ONLY, on people close enough for the per-crop pose pass.
+    No detection boxes, no vehicles - fix 2's core layer-correctness
+    complaint."""
+    from app.pose import draw_skeleton
+    persons = [b for b in boxes if b.get("cls") == "person"]
+    withk = [b for b in persons if b.get("kps")]
+    if withk:
+        draw_skeleton(img, withk)
+    if not persons:
+        note = "Pose & skeleton - no people in frame"
+    elif not withk:
+        note = (f"Pose & skeleton - no skeletons "
+                f"({len(persons)} people too far/small for pose)")
+    else:
+        note = (f"Pose & skeleton - skeletons on {len(withk)} "
+                f"of {len(persons)} people")
+        if len(withk) < len(persons):
+            note += " (rest too far)"
+    return _caption(img, [note])
+
+
+def draw_gestures_layer(img, boxes: list[dict], stats_by_id: dict,
+                        session_counts: dict | None = None):
+    """Skeleton + gesture chip only for people with a DETECTED gesture."""
+    from app.pose import draw_skeleton
+    active = []
+    for b in boxes:
+        if b.get("cls") != "person" or not b.get("kps"):
+            continue
+        s = stats_by_id.get(b.get("track_id"))
+        if s and s.get("gestures"):
+            active.append((b, s))
+    for b, s in active:
+        draw_skeleton(img, [b])
+        _chip(img, b, "+".join(s["gestures"]), (190, 120, 0))
+    note = ("Hand gestures - "
+            + ", ".join(f"#{s.get('id', '?')} {'+'.join(s['gestures'])}"
+                        for _, s in active)
+            if active else "Hand gestures - none detected right now")
+    lines = [note]
+    if session_counts is not None:
+        tot = ", ".join(f"{g} x{n}"
+                        for g, n in sorted(session_counts.items()))
+        lines.append(f"session: {tot}" if tot else "session: none yet")
+    return _caption(img, lines)
+
+
+def draw_body_layer(img, boxes: list[dict], stats_by_id: dict):
+    """Behavior-anomaly chips (fall/erratic/running + sustained pose
+    flags) on people only; normal street life draws nothing."""
+    import cv2
+    flagged = []
+    for b in boxes:
+        if b.get("cls") != "person":
+            continue
+        s = stats_by_id.get(b.get("track_id"))
+        if not s:
+            continue
+        if s.get("label") in BODY_ANOMALY_LABELS or s.get("pose_flags"):
+            flagged.append((b, s))
+    for b, s in flagged:
+        color = (0, 0, 220) if s.get("alert") else (0, 150, 230)
+        cv2.rectangle(img, (int(b["x1"]), int(b["y1"])),
+                      (int(b["x2"]), int(b["y2"])), color, 2)
+        txt = s.get("label") or ""
+        extra = [f for f in (s.get("pose_flags") or []) if f and f != txt]
+        if extra:
+            txt += " " + "+".join(extra)
+        _chip(img, b, txt, color)
+    note = ("Body anomalies - "
+            + ", ".join(f"#{s.get('id', '?')} {s.get('label')}"
+                        for _, s in flagged)
+            if flagged else "Body anomalies - none")
+    return _caption(img, [note])
+
+
+def draw_faces_layer_img(img, faces_list: list[dict], available: bool = True):
+    if faces_list:
+        from app.faces import draw_faces
+        draw_faces(img, faces_list)
+        note = f"Face detection - {len(faces_list)} face(s)"
+    elif available:
+        note = "Face detection - no faces at this distance/resolution"
+    else:
+        note = "Face detection - face model not available on this machine"
+    return _caption(img, [note])
+
+
+def draw_heat_layer(img, grid: list, since: float | None = None):
+    """Dwell overlay of the SESSION'S OWN accumulation on this camera -
+    never another camera's published map (the fix1-B heat layer pulled
+    the VM's Storage overlay, which belongs to whatever camera the CLOUD
+    runs; fix 2 forbids that mixing)."""
+    from app.heatmap import overlay
+    out = overlay(grid, base_frame=img)
+    if since:
+        el = int(time.time() - since)
+        mm, ss = divmod(el, 60)
+        note = (f"Heat signature - dwell accumulating since "
+                f"{time.strftime('%H:%M:%S', time.localtime(since))} "
+                f"({mm}m{ss:02d}s)")
+    else:
+        note = "Heat signature - dwell over this window"
+    peak = max((max(row) for row in grid), default=0.0)
+    if peak <= 0:
+        note += " - no activity banked yet"
+    return _caption(out, [note])
+
+
+def draw_line_layer(img, line: list, cross: dict):
+    import cv2
+    H, W = img.shape[:2]
+    (ax, ay), (bx, by) = line
+    p0 = (int(ax * W), int(ay * H))
+    p1 = (int(bx * W), int(by * H))
+    cv2.line(img, p0, p1, (0, 215, 255), 3, cv2.LINE_AA)
+    for p in (p0, p1):
+        cv2.circle(img, p, 6, (0, 215, 255), -1, cv2.LINE_AA)
+    mid = ((p0[0] + p1[0]) // 2, (p0[1] + p1[1]) // 2)
+    txt = f"IN {cross.get('in', 0)}  OUT {cross.get('out', 0)}"
+    cv2.putText(img, txt, (max(8, mid[0] - 70), max(24, mid[1] - 12)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 215, 255), 2,
+                cv2.LINE_AA)
+    return _caption(img, [f"Line crossing - IN {cross.get('in', 0)} / "
+                          f"OUT {cross.get('out', 0)} (session total)"])
+
+
+# ---------------------------------------------------------------------------
+# The live session.
+# ---------------------------------------------------------------------------
+
+class LiveSession(threading.Thread):
+    """One camera's live analysis: stream -> detect -> track -> layer."""
+
+    def __init__(self, cam: dict, model, layer: str):
+        super().__init__(daemon=True, name=f"live-analysis-{cam['id']}")
+        self.cam = cam
+        self.cam_id = cam["id"]
+        self.cam_name = cam.get("name", cam["id"])
+        self.model = model
+        self.layer = layer            # mutated by the manager on switch
+        self.created = time.time()
+        self.last_poll = time.time()  # touched by every /frame poll
+        self.stop_event = threading.Event()
+        self.lock = threading.Lock()  # guards latest/seq/note
+        self.latest: bytes | None = None
+        self.seq = 0
+        self.note = "starting stream..."
+        self.err: str | None = None
+        # Rolling state that SURVIVES layer switches (fix 2 point 9):
+        self.tracker = None
+        self.heat = [[0.0] * GRID_W for _ in range(GRID_H)]
+        self.heat_since: float | None = None
+        self.line = cam.get("line") or DEFAULT_LINE
+        self.cross = {"in": 0, "out": 0}
+        self._line_sides: dict[int, float] = {}
+        self.gesture_counts: dict[str, int] = {}
+        self._track_gestures: dict[int, set] = {}
+        self._faces_ok: bool | None = None
+        self._fail = 0
+        self._last_tick: float | None = None
+
+    # -- lifecycle ---------------------------------------------------------
+
+    def run(self) -> None:
+        try:
+            while (not self.stop_event.is_set()
+                   and time.time() - self.last_poll < IDLE_STOP_S):
+                t0 = time.time()
+                frame = self._grab()
+                if frame is None:
+                    self._publish_note("stream unavailable - retrying...")
+                    if self.stop_event.wait(2.0):
+                        break
+                    continue
+                boxes = self._infer(frame)
+                now = time.time()
+                if self.tracker is None:
+                    from app.tracker import BurstTracker
+                    self.tracker = BurstTracker(frame.shape)
+                self.tracker.update(boxes, now)
+                self._trim()
+                layer = self.layer
+                if layer in ("pose", "gestures", "body"):
+                    self._pose_pass(frame, boxes)
+                faces_list: list[dict] = []
+                if layer == "faces":
+                    faces_list = self._faces_pass(frame)
+                self._accumulate(frame.shape, boxes, now)
+                img = self._render(frame, faces_list, layer)
+                self._publish(img)
+                dt = time.time() - t0
+                wait = max(0.0, TICK_TARGET_S - dt)
+                if wait and self.stop_event.wait(wait):
+                    break
+        except Exception as e:  # noqa: BLE001 - the session must not die silently
+            self.err = f"{type(e).__name__}: {e}"
+            self._publish_note(f"analysis stopped: {self.err}")
+            print(f"live-analysis {self.cam_id}: crashed ({self.err})")
+
+    # -- pipeline stages ---------------------------------------------------
+
+    def _grab(self):
+        from app.detect_core import grab_frame, invalidate_stream, resolve_stream
+        try:
+            url = resolve_stream(self.cam)
+        except Exception:
+            self._fail += 1
+            return None
+        frame = grab_frame(url)
+        if frame is None:
+            self._fail += 1
+            if self._fail % GRAB_FAIL_REFRESH == 0:
+                # Expired manifest / rotated token: force a fresh resolve.
+                invalidate_stream(self.cam_id)
+        else:
+            self._fail = 0
+        return frame
+
+    def _infer(self, frame) -> list[dict]:
+        from app.detect_core import (DEFAULT_PER_CLASS_CONF,
+                                     detect_with_boxes, filter_boxes_roi)
+        gates = dict(self.cam.get("per_class_conf") or DEFAULT_PER_CLASS_CONF)
+        with INFER_LOCK:
+            _c, boxes = detect_with_boxes(
+                self.model, frame, conf=self.cam.get("conf", 0.30),
+                imgsz=LIVE_IMGSZ, per_class_conf=gates)
+        if (self.cam.get("roi") or self.cam.get("roi_exclude")
+                or self.cam.get("roi_exclude_class")):
+            boxes = filter_boxes_roi(boxes, frame.shape, self.cam.get("roi"),
+                                     self.cam.get("roi_exclude"),
+                                     self.cam.get("roi_exclude_class"))
+        return boxes
+
+    def _pose_pass(self, frame, boxes) -> None:
+        from app.pose import attach_keypoints_crops, load_pose_model
+        with INFER_LOCK:
+            attach_keypoints_crops(load_pose_model(), frame, boxes)
+
+    def _faces_pass(self, frame) -> list[dict]:
+        from app import faces as _faces
+        if self._faces_ok is None:
+            self._faces_ok = _faces.available()
+        return _faces.detect_faces(frame) if self._faces_ok else []
+
+    def _accumulate(self, frame_shape, boxes, now: float) -> None:
+        w = 1.0
+        if self._last_tick is not None:
+            w = min(5.0, max(0.2, now - self._last_tick))
+        self._last_tick = now
+        if self.heat_since is None:
+            self.heat_since = now
+        bump_heat(self.heat, boxes, frame_shape, w)
+        update_crossings(self._line_sides, self.tracker.open, frame_shape,
+                         self.line, self.cross)
+
+    def _trim(self) -> None:
+        for tr in self.tracker.open:
+            if len(tr.boxes) > TRACK_KEEP:
+                del tr.boxes[:-TRACK_KEEP]
+                del tr.times[:-TRACK_KEEP]
+        # Retired tracks are never revisited live - drop them.
+        if self.tracker.done:
+            self.tracker.done.clear()
+        if len(self._line_sides) > 256 or len(self._track_gestures) > 256:
+            keep = {tr.tid for tr in self.tracker.open}
+            for store in (self._line_sides, self._track_gestures):
+                for k in list(store):
+                    if k not in keep:
+                        store.pop(k, None)
+
+    def _render(self, frame, faces_list: list[dict], layer: str):
+        img = frame.copy()
+        open_now = list(self.tracker.open)
+        visible = [tr.boxes[-1] for tr in open_now if not tr.misses]
+        stats_by_id: dict[int, dict] = {}
+        if layer in ("paths", "gestures", "body"):
+            from app.behavior import track_stats
+            for tr in open_now:
+                if tr.misses:
+                    continue
+                row = track_stats(tr.cls, tr.boxes, tr.times, frame.shape)
+                row["id"] = tr.tid
+                if layer in ("gestures", "body"):
+                    from app.behavior_labels import label_track
+                    from app.gestures import detect_gestures
+                    kseq = [b.get("kps") for b in tr.boxes[-16:]]
+                    has_kps = any(kseq)
+                    row.update(label_track(row, frame.shape,
+                                           kseq if has_kps else None))
+                    row["gestures"] = detect_gestures(kseq) if has_kps else []
+                    for g in row["gestures"]:
+                        seen = self._track_gestures.setdefault(tr.tid, set())
+                        if g not in seen:
+                            seen.add(g)
+                            self.gesture_counts[g] = \
+                                self.gesture_counts.get(g, 0) + 1
+                stats_by_id[tr.tid] = row
+        if layer == "paths":
+            return draw_paths_layer(img, open_now, visible, stats_by_id)
+        if layer == "pose":
+            return draw_pose_layer(img, visible)
+        if layer == "gestures":
+            return draw_gestures_layer(img, visible, stats_by_id,
+                                       self.gesture_counts)
+        if layer == "body":
+            return draw_body_layer(img, visible, stats_by_id)
+        if layer == "faces":
+            return draw_faces_layer_img(img, faces_list,
+                                        available=bool(self._faces_ok))
+        if layer == "heat":
+            return draw_heat_layer(img, self.heat, since=self.heat_since)
+        if layer == "line":
+            return draw_line_layer(img, self.line, self.cross)
+        return img
+
+    def _publish(self, img) -> None:
+        import cv2
+        H, W = img.shape[:2]
+        if W > JPEG_MAX_W:
+            img = cv2.resize(img, (JPEG_MAX_W, int(H * JPEG_MAX_W / W)),
+                             interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode(".jpg", img,
+                               [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+        if ok:
+            with self.lock:
+                self.latest = buf.tobytes()
+                self.seq += 1
+                self.note = ""
+
+    def _publish_note(self, note: str) -> None:
+        with self.lock:
+            self.note = note
+
+
+# ---------------------------------------------------------------------------
+# The manager the dashboard endpoints talk to.
+# ---------------------------------------------------------------------------
+
+class LiveAnalysisManager:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._sessions: dict[str, LiveSession] = {}
+
+    def start(self, cam_id: str, layer: str, model) -> dict:
+        """Start a session for `cam_id`, or switch the layer of a running
+        one (stream + accumulators survive the switch)."""
+        if layer not in LIVE_LAYERS:
+            raise ValueError(f"unknown layer {layer!r}")
+        cam = resolve_cam(cam_id)     # raises ValueError on unknown ids
+        with self._lock:
+            self._reap_locked()
+            s = self._sessions.get(cam_id)
+            if s is not None and s.is_alive():
+                switched = s.layer != layer
+                s.layer = layer
+                s.last_poll = time.time()
+                return {"cam": cam_id, "cam_name": s.cam_name,
+                        "layer": layer, "switched": switched,
+                        "active": len(self._sessions)}
+            if len(self._sessions) >= MAX_SESSIONS:
+                raise BusyError(
+                    f"{MAX_SESSIONS} live analyses already running - "
+                    f"stop one first")
+            s = LiveSession(cam, model, layer)
+            self._sessions[cam_id] = s
+            s.start()
+            return {"cam": cam_id, "cam_name": s.cam_name, "layer": layer,
+                    "switched": False, "active": len(self._sessions)}
+
+    def frame(self, cam_id: str) -> dict | None:
+        """Latest JPEG + metadata, or None when no session runs. Every
+        call refreshes the idle clock."""
+        with self._lock:
+            s = self._sessions.get(cam_id)
+            if s is None:
+                return None
+            if not s.is_alive():
+                self._sessions.pop(cam_id, None)
+                return None
+        s.last_poll = time.time()
+        with s.lock:
+            return {"jpeg": s.latest, "seq": s.seq, "layer": s.layer,
+                    "note": s.note}
+
+    def stop(self, cam_id: str) -> bool:
+        with self._lock:
+            s = self._sessions.pop(cam_id, None)
+        if s is None:
+            return False
+        s.stop_event.set()
+        return True
+
+    def stop_all(self) -> None:
+        with self._lock:
+            sessions = list(self._sessions.values())
+            self._sessions.clear()
+        for s in sessions:
+            s.stop_event.set()
+
+    def _reap_locked(self) -> None:
+        for cam_id in [c for c, s in self._sessions.items()
+                       if not s.is_alive()]:
+            self._sessions.pop(cam_id, None)
+
+
+MANAGER = LiveAnalysisManager()

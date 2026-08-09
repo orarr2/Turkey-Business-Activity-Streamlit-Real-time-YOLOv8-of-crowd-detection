@@ -66,11 +66,34 @@
                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .tile .city { color: #8b909a; font-size: 11px;
                   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    /* Local preview: the video is the picked camera, the NUMBERS stream from
-       the cloud collector's camera - make that source unmissable. */
-    .tile .city .counts-src { color: #f0a35e; }
     .tile-head-right { display: flex; gap: 6px; flex-wrap: nowrap;
                        align-items: center; flex-shrink: 0; }
+
+    /* fix 2 - live analysis. The 🔬 button exists only where a private
+       backend answers /api/ping (app.js toggles .private-backend on body);
+       the hosted public dashboard has no server to run analysis on. */
+    .analyze-btn { display: none; }
+    .private-backend .analyze-btn { display: inline-block; }
+    /* The analyzed tile: same box as the video, showing the server's
+       latest analyzed JPEG (~1 fps poll) + status/stop controls. */
+    .analysis-wrap { position: relative; width: 100%; height: 100%;
+                     background: #000; }
+    .analysis-wrap img { width: 100%; height: 100%; object-fit: contain;
+                         display: block; background: #000; }
+    .analysis-status { position: absolute; left: 0; right: 0; top: 45%;
+                       text-align: center; color: #94a3b8; font-size: 13px;
+                       pointer-events: none; }
+    .analysis-live-tag { position: absolute; top: 8px; right: 8px;
+                         background: rgba(220, 38, 38, 0.85); color: #fff;
+                         font-size: 10.5px; font-weight: 600;
+                         padding: 2px 8px; border-radius: 6px;
+                         letter-spacing: 0.04em; }
+    .analysis-stop { position: absolute; bottom: 8px; right: 8px;
+                     cursor: pointer; background: #1e293b;
+                     border: 1px solid #334155; color: #e2e8f0;
+                     border-radius: 8px; padding: 5px 12px;
+                     font-size: 12.5px; }
+    .analysis-stop:hover { background: #24324a; }
 
     .video-wrap { position: relative; width: 100%; aspect-ratio: 16/9;
                   background: #0c0e13; border-radius: 8px; overflow: hidden; }
@@ -495,7 +518,7 @@
       <a id="send-report-public"
          href="https://github.com/orarr2/Turkey-Business-Activity-Streamlit-Real-time-YOLOv8-of-crowd-detection/actions/workflows/send-report.yml"
          target="_blank" rel="noopener"
-         title="פתיחת טופס השליחה: הזן כתובת יעד ולחץ Run workflow - הדוח נבנה מהנתונים החיים ונשלח מתיבת הפרויקט"
+         title="Opens the send form: enter a destination address and press Run workflow - the report is built from the live data and sent from the project mailbox"
          style="display:inline-block;background:#2563eb;color:#fff;text-decoration:none;
                 border-radius:8px;padding:7px 14px;font-size:14px;font-weight:600">
         📧 Send Report From VM</a>
@@ -505,7 +528,7 @@
                style="background:#0f172a;border:1px solid #334155;color:#e2e8f0;
                       border-radius:8px;padding:7px 10px;font-size:13.5px;width:210px">
         <button id="send-report-btn"
-                title="הדוח נבנה עכשיו מהנתונים החיים ונשלח מתיבת הפרויקט לכתובת שהוזנה (עותק לארכיון)"
+                title="Builds the report from the live data right now and sends it from the project mailbox to the entered address (archive CC'd)"
                 style="cursor:pointer;background:#2563eb;border:0;color:#fff;
                        border-radius:8px;padding:7px 14px;font-size:14px;font-weight:600">
           📧 Send Report From VM</button>
@@ -611,7 +634,8 @@
          (a slot whose Firestore doc arrives late used to leave its cell
          "waiting" forever, reading as "the first camera doesn't work"). -->
     <div class="model-section" data-tab="search">
-      <h2>Model view - live (what the counts came from)</h2>
+      <h2>Model view - live (the CLOUD collector's cameras - where every
+        count on this page comes from)</h2>
       <div class="model-strip" id="model-strip"></div>
     </div>
 

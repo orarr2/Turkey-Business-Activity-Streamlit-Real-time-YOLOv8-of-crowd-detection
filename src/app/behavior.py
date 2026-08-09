@@ -50,6 +50,7 @@ from app.cameras import CAMERAS
 from app.detect_core import (
     DEFAULT_PER_CLASS_CONF,
     VEHICLE_LENGTH_M,
+    count_line_crossings,
     detect_with_boxes,
     draw_boxes,
     filter_boxes_roi,
@@ -79,11 +80,13 @@ STATIONARY_NET_FRAC = 0.02
 _DIRECTIONS = ("right", "down-right", "down", "down-left",
                "left", "up-left", "up", "up-right")
 
-# fix1-B: the analysis-picker layers. The dashboard lets the operator pick
-# up to four; each renders as its own tile from ONE shared detection (and,
-# when needed, pose) pass - selection changes what is DRAWN, never what
-# was computed.
-ANALYSIS_LAYERS = ("paths", "pose", "gestures", "body", "faces", "heat")
+# The analysis layers. The dashboard runs them LIVE per camera (fix 2:
+# one layer per camera via app/live_analysis.py); this one-shot API keeps
+# accepting up to four for a single window - each renders as its own tile
+# from ONE shared detection (and, when needed, pose) pass. "line" is the
+# threshold-crossing layer added in fix 2.
+ANALYSIS_LAYERS = ("paths", "pose", "gestures", "body", "faces", "heat",
+                   "line")
 MAX_ANALYSIS_LAYERS = 4
 _POSE_LAYERS = {"pose", "gestures", "body"}
 
@@ -270,68 +273,41 @@ def _draw_label_chips(out, last_boxes: list[dict], stats: list[dict],
 
 def render_layer(frames, tracks: list[Track], stats: list[dict],
                  layer: str, faces: list[dict] | None = None,
-                 cam_id: str | None = None):
-    """One analysis-picker tile: the final frame annotated with exactly one
-    layer's information. The heavy work (detection, tracking, pose) was
-    already done by analyze_window - this only draws."""
-    import cv2
-
-    last_boxes = _boxes_of_last_frame(tracks)
-
-    if layer == "heat":
-        # The VM publishes its live dwell overlay to Storage continuously
-        # (snapshots/heatmaps/<cam>.jpg) - that is THE production heat
-        # signature. Fall back to rendering the local accumulation onto
-        # the current frame when the download fails (offline/notebook).
-        try:
-            from app.pool_sync import _bucket_name, _http_get
-            import numpy as np
-            b = _bucket_name()
-            if b:
-                raw = _http_get(f"https://storage.googleapis.com/{b}"
-                                f"/snapshots/heatmaps/{cam_id}.jpg"
-                                f"?t={int(time.time())}")
-                img = cv2.imdecode(np.frombuffer(raw, np.uint8),
-                                   cv2.IMREAD_COLOR)
-                if img is not None:
-                    return img
-        except Exception:
-            pass
-        from app.heatmap import render as _hm_render
-        return _hm_render(cam_id or "?", base_frame=frames[-1])
+                 cam_id: str | None = None, line: list | None = None):
+    """One analysis tile: the final frame annotated with EXACTLY that
+    layer's semantics. The heavy work (detection, tracking, pose) was
+    already done by analyze_window - this only draws, and it draws via
+    the SAME functions the live engine uses (app/live_analysis.py), so
+    the one-shot API and the live tiles can never diverge. fix 2 rules:
+    pose shows skeletons only (never detection boxes, never vehicles),
+    heat is THIS window's own accumulation (never another camera's
+    published overlay), and empty layers say so honestly."""
+    from app import live_analysis as _la
 
     out = frames[-1].copy()
-    if layer == "paths":
-        for tr in tracks:
-            color = _TRAIL_COLORS[(tr.tid - 1) % len(_TRAIL_COLORS)]
-            pts = [(int(cx), int(cy))
-                   for cx, cy in (_centroid(b) for b in tr.boxes)]
-            for p0, p1 in zip(pts, pts[1:]):
-                cv2.line(out, p0, p1, color, 2, cv2.LINE_AA)
-            if pts:
-                cv2.circle(out, pts[0], 4, color, -1, cv2.LINE_AA)
-        return draw_boxes(out, last_boxes)
+    last_boxes = _boxes_of_last_frame(tracks)
+    stats_by_id = {s.get("id"): s for s in (stats or [])}
 
-    out = draw_boxes(out, last_boxes)
+    if layer == "heat":
+        return _la.draw_heat_layer(
+            out, _la.grid_from_tracks(tracks, frames[-1].shape))
+    if layer == "paths":
+        return _la.draw_paths_layer(out, tracks, last_boxes, stats_by_id)
     if layer == "pose":
-        from app.pose import draw_skeleton
-        return draw_skeleton(out, last_boxes)
+        return _la.draw_pose_layer(out, last_boxes)
     if layer == "gestures":
-        from app.pose import draw_skeleton
-        out = draw_skeleton(out, last_boxes)
-        _draw_label_chips(out, last_boxes, stats,
-                          text_of=lambda s: "+".join(s.get("gestures") or [])
-                          or None)
-        return out
+        return _la.draw_gestures_layer(out, last_boxes, stats_by_id)
     if layer == "body":
-        _draw_label_chips(out, last_boxes, stats,
-                          text_of=lambda s: s.get("label"))
-        return out
+        return _la.draw_body_layer(out, last_boxes, stats_by_id)
     if layer == "faces":
-        if faces:
-            from app.faces import draw_faces
-            out = draw_faces(out, faces)
-        return out
+        return _la.draw_faces_layer_img(out, faces or [])
+    if layer == "line":
+        ln = line or (CAMERAS.get(cam_id or "") or {}).get("line") \
+            or _la.DEFAULT_LINE
+        c = count_line_crossings([tr.boxes for tr in tracks],
+                                 frames[-1].shape, ln)
+        return _la.draw_line_layer(out, ln,
+                                   {"in": c["in"], "out": c["out"]})
     return out
 
 

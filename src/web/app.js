@@ -128,7 +128,8 @@ for (const slot of GRID_SLOTS) {
         <div class="city" data-cam-area>${escapeHtml(slot.display_area)}</div>
       </div>
       <div class="tile-head-right">
-        <button class="analyze-btn" data-analyze title="ניתוח מתקדם - בחירת שכבות"
+        <button class="analyze-btn" data-analyze
+                title="Live analysis - pick one layer for this camera"
                 style="cursor:pointer;border:1px solid #334155;background:#1e293b;color:#e2e8f0;border-radius:6px;padding:2px 8px;font-size:13px">🔬</button>
         <span class="activity-badge act-unknown" data-activity>
           <span class="dot"></span><span data-activity-text>-/10</span>
@@ -202,17 +203,35 @@ for (const slot of GRID_SLOTS) {
     openAnalysisPicker(tileState[slot.slot_id]));
 }
 
+// ---------- 1b0. Private-backend probe (fix 2) --------------------------------
+// One truth source for "is this the operator's PRIVATE dashboard": ask the
+// server. Only dashboard_server.py answers /api/ping with {private:true};
+// the hosted public copy has no backend (fetch fails or returns HTML).
+// Hostname sniffing is gone - it lied behind proxies. The probe gates the
+// send-report field (1b2) and reveals the live-analysis buttons (1c).
+let PRIVATE_BACKEND = false;
+const _privateProbe = (async () => {
+  try {
+    const r = await fetch("/api/ping", { cache: "no-store" });
+    if (r.ok) {
+      const j = await r.json();
+      PRIVATE_BACKEND = !!(j && j.private === true);
+    }
+  } catch (_) { PRIVATE_BACKEND = false; }
+  document.body.classList.toggle("private-backend", PRIVATE_BACKEND);
+  return PRIVATE_BACKEND;
+})();
+
 // ---------- 1b2. Send-report button (2026-08-09) ------------------------------
-// One button, two mechanisms: on the operator's PRIVATE dashboard
-// (localhost) the field+button post to this server's /api/send-report;
-// anywhere else (the hosted PUBLIC dashboard) the link variant opens the
-// send-report GitHub workflow, where GitHub login gates abuse.
-(() => {
+// One button, two mechanisms: on the operator's PRIVATE dashboard the
+// field+button post to this server's /api/send-report; the hosted PUBLIC
+// dashboard keeps the link variant that opens the send-report GitHub
+// workflow, where GitHub login gates abuse.
+(async () => {
   const priv = document.getElementById("send-report-private");
   const pub = document.getElementById("send-report-public");
   if (!priv || !pub) return;
-  const isPrivate = ["localhost", "127.0.0.1"].includes(location.hostname);
-  if (!isPrivate) return;                  // public stays on the link
+  if (!await _privateProbe) return;        // public stays on the link
   pub.style.display = "none";
   priv.style.display = "flex";
   const toEl = document.getElementById("send-report-to");
@@ -221,95 +240,105 @@ for (const slot of GRID_SLOTS) {
   btn.addEventListener("click", async () => {
     const to = (toEl.value || "").trim();
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) {
-      msg.textContent = "כתובת לא תקינה";
+      msg.textContent = "Invalid email address";
       msg.style.color = "#f87171";
       return;
     }
     btn.disabled = true;
     msg.style.color = "#94a3b8";
-    msg.textContent = "בונה ושולח... (~2 דק')";
+    msg.textContent = "Building & sending... (~2 min)";
     try {
       const r = await fetch(`/api/send-report?to=${encodeURIComponent(to)}`,
                             { method: "POST" });
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || r.status);
       msg.style.color = "#4ade80";
-      msg.textContent = `נשלח אל ${to}`;
+      msg.textContent = `Sent to ${to}`;
     } catch (e) {
       msg.style.color = "#f87171";
-      msg.textContent = "נכשל: " + e.message;
+      msg.textContent = "Failed: " + e.message;
     } finally {
       btn.disabled = false;
     }
   });
 })();
 
-// ---------- 1c. fix1-B: advanced-analysis picker ------------------------------
-// The operator picks up to four analysis layers for ONE camera; the live
-// grid MORPHS into the analysis tiles (never two grids at once) and the
-// back button restores the live view.
+// ---------- 1c. fix 2: LIVE advanced analysis ---------------------------------
+// One layer per camera, up to four live analyses across the grid (= the
+// four tiles, so the cap is structural). Picking a layer morphs THAT tile
+// in place: its video is replaced by a live stream of analyzed frames of
+// the SAME camera, polled from the local server at ~1 fps - the honest
+// pace of CPU inference (four concurrent analyses share one model and
+// degrade to ~0.3-0.5 fps each). Unanalyzed tiles keep full-rate video;
+// the VM collector is never involved. Switching layers on a running tile
+// keeps the session's stream + accumulators (heat map, line counters,
+// gesture history) - heat -> gestures -> heat resumes, never restarts.
 const ANALYSIS_LAYER_DEFS = [
-  ["heat",     "חתימת חום"],
-  ["paths",    "מסלולים ומהירויות"],
-  ["pose",     "תנוחה ושלד"],
-  ["gestures", "מחוות ידיים"],
-  ["body",     "אנומליות גוף"],
-  ["faces",    "זיהוי פנים"],
+  ["heat",     "Heat signature"],
+  ["paths",    "Paths & speeds"],
+  ["pose",     "Pose & skeleton"],
+  ["gestures", "Hand gestures"],
+  ["body",     "Body anomalies"],
+  ["faces",    "Face detection"],
+  ["line",     "Line crossing"],
 ];
-const MAX_ANALYSIS_LAYERS = 4;
+const ANALYSIS_POLL_MS = 1000;
 
 const analysisPanel = document.createElement("div");
-analysisPanel.dir = "rtl";
 analysisPanel.style.cssText =
   "display:none;position:fixed;inset:0;z-index:60;background:rgba(2,6,23,.72);" +
   "align-items:center;justify-content:center";
 analysisPanel.innerHTML = `
   <div style="background:#0f172a;border:1px solid #334155;border-radius:12px;
-              padding:20px 22px;max-width:420px;width:92%;color:#e2e8f0;
+              padding:20px 22px;max-width:440px;width:92%;color:#e2e8f0;
               font-size:15px">
-    <h3 style="margin:0 0 4px;font-size:17px">ניתוח מתקדם -
+    <h3 style="margin:0 0 4px;font-size:17px">Live analysis -
       <span data-an-cam></span></h3>
     <div style="color:#94a3b8;font-size:13px;margin-bottom:12px">
-      בחר עד ${MAX_ANALYSIS_LAYERS} שכבות ניתוח; הגריד הראשי יוחלף בתוצאה</div>
+      One layer per camera, up to 4 live analyses across the grid.
+      The tile becomes a live analyzed stream (~1 fps on local CPU);
+      Stop on the tile returns the video.</div>
     <div data-an-boxes style="display:grid;grid-template-columns:1fr 1fr;
          gap:8px 14px;margin-bottom:14px"></div>
     <div data-an-err style="color:#f87171;font-size:13px;min-height:18px"></div>
-    <div style="display:flex;gap:10px;justify-content:flex-start">
+    <div style="display:flex;gap:10px">
       <button data-an-run style="cursor:pointer;background:#2563eb;border:0;
               color:#fff;border-radius:8px;padding:7px 18px;font-size:14px">
-        נתח עכשיו</button>
+        Start</button>
       <button data-an-cancel style="cursor:pointer;background:#1e293b;
               border:1px solid #334155;color:#e2e8f0;border-radius:8px;
-              padding:7px 14px;font-size:14px">ביטול</button>
+              padding:7px 14px;font-size:14px">Cancel</button>
     </div>
   </div>`;
 document.body.appendChild(analysisPanel);
-
-const analysisView = document.createElement("section");
-analysisView.dir = "rtl";
-analysisView.style.cssText = "display:none";
-document.body.appendChild(analysisView);
 
 const _anBoxes = analysisPanel.querySelector("[data-an-boxes]");
 for (const [key, label] of ANALYSIS_LAYER_DEFS) {
   const lab = document.createElement("label");
   lab.style.cssText = "display:flex;gap:7px;align-items:center;cursor:pointer";
-  lab.innerHTML = `<input type="checkbox" value="${key}"> ${label}`;
+  lab.innerHTML = `<input type="radio" name="an-layer" value="${key}"> ${label}`;
   _anBoxes.appendChild(lab);
 }
-_anBoxes.addEventListener("change", () => {
-  const checked = _anBoxes.querySelectorAll("input:checked").length;
-  for (const cb of _anBoxes.querySelectorAll("input"))
-    cb.disabled = !cb.checked && checked >= MAX_ANALYSIS_LAYERS;
-});
 
 let _anTarget = null;   // tileState entry the picker is open for
+
+function tileAnalysisCamId(st) {
+  // The tile's OWN camera - the one whose video the operator watches.
+  // Local preview: the picked slot (local_grid.json), resolved by the
+  // server. Cloud mode: the collector's active camera for this slot.
+  return LOCAL_MODE ? st.slot.slot_id : (st.currentActiveCam || null);
+}
 
 function openAnalysisPicker(st) {
   _anTarget = st;
   analysisPanel.querySelector("[data-an-cam]").textContent =
     st.camNameEl.textContent || st.slot.display_area;
   analysisPanel.querySelector("[data-an-err]").textContent = "";
+  const current = st.analysis ? st.analysis.layer : null;
+  for (const rb of _anBoxes.querySelectorAll("input"))
+    rb.checked = rb.value === current;
+  analysisPanel.querySelector("[data-an-run]").textContent =
+    st.analysis ? "Switch layer" : "Start";
   analysisPanel.style.display = "flex";
 }
 
@@ -319,74 +348,157 @@ analysisPanel.querySelector("[data-an-cancel]").addEventListener("click",
 analysisPanel.querySelector("[data-an-run]").addEventListener("click",
   async () => {
     const errEl = analysisPanel.querySelector("[data-an-err]");
-    const layers = [..._anBoxes.querySelectorAll("input:checked")]
-      .map((cb) => cb.value);
-    if (!layers.length) {
-      errEl.textContent = "בחר לפחות שכבה אחת";
+    const picked = _anBoxes.querySelector("input:checked");
+    if (!picked) {
+      errEl.textContent = "Pick a layer";
       return;
     }
-    const cam = _anTarget?.currentActiveCam || _anTarget?.cloudCamId
-        || _anTarget?.slot?.primary;
+    const st = _anTarget;
+    const cam = st && tileAnalysisCamId(st);
     if (!cam) {
-      errEl.textContent = "למצלמה הזו אין מזהה פעיל כרגע";
+      errEl.textContent =
+        "Camera not identified yet - wait for the first grid config";
       return;
     }
     const runBtn = analysisPanel.querySelector("[data-an-run]");
     runBtn.disabled = true;
-    runBtn.textContent = "מנתח... (~חצי דקה)";
     errEl.textContent = "";
     try {
       const r = await fetch(
-        `/api/deep-analyze?cam=${encodeURIComponent(cam)}` +
-        `&layers=${encodeURIComponent(layers.join(","))}`,
+        `/api/analysis/start?cam=${encodeURIComponent(cam)}` +
+        `&layer=${encodeURIComponent(picked.value)}`,
         { method: "POST" });
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || r.status);
-      renderAnalysisView(data, _anTarget);
+      beginTileAnalysis(st, cam, picked.value);
       analysisPanel.style.display = "none";
     } catch (e) {
-      errEl.textContent = "הניתוח נכשל: " + e.message;
+      errEl.textContent = "Failed to start: " + e.message;
     } finally {
       runBtn.disabled = false;
-      runBtn.textContent = "נתח עכשיו";
     }
   });
 
-function renderAnalysisView(data, st) {
-  const labelOf = Object.fromEntries(ANALYSIS_LAYER_DEFS);
-  const imgs = data.layer_images || {};
-  const tiles = (data.layers || []).filter((l) => imgs[l]);
-  const cols = tiles.length >= 2 ? 2 : 1;
-  analysisView.innerHTML = `
-    <div style="display:flex;align-items:center;gap:14px;margin:10px 0">
-      <button data-an-back style="cursor:pointer;background:#1e293b;
-              border:1px solid #334155;color:#e2e8f0;border-radius:8px;
-              padding:7px 16px;font-size:14px">→ חזרה לשידור חי</button>
-      <h2 style="margin:0;font-size:18px;color:#e2e8f0">ניתוח מתקדם -
-        ${escapeHtml(data.cam_name || st.camNameEl.textContent
-                     || st.slot.display_area)}
-        <span style="color:#94a3b8;font-size:13px">
-          (${data.individuals ?? 0} פרטים בחלון, ${data.window_sec ?? "?"} שניות)
-        </span></h2>
-    </div>
-    <div style="display:grid;grid-template-columns:repeat(${cols},1fr);
-                gap:12px">
-      ${tiles.map((l) => `
-        <figure style="margin:0;background:#0f172a;border:1px solid #334155;
-                       border-radius:10px;overflow:hidden">
-          <figcaption style="padding:6px 10px;color:#e2e8f0;font-size:14px">
-            ${labelOf[l] || l}</figcaption>
-          <img src="${imgs[l]}" alt="${l}" style="width:100%;display:block">
-        </figure>`).join("")}
-    </div>`;
-  analysisView.querySelector("[data-an-back]").addEventListener("click", () => {
-    analysisView.style.display = "none";
-    analysisView.innerHTML = "";
-    tilesEl.style.display = "";
-  });
-  tilesEl.style.display = "none";
-  tilesEl.parentNode.insertBefore(analysisView, tilesEl);
-  analysisView.style.display = "block";
+const _layerLabel = Object.fromEntries(ANALYSIS_LAYER_DEFS);
+
+function beginTileAnalysis(st, cam, layer) {
+  if (st.analysis) {
+    // Same tile, new layer: the session already switched server-side
+    // (stream + accumulators kept) - just relabel; the poller runs on.
+    st.analysis.layer = layer;
+    const tag = st.videoWrap.querySelector(".analysis-live-tag");
+    if (tag) tag.textContent = `LIVE ANALYSIS · ${_layerLabel[layer] || layer}`;
+    return;
+  }
+  stopTileVideo(st);
+  st._overlayWasHidden = st.overlay.style.display === "none";
+  st.overlay.style.display = "none";
+  const wrap = document.createElement("div");
+  wrap.className = "analysis-wrap";
+  wrap.innerHTML = `
+    <img alt="live analysis" draggable="false" style="display:none">
+    <div class="analysis-status">starting live analysis...</div>
+    <span class="analysis-live-tag">LIVE ANALYSIS ·
+      ${escapeHtml(_layerLabel[layer] || layer)}</span>
+    <button class="analysis-stop">■ Stop - back to video</button>`;
+  st.videoWrap.insertBefore(wrap, st.overlay);
+  wrap.querySelector(".analysis-stop").addEventListener("click",
+    () => stopTileAnalysis(st));
+  st.analysis = {
+    cam, layer,
+    img: wrap.querySelector("img"),
+    status: wrap.querySelector(".analysis-status"),
+    lastUrl: null, failures: 0, lastRestart: 0, inflight: false,
+    timer: setInterval(() => pollAnalysisFrame(st), ANALYSIS_POLL_MS),
+  };
+  pollAnalysisFrame(st);
+}
+
+async function pollAnalysisFrame(st) {
+  const a = st.analysis;
+  if (!a || a.inflight) return;
+  a.inflight = true;
+  try {
+    const r = await fetch(
+      `/api/analysis/frame?cam=${encodeURIComponent(a.cam)}&_=${Date.now()}`,
+      { cache: "no-store" });
+    if (r.status === 200
+        && (r.headers.get("Content-Type") || "").includes("image")) {
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      a.img.src = url;
+      a.img.style.display = "";
+      if (a.lastUrl) URL.revokeObjectURL(a.lastUrl);
+      a.lastUrl = url;
+      a.status.style.display = "none";
+      a.failures = 0;
+    } else if (r.status === 202) {
+      const j = await r.json();
+      a.status.style.display = "";
+      a.status.textContent = j.note || "starting...";
+    } else if (r.status === 404) {
+      // Session ended server-side (idle stop / server restart): restart
+      // it, at most once per 5s so a dead backend isn't hammered.
+      a.failures += 1;
+      if (Date.now() - a.lastRestart > 5000) {
+        a.lastRestart = Date.now();
+        a.status.style.display = "";
+        a.status.textContent = "analysis session ended - restarting...";
+        fetch(`/api/analysis/start?cam=${encodeURIComponent(a.cam)}`
+              + `&layer=${encodeURIComponent(a.layer)}`,
+              { method: "POST" }).catch(() => {});
+      }
+    } else {
+      a.failures += 1;
+    }
+  } catch (_) {
+    a.failures += 1;
+  } finally {
+    a.inflight = false;
+  }
+  if (a.failures > 8) {
+    a.status.style.display = "";
+    a.status.textContent =
+      "analysis unreachable - press Stop to return to video";
+  }
+}
+
+function stopTileAnalysis(st) {
+  const a = st.analysis;
+  if (!a) return;
+  clearInterval(a.timer);
+  if (a.lastUrl) URL.revokeObjectURL(a.lastUrl);
+  st.analysis = null;
+  fetch(`/api/analysis/stop?cam=${encodeURIComponent(a.cam)}`,
+        { method: "POST" }).catch(() => {});
+  const wrap = st.videoWrap.querySelector(".analysis-wrap");
+  if (wrap) wrap.remove();
+  if (!st._overlayWasHidden) st.overlay.style.display = "";
+  // Rebuild the live video from the remembered inputs (kept current by
+  // applyGridConfig even while the tile was analyzing).
+  if (st.lastVideoBuild)
+    buildVideoInto(st, st.lastVideoBuild.cfg, st.lastVideoBuild.slot);
+}
+
+// Tear down whatever player the tile currently runs (hls.js / YT API /
+// plain iframe) without touching the overlay - the same teardown
+// buildVideoInto performs before a rebuild, reusable for the analysis
+// morph.
+function stopTileVideo(st) {
+  st._vLastTime = null;
+  st._vStrikes = 0;
+  if (st.currentHlsInstance) {
+    try { st.currentHlsInstance.destroy(); } catch (_) {}
+    st.currentHlsInstance = null;
+  }
+  clearTimeout(st._ytStartTimer);
+  if (st.ytPlayer) {
+    try { st.ytPlayer.destroy(); } catch (_) {}
+    st.ytPlayer = null;
+  }
+  for (const el of Array.from(st.videoWrap.children)) {
+    if (el !== st.overlay) el.remove();
+  }
 }
 
 // ---------- 1b. Model-view strip skeleton -----------------------------------
@@ -862,6 +974,7 @@ function watchTilesLive() {
   if (document.visibilityState !== "visible") return;
   for (const st of Object.values(tileState)) {
     if (!st.videoWrap) continue;
+    if (st.analysis) continue;   // analyzed tile: no player to keep alive
     const video = st.videoWrap.querySelector("video[data-hls]");
     if (video) {
       const t = video.currentTime;
@@ -1084,7 +1197,13 @@ function applyGridConfig(cfg) {
       st.camAreaEl.textContent = slotCfg.display_area || "";
       updateStripLabel(slotCfg.slot_id, slotCfg.active_cam_name,
                        slotCfg.display_area);
-      buildVideoInto(st, slotCfg, st.slot);
+      if (st.analysis) {
+        // Tile is mid-analysis (fix 2): don't stomp the analyzed stream;
+        // remember the new video inputs so Stop rebuilds the CURRENT cam.
+        st.lastVideoBuild = { cfg: slotCfg, slot: st.slot };
+      } else {
+        buildVideoInto(st, slotCfg, st.slot);
+      }
     }
     if (slotCfg.idle) {
       // Grid narrowed: this slot is deliberately idle, not "on fallback".
@@ -1111,27 +1230,29 @@ function setLatest(st, d) {
     // missing data.
     if (el) el.textContent = v != null ? v : "-";
   };
+  // fix 2 tile identity (local preview): a tile carries CLOUD numbers only
+  // when the cloud camera in this slot IS the picked camera. An unmatched
+  // tile shows video + live analysis only - no KPIs, no badges, no age
+  // from a DIFFERENT camera; the VM's numbers stay in the clearly-VM
+  // areas (model strip, 24h chart, anomaly/events tables), labeled with
+  // the cloud camera's own name via st.cloudCamName.
+  if (d.cam_name) st.cloudCamName = d.cam_name;
+  st.cloudMismatch = !!(LOCAL_MODE && d.cam_name && st.camNameEl
+      && st.camNameEl.textContent
+      && st.camNameEl.textContent !== d.cam_name);
+  if (st.cloudMismatch) {
+    st.overlay.style.display = "none";
+    st.activityBadge.style.display = "none";
+    st.anomalyBadge.style.display = "none";
+    st.anomalyThumb.style.display = "none";
+    updateStrip(st.slot.slot_id, d);   // the strip IS a cloud area
+    return;
+  }
+  if (!st.analysis) st.overlay.style.display = "";
+  st.activityBadge.style.display = "";
+  st.anomalyBadge.style.display = "";
   set("person",   d.person);
   set("vehicles", d.vehicles);
-  // The cloud collector's camera for this slot - the analysis picker
-  // targets it even in local-preview mode (where the VIDEO is the local
-  // pick but every number on the tile already belongs to this cam).
-  if (d.cam_id) st.cloudCamId = d.cam_id;
-  // Honesty label (local preview): the video is YOUR picked camera, but
-  // counts/KPIs stream from whatever camera the CLOUD collector has in
-  // this slot. When the two differ, say so on the tile instead of letting
-  // Bangkok numbers sit silently under an Istanbul title.
-  if (LOCAL_MODE && d.cam_name && st.camAreaEl) {
-    if (st.camAreaEl.dataset.baseTxt === undefined)
-      st.camAreaEl.dataset.baseTxt = st.camAreaEl.textContent;
-    const mismatch = st.camNameEl && st.camNameEl.textContent
-        && st.camNameEl.textContent !== d.cam_name;
-    st.camAreaEl.innerHTML = escapeHtml(st.camAreaEl.dataset.baseTxt)
-        + (mismatch
-           ? ` · <span class="counts-src">counts: ${escapeHtml(d.cam_name)}`
-             + ` (cloud grid)</span>`
-           : "");
-  }
   // Vehicle speed chip: shown only when this sample tracked moving vehicles
   // (a burst-based estimate; the tooltip carries the honesty disclaimer).
   if (st.speedWrap) {
@@ -1192,6 +1313,11 @@ setInterval(() => {
 
 function updateAggregates(slotId, rows) {
   const st = tileState[slotId];
+  if (st.cloudMismatch) {
+    // Unmatched local tile (fix 2): its 24h history belongs to the CLOUD
+    // camera - it feeds the chart + tables, never this tile's widgets.
+    return;
+  }
   if (!rows.length) {
     setActivityBadge(st, null);
     return;
@@ -1388,6 +1514,17 @@ function toggleSection(id, hasContent) {
   if (el) el.hidden = !hasContent;
 }
 
+// Cloud-area label for a tile's data series: in local-preview mode the
+// 24h history routed to a tile belongs to the CLOUD camera, so the chart
+// legend and the anomaly/events tables must carry the CLOUD camera's name
+// - never the local pick's title (fix 2: no Bangkok titles on Istanbul
+// curves).
+function tileCloudLabel(slot) {
+  const st = tileState[slot.slot_id];
+  return (LOCAL_MODE && st && st.cloudCamName) ? st.cloudCamName
+                                               : slot.display_area;
+}
+
 function renderCombinedChart() {
   const binMs = COMBINED_BIN_MIN * 60 * 1000;
   const binsBySlot = {};
@@ -1436,7 +1573,7 @@ function renderCombinedChart() {
                                                    : palette[i % palette.length]);
     const pointR  = binList.map((b) => anom.has(b) ? 5 : 0);
     return {
-      label: slot.display_area,
+      label: tileCloudLabel(slot),
       data: binList.map((b) => bins.has(b)
           ? +(bins.get(b).sum / bins.get(b).n).toFixed(1) : null),
       borderColor: palette[i % palette.length],
@@ -1478,7 +1615,7 @@ function renderAnomalyEvents() {
   const events = [];
   for (const slot of GRID_SLOTS) {
     for (const r of tileState[slot.slot_id].history) {
-      if (isShownAnomaly(r)) events.push({ area: slot.display_area, r });
+      if (isShownAnomaly(r)) events.push({ area: tileCloudLabel(slot), r });
     }
   }
   toggleSection("anomaly-section", events.length > 0);
@@ -1545,6 +1682,12 @@ function renderEventsTable(events) {
   if (!wrap) return;
   _ALL_EVENTS = events;
   const slotLabel = (id) => {
+    if (LOCAL_MODE) {
+      // Events are CLOUD data - name the cloud camera, not the local pick.
+      const tid = cloudToTile(id);
+      const st = tid && tileState[tid];
+      return (st && st.cloudCamName) || id;
+    }
     const slot = GRID_SLOTS.find((s) => s.slot_id === id);
     return slot ? slot.display_area : id;
   };
@@ -1673,11 +1816,22 @@ function toggleEventAccordion(idx, toggleEl) {
 function renderReidTable(docs) {
   const wrap = document.getElementById("reid-table-wrap");
   const slotIds = new Set(GRID_SLOTS.map((s) => s.slot_id));
-  const rows = docs.filter((d) => slotIds.has(d.id));
+  // Re-id docs are keyed by CLOUD slot ids; route through cloudToTile so
+  // the table renders in local-preview mode too (it silently vanished
+  // there before - the cloud ids never matched the local_N tile ids).
+  const rows = docs.filter((d) => {
+    const tid = cloudToTile(d.id);
+    return tid && slotIds.has(tid);
+  });
   toggleSection("reid-section", rows.length > 0);
   if (!rows.length) return;
   const tr = (cells) => `<tr>${cells.map((c) => `<td>${c}</td>`).join("")}</tr>`;
   const slotLabel = (id) => {
+    if (LOCAL_MODE) {
+      const tid = cloudToTile(id);
+      const st = tid && tileState[tid];
+      return (st && st.cloudCamName) || id;
+    }
     const slot = GRID_SLOTS.find((s) => s.slot_id === id);
     return slot ? slot.display_area : id;
   };

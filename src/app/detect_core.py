@@ -305,6 +305,14 @@ def resolve_stream(cam: dict, now: float | None = None) -> str:
     return resolved
 
 
+def invalidate_stream(cam_id: str) -> None:
+    """Drop the cached resolve for one camera. The live-analysis loop
+    calls this after repeated grab failures so the next resolve_stream()
+    re-runs yt-dlp/page-scraping instead of re-knocking an expired
+    manifest until its natural expiry."""
+    _RESOLVE_CACHE.pop(cam_id, None)
+
+
 _SSL_CTX = ssl._create_unverified_context()
 
 # Some live-CDN HLS endpoints (e.g. content.tvkur.com) require a Referer/Origin header
