@@ -794,11 +794,17 @@ def send_gmail(subject: str, text: str, html: str,
     if not user or not pwd:
         raise SystemExit("GMAIL_USER and GMAIL_APP_PASSWORD must be set "
                          "(see /etc/turkey-footfall/digest.env)")
+    # DIGEST_TO takes a comma list since 2026-08-09: the on-demand send
+    # goes to the requested address with the project mailbox CC'd, so the
+    # archive accumulates every report ever sent.
+    recipients = [t.strip() for t in to.split(",") if t.strip()]
 
     outer = MIMEMultipart("mixed")
     outer["Subject"] = subject
     outer["From"] = user
-    outer["To"] = to
+    outer["To"] = recipients[0]
+    if len(recipients) > 1:
+        outer["Cc"] = ", ".join(recipients[1:])
 
     body = MIMEMultipart("alternative")
     body.attach(MIMEText(text, "plain", "utf-8"))
@@ -820,7 +826,7 @@ def send_gmail(subject: str, text: str, html: str,
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as s:
         s.login(user, pwd)
-        s.sendmail(user, [to], outer.as_string())
+        s.sendmail(user, recipients, outer.as_string())
 
 
 def _build_pdf(now_il: dt.datetime, window_hours: int,
