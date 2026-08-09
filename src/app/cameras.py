@@ -114,14 +114,25 @@ CAMERAS = {
         # (x>=0.75, y>=0.70; the terminal lanes on the LEFT never enter it).
         # `person` is deliberately NOT excluded: people walk in front of
         # the canopy all day.
+        # 09.08: vendor carts (simit/corn stands with white canopies) park on
+        # the bottom-CENTER walkway (foot x 0.23-0.55, y>=0.90) and COCO has
+        # no cart class - a canopied cart reads as 'car', stood 5+ min, and
+        # produced a "Static object left · car" card that was actually a
+        # vendor cart. Real vans keep the bottom-LEFT apron (x < 0.23).
         "roi_exclude_class": {
             "bus":   [[[0.0, 0.84], [1.0, 0.84], [1.0, 1.0], [0.0, 1.0]],
                       [[0.75, 0.70], [1.0, 0.70], [1.0, 1.0], [0.75, 1.0]]],
             "car":   [[[0.55, 0.84], [1.0, 0.84], [1.0, 1.0], [0.55, 1.0]],
-                      [[0.75, 0.70], [1.0, 0.70], [1.0, 1.0], [0.75, 1.0]]],
+                      [[0.75, 0.70], [1.0, 0.70], [1.0, 1.0], [0.75, 1.0]],
+                      [[0.23, 0.90], [0.55, 0.90], [0.55, 1.0], [0.23, 1.0]]],
             "truck": [[[0.55, 0.84], [1.0, 0.84], [1.0, 1.0], [0.55, 1.0]],
-                      [[0.75, 0.70], [1.0, 0.70], [1.0, 1.0], [0.75, 1.0]]],
+                      [[0.75, 0.70], [1.0, 0.70], [1.0, 1.0], [0.75, 1.0]],
+                      [[0.23, 0.90], [0.55, 0.90], [0.55, 1.0], [0.23, 1.0]]],
         },
+        # Measured 09.08 live: person 8 -> 16 at 960 (the wide plaza's far
+        # half simply does not exist at 640). Same per-cam mechanism as
+        # Sarachane; Sultanahmet measured no gain and stays on the global.
+        "imgsz": 960,
     },
     "beyazit_meydan": {
         "name": "Beyazit Meydani",
@@ -172,6 +183,10 @@ CAMERAS = {
         "page": "https://istanbuluseyret.ibb.gov.tr/beyazit-meydani-yeni/",
         "embed": None,
         "type": "square/market-gateway",
+        # Measured 09.08 live: person 14 -> 16 at 960 - the far half of the
+        # university plaza gains meaningfully; same per-cam mechanism as
+        # Sarachane/Taksim.
+        "imgsz": 960,
     },
     "eyup_sultan_yeni": {
         "name": "Eyup Sultan (live)",

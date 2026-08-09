@@ -488,8 +488,20 @@ def _evidence_card(group: dict, kind_labels: dict[str, str]) -> Table:
 
     rows: list[list] = [[header], [sub]]
 
+    # A static-departed card's big scene is the AFTER frame - the object is
+    # gone and the red box floats over whatever now occupies the spot.
+    # Without a caption the box reads as a live (mis)detection of the
+    # pedestrians standing there (operator complaint, 09.08: the vendor
+    # cart's departure card looked like "the model calls these people a
+    # car"). Say what each image IS.
+    is_static = group.get("kind") == "static_departed"
+
     ff = group.get("fullframe_jpeg")
     if ff:
+        if is_static:
+            rows.append([Paragraph(
+                "The scene AFTER departure - the red box marks the spot "
+                "where the object had been standing:", small_style)])
         rows.append([Image(BytesIO(ff), width=15*cm, height=8.5*cm,
                            kind="proportional")])
 
@@ -508,6 +520,8 @@ def _evidence_card(group: dict, kind_labels: dict[str, str]) -> Table:
             image_cells[0].append(Paragraph("", small_style))
         if crop_bytes:
             label = ("Same object now:" if first_bytes
+                     else "The object, while it still stood there:"
+                     if is_static
                      else "Specific object flagged:")
             image_cells[1].append(Paragraph(label, small_style))
             image_cells[1].append(Image(BytesIO(crop_bytes),
