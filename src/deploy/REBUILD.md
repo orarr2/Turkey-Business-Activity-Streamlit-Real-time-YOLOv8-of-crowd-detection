@@ -27,7 +27,7 @@ cache.
 | Storage bucket | `turkey-footfall.firebasestorage.app` |
 | Firebase key | Secret Manager secret `firebase-sa`; on disk `/etc/turkey-footfall/serviceAccount.json` (0400) |
 | Config dir | `/etc/turkey-footfall/` - `serviceAccount.json`, `proxy.env` (0600), `digest.env` (0600) |
-| systemd units | `collector.service`, `digest.service` (on-demand oneshot; the twice-daily timer was cancelled 2026-08-09) |
+| systemd units | `collector.service`, `digest.service` + `digest.timer` (12:00 + 20:00 Asia/Jerusalem -> project archive mailbox) |
 | IBB relay | Cloudflare Worker, `https://ibb-proxy.<subdomain>.workers.dev` |
 
 ## Secrets
@@ -107,7 +107,8 @@ GMAIL_APP_PASSWORD=<app password>
 EOF
 sudo chmod 600 /etc/turkey-footfall/proxy.env /etc/turkey-footfall/digest.env
 
-# 5. enable the report timer, reload the collector with the proxy env
+# 5. enable the archive report timer, reload the collector with the proxy env
+sudo systemctl enable --now digest.timer
 sudo systemctl restart collector
 ```
 
@@ -142,7 +143,7 @@ sudo mkdir -p /etc/turkey-footfall
 sudo install -m 0400 -o root -g root ~/serviceAccount.json /etc/turkey-footfall/serviceAccount.json
 
 # render + install the systemd units from the repo templates
-for unit in collector.service digest.service; do
+for unit in collector.service digest.service digest.timer; do
   sudo sed -e 's|__STORAGE_BUCKET__|turkey-footfall.firebasestorage.app|g' \
            -e 's|__INSTALL_DIR__|/opt/turkey-footfall|g' \
            -e 's|__SA_PATH__|/etc/turkey-footfall/serviceAccount.json|g' \

@@ -483,16 +483,33 @@
     </div>
     <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px">
       <div id="status" class="sub">connecting…</div>
-      <!-- On-demand report by mail (2026-08-09; replaces the cancelled
-           twice-daily timer). The button opens the send-report workflow's
-           Run form - GitHub's own login is the abuse gate, CI holds the
-           mail credential, and every send is a logged run. -->
-      <a href="https://github.com/orarr2/Turkey-Business-Activity-Streamlit-Real-time-YOLOv8-of-crowd-detection/actions/workflows/send-report.yml"
+      <!-- On-demand report by mail (2026-08-09). Two dashboards, two
+           mechanisms, one button:
+           * PUBLIC (hosted) dashboard - the link variant opens the
+             send-report GitHub workflow's Run form; GitHub login is the
+             abuse gate and CI holds the mail credential.
+           * PRIVATE (operator localhost) dashboard - the field variant
+             posts to this server's /api/send-report, which composes the
+             report from live data and mails it from the project mailbox
+             (archive CC'd). app.js shows exactly one variant by host. -->
+      <a id="send-report-public"
+         href="https://github.com/orarr2/Turkey-Business-Activity-Streamlit-Real-time-YOLOv8-of-crowd-detection/actions/workflows/send-report.yml"
          target="_blank" rel="noopener"
          title="פתיחת טופס השליחה: הזן כתובת יעד ולחץ Run workflow - הדוח נבנה מהנתונים החיים ונשלח מתיבת הפרויקט"
          style="display:inline-block;background:#2563eb;color:#fff;text-decoration:none;
                 border-radius:8px;padding:7px 14px;font-size:14px;font-weight:600">
         📧 Send Report From VM</a>
+      <div id="send-report-private" style="display:none;align-items:center;gap:8px">
+        <span id="send-report-msg" style="font-size:12.5px;color:#94a3b8"></span>
+        <input id="send-report-to" type="email" placeholder="you@example.com"
+               style="background:#0f172a;border:1px solid #334155;color:#e2e8f0;
+                      border-radius:8px;padding:7px 10px;font-size:13.5px;width:210px">
+        <button id="send-report-btn"
+                title="הדוח נבנה עכשיו מהנתונים החיים ונשלח מתיבת הפרויקט לכתובת שהוזנה (עותק לארכיון)"
+                style="cursor:pointer;background:#2563eb;border:0;color:#fff;
+                       border-radius:8px;padding:7px 14px;font-size:14px;font-weight:600">
+          📧 Send Report From VM</button>
+      </div>
     </div>
   </header>
 

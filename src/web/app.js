@@ -202,6 +202,48 @@ for (const slot of GRID_SLOTS) {
     openAnalysisPicker(tileState[slot.slot_id]));
 }
 
+// ---------- 1b2. Send-report button (2026-08-09) ------------------------------
+// One button, two mechanisms: on the operator's PRIVATE dashboard
+// (localhost) the field+button post to this server's /api/send-report;
+// anywhere else (the hosted PUBLIC dashboard) the link variant opens the
+// send-report GitHub workflow, where GitHub login gates abuse.
+(() => {
+  const priv = document.getElementById("send-report-private");
+  const pub = document.getElementById("send-report-public");
+  if (!priv || !pub) return;
+  const isPrivate = ["localhost", "127.0.0.1"].includes(location.hostname);
+  if (!isPrivate) return;                  // public stays on the link
+  pub.style.display = "none";
+  priv.style.display = "flex";
+  const toEl = document.getElementById("send-report-to");
+  const btn = document.getElementById("send-report-btn");
+  const msg = document.getElementById("send-report-msg");
+  btn.addEventListener("click", async () => {
+    const to = (toEl.value || "").trim();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) {
+      msg.textContent = "כתובת לא תקינה";
+      msg.style.color = "#f87171";
+      return;
+    }
+    btn.disabled = true;
+    msg.style.color = "#94a3b8";
+    msg.textContent = "בונה ושולח... (~2 דק')";
+    try {
+      const r = await fetch(`/api/send-report?to=${encodeURIComponent(to)}`,
+                            { method: "POST" });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || r.status);
+      msg.style.color = "#4ade80";
+      msg.textContent = `נשלח אל ${to}`;
+    } catch (e) {
+      msg.style.color = "#f87171";
+      msg.textContent = "נכשל: " + e.message;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+})();
+
 // ---------- 1c. fix1-B: advanced-analysis picker ------------------------------
 // The operator picks up to four analysis layers for ONE camera; the live
 // grid MORPHS into the analysis tiles (never two grids at once) and the

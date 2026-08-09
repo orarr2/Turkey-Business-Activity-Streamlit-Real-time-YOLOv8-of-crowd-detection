@@ -33,6 +33,7 @@ import socketserver
 import ssl
 import sys
 import threading
+import time
 import urllib.request
 from pathlib import Path
 
@@ -190,6 +191,8 @@ _VISUAL_SEARCH = _VisualSearchState()
 # and ThreadingHTTPServer would happily start several in parallel on a
 # double-clicked button - exactly the CPU spike the round budget forbids.
 _DEEP_ANALYZE_LOCK = threading.Lock()
+# Single-flight for the private dashboard's report sends (fix 2026-08-09).
+_SEND_REPORT_LOCK = threading.Lock()
 
 # Review store - lazily constructed on the first labels endpoint hit. The
 # store is thread-safe (single lock around its dict + rewrite), so all
@@ -357,7 +360,99 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/deep-analyze":
             self._deep_analyze()
             return
+        if path == "/api/send-report":
+            self._send_report()
+            return
         self.send_error(404, "unknown POST endpoint")
+
+    def _send_report(self) -> None:
+        """POST /api/send-report?to=<email>[&window_hours=12]
+
+        The PRIVATE dashboard's send button (2026-08-09): composes the
+        situation report from the live cloud data and mails it FROM the
+        project mailbox to the given address, CC the project mailbox so
+        the archive stays complete. This endpoint exists only on the
+        operator-controlled server - the PUBLIC dashboard's button goes
+        through the send-report GitHub workflow, where GitHub login gates
+        abuse. Credentials resolve from data/mailer.env, falling back to
+        /etc/turkey-footfall/digest.env (the VM). One send at a time with
+        a 60s cooldown."""
+        import re
+        import subprocess
+        import sys as _sys
+        from urllib.parse import parse_qs, urlparse
+        q = parse_qs(urlparse(self.path).query)
+        to = (q.get("to") or [""])[0].strip()
+        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", to):
+            self._send_json(400, {"error": "invalid destination email"})
+            return
+        try:
+            hours = max(1, min(24, int((q.get("window_hours") or ["12"])[0])))
+        except ValueError:
+            hours = 12
+
+        creds: dict[str, str] = {}
+        for env_path in (Path(__file__).resolve().parent.parent
+                         / "data" / "mailer.env",
+                         Path("/etc/turkey-footfall/digest.env")):
+            try:
+                for line in env_path.read_text().splitlines():
+                    k, _, v = line.strip().partition("=")
+                    if k and v and k not in creds:
+                        creds[k] = v
+                if creds.get("GMAIL_USER"):
+                    break
+            except OSError:
+                continue
+        if not creds.get("GMAIL_USER") or not creds.get("GMAIL_APP_PASSWORD"):
+            self._send_json(503, {"error": "no mail credential - create "
+                                           "data/mailer.env with GMAIL_USER "
+                                           "+ GMAIL_APP_PASSWORD"})
+            return
+        from app.training_sync import find_service_account
+        sa = find_service_account()
+        if not sa:
+            self._send_json(503, {"error": "no Firebase service-account key "
+                                           "on this machine"})
+            return
+
+        now = time.time()
+        if now - getattr(self.__class__, "_last_report_send", 0.0) < 60.0:
+            self._send_json(429, {"error": "a report was sent less than a "
+                                           "minute ago - try again shortly"})
+            return
+        if not _SEND_REPORT_LOCK.acquire(blocking=False):
+            self._send_json(409, {"error": "a send is already running"})
+            return
+        try:
+            self.__class__._last_report_send = now
+            archive = creds["GMAIL_USER"]
+            env = dict(os.environ,
+                       FIREBASE_CREDENTIALS=sa,
+                       GMAIL_USER=creds["GMAIL_USER"],
+                       GMAIL_APP_PASSWORD=creds["GMAIL_APP_PASSWORD"],
+                       DIGEST_TO=(to if to == archive
+                                  else f"{to},{archive}"))
+            proc = subprocess.run(
+                [_sys.executable, "-m", "tools.daily_digest",
+                 "--window-hours", str(hours)],
+                cwd=str(Path(__file__).resolve().parent.parent),
+                env=env, capture_output=True, text=True, timeout=300)
+            sent_line = next((l for l in (proc.stdout or "").splitlines()
+                              if "digest sent" in l), "")
+            if proc.returncode == 0 and sent_line:
+                print(f"  report sent to {to} ({sent_line.strip()})")
+                self._send_json(200, {"ok": True, "to": to,
+                                      "detail": sent_line.strip()})
+            else:
+                tail = ((proc.stderr or "") + (proc.stdout or ""))[-400:]
+                self._send_json(502, {"error": f"send failed: {tail}"})
+        except subprocess.TimeoutExpired:
+            self._send_json(504, {"error": "report composition timed out"})
+        except Exception as e:
+            self._send_json(502, {"error": f"{type(e).__name__}: {e}"})
+        finally:
+            _SEND_REPORT_LOCK.release()
 
     def _send_json(self, status: int, payload: dict) -> None:
         body = json.dumps(payload).encode("utf-8")

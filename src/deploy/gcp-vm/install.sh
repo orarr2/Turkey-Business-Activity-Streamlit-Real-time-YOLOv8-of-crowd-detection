@@ -107,19 +107,26 @@ systemctl enable --now collector.service
 sleep 2
 systemctl --no-pager --lines=20 status collector.service || true
 
-# Situation-report service (ON-DEMAND since 2026-08-09: the twice-daily
-# timer is CANCELLED - reports are generated and mailed only when the
-# operator triggers them; the sender account is the project mailbox in
-# ${CFG_DIR}/digest.env). digest.service stays installed as the oneshot
-# the trigger paths use: `sudo systemctl start digest.service`.
-sed -e "s|__STORAGE_BUCKET__|${STORAGE_BUCKET}|g" \
-    -e "s|__INSTALL_DIR__|${INSTALL_DIR}|g" \
-    -e "s|__SA_PATH__|${SA_PATH}|g" \
-    "${INSTALL_DIR}/src/deploy/gcp-vm/digest.service" \
-    > "/etc/systemd/system/digest.service"
-chmod 0644 /etc/systemd/system/digest.service
+# Situation-report units. Since 2026-08-09 the scheduled sends feed ONLY
+# the project archive mailbox (DIGEST_TO in ${CFG_DIR}/digest.env); the
+# operator-facing delivery is the dashboards' "Send Report From VM"
+# buttons (public dashboard -> the send-report GitHub workflow, private
+# dashboard -> its local endpoint).
+for unit in digest.service digest.timer; do
+  sed -e "s|__STORAGE_BUCKET__|${STORAGE_BUCKET}|g" \
+      -e "s|__INSTALL_DIR__|${INSTALL_DIR}|g" \
+      -e "s|__SA_PATH__|${SA_PATH}|g" \
+      "${INSTALL_DIR}/src/deploy/gcp-vm/${unit}" \
+      > "/etc/systemd/system/${unit}"
+  chmod 0644 "/etc/systemd/system/${unit}"
+done
 systemctl daemon-reload
-echo "digest.service installed (on-demand only - no timer)"
+if [[ -f "${CFG_DIR}/digest.env" ]]; then
+  systemctl enable --now digest.timer
+  echo "digest.timer enabled (12:00 + 20:00 Israel -> project archive)"
+else
+  echo "digest.timer installed but NOT enabled - create ${CFG_DIR}/digest.env first"
+fi
 
 cat <<EOF
 
