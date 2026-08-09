@@ -3,9 +3,11 @@
     python -m tools.daily_digest --dry-run      # compose + print, no send
     python -m tools.daily_digest                # compose + send via Gmail
 
-Runs on the VM from a systemd timer (deploy/gcp-vm/digest.timer, 12:00 and
-20:00 Asia/Jerusalem) - the operator's PC plays no part. Gmail's phone app
-turns the mail into the push notification the operator asked for.
+Runs ON DEMAND only (the twice-daily timer was cancelled 2026-08-09):
+`sudo systemctl start digest.service` on the VM, or any trigger path that
+invokes this module. Mail is sent FROM the project mailbox configured in
+/etc/turkey-footfall/digest.env; DIGEST_TO defaults there to the same
+mailbox, which doubles as the report archive.
 
 Sections (all sourced from what the collector already writes):
   * scene events from Firestore `events`, aggregated per (kind, camera)
