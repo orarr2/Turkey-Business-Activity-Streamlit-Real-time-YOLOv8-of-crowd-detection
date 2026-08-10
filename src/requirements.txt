@@ -19,6 +19,11 @@ firebase-admin>=6.5
 # Optional: nicer time handling for the notebook
 python-dateutil>=2.9
 
+# Notebook forecasting: exogenous features. Open-Meteo needs no key (requests
+# above suffices); holidays adds national-holiday flags per country to the
+# ridge feature matrix in section 11c.
+holidays>=0.60
+
 # Twice-daily situation report PDF (tools/daily_digest, tools/report_pdf).
 # reportlab pure-python; Pillow downscales snapshots before embedding so
 # eight fullframe HD images fit under Gmail's inline-preview envelope.

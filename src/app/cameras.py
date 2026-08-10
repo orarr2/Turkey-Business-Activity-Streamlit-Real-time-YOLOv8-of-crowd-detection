@@ -784,6 +784,49 @@ def camera_timezone(cam_id: str) -> str:
     return "Europe/Istanbul"
 
 
+# Country-level (lat, lon) used as the weather-fetch anchor by the
+# forecasting notebook. Individual cameras don't need pinpoint accuracy -
+# a Konya vs Istanbul afternoon differ mostly by 1-2 C and rain-yes/no,
+# which the country capital captures fine for the 15-min forecast bins.
+# Override per-camera by setting "lat"/"lon" on the CAMERAS entry.
+COUNTRY_LATLON = {
+    "turkey":   (41.0082, 28.9784),   # Istanbul
+    "thailand": (13.7563, 100.5018),  # Bangkok
+    "japan":    (35.6895, 139.6917),  # Tokyo
+    "usa":      (40.7128, -74.0060),  # New York City (Eastern-anchored bench)
+}
+
+
+def camera_latlon(cam_id: str) -> tuple[float, float] | None:
+    """The (lat, lon) to use when fetching weather for this camera.
+
+    Per-camera "lat"/"lon" beats the country default. Cameras with no
+    country and no explicit coords return None - the caller should skip
+    them (the forecaster does so silently)."""
+    cam = CAMERAS.get(cam_id, {})
+    if cam.get("lat") is not None and cam.get("lon") is not None:
+        return (float(cam["lat"]), float(cam["lon"]))
+    ctry = cam.get("country")
+    if ctry and ctry in COUNTRY_LATLON:
+        return COUNTRY_LATLON[ctry]
+    return None
+
+
+# ISO 3166-1 alpha-2 country codes for the `holidays` library.
+COUNTRY_ISO2 = {
+    "turkey":   "TR",
+    "thailand": "TH",
+    "japan":    "JP",
+    "usa":      "US",
+}
+
+
+def camera_country_iso2(cam_id: str) -> str | None:
+    """Country ISO-2 code for the `holidays` library. None if unknown."""
+    ctry = CAMERAS.get(cam_id, {}).get("country")
+    return COUNTRY_ISO2.get(ctry)
+
+
 # Stamp every catalog entry with its own id (needed by the resolve cache in
 # detect_core) and a country. The foreign cameras carry an explicit country;
 # every other catalog entry predates the country field and is Turkish. Done
