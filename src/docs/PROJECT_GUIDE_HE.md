@@ -781,7 +781,7 @@ self._publish(img)                                # (ז) JPEG ללקוח
 
 **זיהוי המצלמה לאריח הנבחר:** ‏`resolve_cam` קודם מחפש `cam_id` בקטלוג
 (‏`app/cameras.py`); אם זה מפספס, קורא את `web/local_grid.json` (נכתב על ידי
-תא 32 במחברת) וממפה את ה-slot ל-dict של ‏`kind ∈ {youtube, hls, webcamera24, skyline}`.
+תא 33 במחברת) וממפה את ה-slot ל-dict של ‏`kind ∈ {youtube, hls, webcamera24, skyline}`.
 המצלמה שהמפעיל רואה בפועל היא בדיוק זו שנפתחת לניתוח.
 
 ### 5.1 ‏Paths & speeds — ‏`draw_paths_layer`

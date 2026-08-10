@@ -687,7 +687,7 @@ instead of thrashing.
 
 **Camera resolution for the picked tile:** `resolve_cam` first looks up
 `cam_id` in the registry (`app/cameras.py`); if that misses, it reads
-`web/local_grid.json` (written by notebook cell 32) and maps the slot to a
+`web/local_grid.json` (written by notebook cell 33) and maps the slot to a
 `kind ∈ {youtube, hls, webcamera24, skyline}` dict. The exact camera the
 operator is watching is the exact one that gets analyzed — no cross-wiring.
 
