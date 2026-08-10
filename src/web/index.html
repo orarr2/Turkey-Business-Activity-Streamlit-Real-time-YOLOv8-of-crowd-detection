@@ -360,6 +360,11 @@
             padding: 6px; display: flex; flex-direction: column; gap: 4px; }
     .mini .lbl { font-size: 11px; color: #8b909a;
                  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    /* fix 3: heat depth selectors (layer x daypart), private dashboard only */
+    .mini .heat-controls { display: flex; gap: 4px; }
+    .mini .heat-controls select { flex: 1; min-width: 0; background: #171a21;
+                 border: 1px solid #333845; color: #c8cdd8; border-radius: 4px;
+                 font-size: 10.5px; padding: 1px 2px; }
     .mini a { display: block; text-decoration: none; }
     .mini img { width: 100%; aspect-ratio: 16/9; object-fit: cover;
                 background: #05070a; border-radius: 6px;

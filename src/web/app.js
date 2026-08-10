@@ -533,6 +533,24 @@ if (stripEl) {
                        border-radius:4px;color:inherit;cursor:pointer;
                        font-size:11px;padding:0 5px">🔥</button>
       </div>
+      <!-- fix 3: the stored heat depth, finally selectable. Only shown in
+           heat mode on the PRIVATE dashboard (the API renders any combo
+           from the VM-published grids; the public copy keeps the single
+           published overlay). -->
+      <div class="heat-controls" data-heat-controls hidden>
+        <select data-heat-layer title="which detections feed the map">
+          <option value="person">people</option>
+          <option value="vehicles">vehicles</option>
+          <option value="other">other</option>
+        </select>
+        <select data-heat-part title="local-time daypart">
+          <option value="">all day</option>
+          <option value="night">night</option>
+          <option value="morning">morning</option>
+          <option value="afternoon">afternoon</option>
+          <option value="evening">evening</option>
+        </select>
+      </div>
       <div class="age" data-age></div>`;
     stripEl.appendChild(cell);
     const s = {
@@ -545,27 +563,31 @@ if (stripEl) {
       v:     cell.querySelector("[data-v]"),
       age:   cell.querySelector("[data-age]"),
       heatBtn: cell.querySelector("[data-heat]"),
+      heatControls: cell.querySelector("[data-heat-controls]"),
+      heatLayerSel: cell.querySelector("[data-heat-layer]"),
+      heatPartSel:  cell.querySelector("[data-heat-part]"),
+      camId: null,
       lastSampleMs: null,
       liveUrl: null,
       heatUrl: null,
       showHeat: false,
     };
     // Heatmap toggle: swaps the model-view image between the live
-    // annotated frame and the collector-published dwell heatmap overlay.
-    // The button only appears once a heatmap_url has arrived for the slot.
+    // annotated frame and the dwell heatmap. On the private dashboard the
+    // heat view is rendered on demand by /api/heatmap from the grids the
+    // VM publishes, so the layer/daypart selectors work (fix 3); the
+    // public copy keeps the single published person overlay.
     s.heatBtn.addEventListener("click", (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
       s.showHeat = !s.showHeat;
       s.heatBtn.style.borderColor = s.showHeat ? "#f0a35e" : "#444";
-      const url = s.showHeat && s.heatUrl ? s.heatUrl : s.liveUrl;
-      if (url) {
-        const busted = url + (url.includes("?") ? "&" : "?") + "t=" + Date.now();
-        s.img.src = busted;
-        s.link.href = busted;
-        s.img.hidden = false;
-      }
+      s.heatControls.hidden = !(s.showHeat && PRIVATE_BACKEND);
+      refreshHeatView(s);
     });
+    for (const sel of (s.heatLayerSel && s.heatPartSel
+                       ? [s.heatLayerSel, s.heatPartSel] : []))
+      sel.addEventListener("change", () => refreshHeatView(s));
     s.img.addEventListener("error", () => {
       // Storage URL rotted, or Storage never got this snapshot. Roll back to
       // the empty state so the cell reads as "no live view" instead of a
@@ -580,6 +602,30 @@ if (stripEl) {
   }
 }
 
+// The heat view for one strip cell: private dashboards render the picked
+// layer/daypart from the VM-published grids via /api/heatmap; the public
+// copy falls back to the collector's single published overlay. Heat off
+// restores the live annotated frame.
+function refreshHeatView(s) {
+  let url = null;
+  if (!s.showHeat) {
+    url = s.liveUrl;
+  } else if (PRIVATE_BACKEND && s.camId) {
+    const layer = (s.heatLayerSel && s.heatLayerSel.value) || "person";
+    const part = (s.heatPartSel && s.heatPartSel.value) || "";
+    url = `/api/heatmap?cam=${encodeURIComponent(s.camId)}`
+        + `&layer=${encodeURIComponent(layer)}`
+        + (part ? `&part=${encodeURIComponent(part)}` : "");
+  } else if (s.heatUrl) {
+    url = s.heatUrl;
+  }
+  if (!url) return;
+  const busted = url + (url.includes("?") ? "&" : "?") + "t=" + Date.now();
+  s.img.src = busted;
+  s.link.href = busted;
+  s.img.hidden = false;
+}
+
 function updateStrip(slotId, d) {
   const s = stripState[slotId];
   if (!s) return;
@@ -590,21 +636,27 @@ function updateStrip(slotId, d) {
   if (LOCAL_MODE && d.cam_name && s.lbl && s.lbl.textContent !== d.cam_name) {
     s.lbl.textContent = d.cam_name;
   }
+  if (d.cam_id) s.camId = d.cam_id;
   if (d.person   != null) s.p.textContent = d.person;
   if (d.vehicles != null) s.v.textContent = d.vehicles;
-  if (d.heatmap_url && s.heatBtn) {
-    s.heatUrl = d.heatmap_url;
+  if (s.heatBtn && (d.heatmap_url || (PRIVATE_BACKEND && s.camId))) {
+    if (d.heatmap_url) s.heatUrl = d.heatmap_url;
     s.heatBtn.hidden = false;
   }
   if (d.ok && d.live_annotated_url) {
     s.liveUrl = d.live_annotated_url;
-    const shown = s.showHeat && s.heatUrl ? s.heatUrl : d.live_annotated_url;
-    const url = shown
-        + (shown.includes("?") ? "&" : "?")
-        + "t=" + encodeURIComponent(d.ts || Date.now());
-    s.img.src = url;
-    s.img.hidden = false;
-    s.link.href = url;
+    if (s.showHeat) {
+      // Keep the heat view current (private: re-rendered from the freshest
+      // VM grids; public: the published overlay re-busted).
+      refreshHeatView(s);
+    } else {
+      const url = d.live_annotated_url
+          + (d.live_annotated_url.includes("?") ? "&" : "?")
+          + "t=" + encodeURIComponent(d.ts || Date.now());
+      s.img.src = url;
+      s.img.hidden = false;
+      s.link.href = url;
+    }
     if (s.empty) s.empty.style.display = "none";
   } else if (d.ok && !d.live_annotated_url && s.empty
              && s.empty.textContent.startsWith("waiting")) {

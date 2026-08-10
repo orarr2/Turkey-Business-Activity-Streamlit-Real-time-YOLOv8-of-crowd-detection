@@ -972,6 +972,19 @@ def _save_heatmap_view(cam_id: str, frame, firebase) -> str | None:
     if not okj:
         return None
     if firebase.storage is not None:
+        # fix 3: publish the raw grids next to the overlay - the operator
+        # dashboard renders any layer x daypart combination from this, so
+        # the accumulated depth (person/vehicles/other x four dayparts)
+        # is finally visible instead of just the summed person map.
+        state = _hm.export_state(cam_id)
+        if state:
+            try:
+                firebase.upload_snapshot(
+                    f"heatmaps/{cam_id}.json",
+                    json.dumps(state).encode("utf-8"),
+                    content_type="application/json")
+            except Exception as e:
+                print(f"  ! heatmap state publish failed for {cam_id}: {e}")
         return firebase.upload_snapshot(f"heatmaps/{cam_id}.jpg",
                                         buf.tobytes())
     hm_dir = SNAPSHOTS_ROOT / "heatmaps"
@@ -1760,10 +1773,12 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
             if _POSE_MODEL is not None:
                 # Opt-in skeleton pass (--pose): keypoints ride the same box
                 # dicts as track_id/kmh; a pose failure must not cost the
-                # sample, so it degrades to a plain model view.
+                # sample, so it degrades to a plain model view. Per-crop
+                # since fix 3 - the full-frame pass attached nothing at
+                # street-cam distance (~15px of person at model resolution).
                 try:
-                    from app.pose import attach_keypoints
-                    attach_keypoints(_POSE_MODEL, frame, boxes)
+                    from app.pose import attach_keypoints_crops
+                    attach_keypoints_crops(_POSE_MODEL, frame, boxes)
                 except Exception as e:
                     print(f"  ! pose pass failed for {slot_id}: {e}")
             try:

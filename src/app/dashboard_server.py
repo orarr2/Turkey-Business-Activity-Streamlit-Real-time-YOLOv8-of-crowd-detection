@@ -272,6 +272,51 @@ def _cloud_training_points() -> list[dict]:
     return points
 
 
+# fix 3: the VM publishes its heatmap grids (snapshots/heatmaps/<cam>.json)
+# next to the overlay JPEG; /api/heatmap renders any layer x daypart from
+# them when THIS machine has no local accumulation for the camera. Cached
+# per camera so flipping the strip's selectors doesn't hammer Storage.
+_VM_HEAT_CACHE: dict[str, tuple[float, dict]] = {}
+_VM_HEAT_TTL_S = 60.0
+
+
+def _vm_heat_state(cam: str) -> dict | None:
+    now = time.time()
+    hit = _VM_HEAT_CACHE.get(cam)
+    if hit and now - hit[0] < _VM_HEAT_TTL_S:
+        return hit[1]
+    try:
+        import json as _json
+        from app.pool_sync import _bucket_name, _http_get
+        bucket = _bucket_name()
+        if not bucket:
+            return hit[1] if hit else None
+        raw = _http_get(f"https://storage.googleapis.com/{bucket}"
+                        f"/snapshots/heatmaps/{cam}.json?t={int(now)}")
+        state = _json.loads(raw.decode("utf-8"))
+        _VM_HEAT_CACHE[cam] = (now, state)
+        return state
+    except Exception:
+        return hit[1] if hit else None
+
+
+def _grid_from_state(state: dict, layer: str, part: str | None):
+    """Requested grid out of a published state dict; dayparts summed when
+    `part` is None. Returns None when the state holds nothing usable."""
+    layer_grids = (state.get("layers") or {}).get(layer) or {}
+    if part:
+        g = layer_grids.get(part)
+        return [row[:] for row in g] if g else None
+    out = None
+    for g in layer_grids.values():
+        if out is None:
+            out = [[0.0] * len(g[0]) for _ in range(len(g))]
+        for y, row in enumerate(g):
+            for x, v in enumerate(row):
+                out[y][x] += v
+    return out
+
+
 def _review_store():
     global _REVIEW_STORE
     with _REVIEW_STORE_LOCK:
@@ -540,11 +585,23 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if part is not None and part not in hm.DAYPARTS:
             self._send_json(400, {"error": f"part must be one of {hm.DAYPARTS}"})
             return
+        # Local accumulation first (a collector/notebook run on THIS
+        # machine); empty -> the state the VM publishes next to its
+        # overlay (fix 3), so the operator sees the cloud's depth.
+        grid = hm.grid_for(cam, layer=layer, daypart=part)
+        source = "local"
+        if not any(v for row in grid for v in row):
+            state = _vm_heat_state(cam)
+            vm_grid = _grid_from_state(state, layer, part) if state else None
+            if vm_grid:
+                grid = vm_grid
+                source = "vm"
         if _one("format") == "json":
             payload = hm.stats(cam)
             payload["layer"] = layer
             payload["part"] = part
-            payload["grid"] = hm.grid_for(cam, layer=layer, daypart=part)
+            payload["source"] = source
+            payload["grid"] = grid
             self._send_json(200, payload)
             return
         base = None
@@ -560,7 +617,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                     base = None
         try:
             import cv2
-            img = hm.render(cam, base_frame=base, layer=layer, daypart=part)
+            img = hm.overlay(grid, base_frame=base)
             okj, buf = cv2.imencode(".jpg", img,
                                     [cv2.IMWRITE_JPEG_QUALITY, 85])
             if not okj:
@@ -601,12 +658,6 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         pose = _one("pose", int, 0, 0, 1) == 1
         want_faces = _one("faces", int, 0, 0, 1) == 1
         lock = (q.get("lock") or [None])[0] or None
-        # fix1-B: the analysis picker - up to MAX_ANALYSIS_LAYERS comma-
-        # separated layer names; unknown names are dropped, extras beyond
-        # the cap are ignored (validated again inside analyze_window).
-        layers_raw = (q.get("layers") or [""])[0]
-        layers = [l.strip() for l in layers_raw.split(",") if l.strip()] \
-            if layers_raw else None
 
         model = _VISUAL_SEARCH.get_model()
         if model is None:
@@ -628,8 +679,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 result = analyze_window(cam, model, n_frames=n_frames,
                                         stride=stride, imgsz=imgsz,
                                         pose=pose, lock=lock,
-                                        want_faces=want_faces,
-                                        layers=layers)
+                                        want_faces=want_faces)
             self._send_json(200, result)
         except ValueError as e:
             self._send_json(404, {"error": str(e)})

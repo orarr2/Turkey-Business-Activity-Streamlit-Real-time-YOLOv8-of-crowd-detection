@@ -202,6 +202,24 @@ def accumulate(cam_id: str, boxes: list[dict], frame_shape,
         save(cam_id, root)
 
 
+def export_state(cam_id: str) -> dict | None:
+    """Slim copy of a camera's accumulated grids (same rounding save()
+    uses on disk). The collector publishes this next to the overlay JPEG
+    (snapshots/heatmaps/<cam>.json) so the operator dashboard can render
+    ANY layer x daypart combination on demand - fix 3: the stored depth
+    (person/vehicles/other x four dayparts) finally has a consumer."""
+    st = _STATE.get(cam_id)
+    if st is None:
+        return None
+    return {
+        "layers": {ln: {dp: [[round(v, 2) for v in row] for row in grid]
+                        for dp, grid in layer.items()}
+                   for ln, layer in st["layers"].items()},
+        "samples": st["samples"],
+        "updated": st["updated"],
+    }
+
+
 def save(cam_id: str, root: Path | None = None) -> None:
     st = _STATE.get(cam_id)
     if st is None:

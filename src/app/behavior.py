@@ -50,7 +50,6 @@ from app.cameras import CAMERAS
 from app.detect_core import (
     DEFAULT_PER_CLASS_CONF,
     VEHICLE_LENGTH_M,
-    count_line_crossings,
     detect_with_boxes,
     draw_boxes,
     filter_boxes_roi,
@@ -80,15 +79,10 @@ STATIONARY_NET_FRAC = 0.02
 _DIRECTIONS = ("right", "down-right", "down", "down-left",
                "left", "up-left", "up", "up-right")
 
-# The analysis layers. The dashboard runs them LIVE per camera (fix 2:
-# one layer per camera via app/live_analysis.py); this one-shot API keeps
-# accepting up to four for a single window - each renders as its own tile
-# from ONE shared detection (and, when needed, pose) pass. "line" is the
-# threshold-crossing layer added in fix 2.
-ANALYSIS_LAYERS = ("paths", "pose", "gestures", "body", "faces", "heat",
-                   "line")
-MAX_ANALYSIS_LAYERS = 4
-_POSE_LAYERS = {"pose", "gestures", "body"}
+# Layer rendering lives in app/live_analysis.py since fix 2 (the live
+# per-tile engine); fix 3 removed this module's one-shot layers branch -
+# it had no UI caller left. This API's scope is the per-individual
+# window profile + the annotated trails view below.
 
 
 def _foot(b: dict) -> tuple[float, float]:
@@ -271,46 +265,6 @@ def _draw_label_chips(out, last_boxes: list[dict], stats: list[dict],
                     cv2.LINE_AA)
 
 
-def render_layer(frames, tracks: list[Track], stats: list[dict],
-                 layer: str, faces: list[dict] | None = None,
-                 cam_id: str | None = None, line: list | None = None):
-    """One analysis tile: the final frame annotated with EXACTLY that
-    layer's semantics. The heavy work (detection, tracking, pose) was
-    already done by analyze_window - this only draws, and it draws via
-    the SAME functions the live engine uses (app/live_analysis.py), so
-    the one-shot API and the live tiles can never diverge. fix 2 rules:
-    pose shows skeletons only (never detection boxes, never vehicles),
-    heat is THIS window's own accumulation (never another camera's
-    published overlay), and empty layers say so honestly."""
-    from app import live_analysis as _la
-
-    out = frames[-1].copy()
-    last_boxes = _boxes_of_last_frame(tracks)
-    stats_by_id = {s.get("id"): s for s in (stats or [])}
-
-    if layer == "heat":
-        return _la.draw_heat_layer(
-            out, _la.grid_from_tracks(tracks, frames[-1].shape))
-    if layer == "paths":
-        return _la.draw_paths_layer(out, tracks, last_boxes, stats_by_id)
-    if layer == "pose":
-        return _la.draw_pose_layer(out, last_boxes)
-    if layer == "gestures":
-        return _la.draw_gestures_layer(out, last_boxes, stats_by_id)
-    if layer == "body":
-        return _la.draw_body_layer(out, last_boxes, stats_by_id)
-    if layer == "faces":
-        return _la.draw_faces_layer_img(out, faces or [])
-    if layer == "line":
-        ln = line or (CAMERAS.get(cam_id or "") or {}).get("line") \
-            or _la.DEFAULT_LINE
-        c = count_line_crossings([tr.boxes for tr in tracks],
-                                 frames[-1].shape, ln)
-        return _la.draw_line_layer(out, ln,
-                                   {"in": c["in"], "out": c["out"]})
-    return out
-
-
 def _draw_target_lock(out, lock: dict) -> None:
     """Full-frame crosshair through the locked individual's centroid."""
     import cv2
@@ -395,8 +349,7 @@ def analyze_window(cam_id: str, model,
                    frames=None,
                    pose: bool = False,
                    lock: str | None = None,
-                   want_faces: bool = False,
-                   layers: list[str] | None = None) -> dict:
+                   want_faces: bool = False) -> dict:
     """Grab a window from `cam_id`, profile every individual in it.
 
     `frames` overrides the live grab (tests / offline replays feed frames
@@ -429,14 +382,6 @@ def analyze_window(cam_id: str, model,
     # Optional pose pass: attach keypoints to the person boxes BEFORE the
     # tracker threads them - the tracker keeps the same dicts, so every
     # track's box history carries its skeletons for free.
-    # fix1-B: layer selection implies its inputs - pose layers need the
-    # keypoint pass, the faces layer needs the face detector.
-    layers = [l for l in (layers or []) if l in ANALYSIS_LAYERS]
-    layers = layers[:MAX_ANALYSIS_LAYERS]
-    if layers:
-        pose = pose or any(l in _POSE_LAYERS for l in layers)
-        want_faces = want_faces or "faces" in layers
-
     pose_persons = 0
     if pose:
         # Top-down (per-crop) pose: the full-frame pass at window imgsz saw
@@ -512,35 +457,14 @@ def analyze_window(cam_id: str, model,
         BEHAVIOR_DIR.mkdir(parents=True, exist_ok=True)
         stem = (f"{cam_id}_"
                 f"{time.strftime('%Y%m%d_%H%M%S', time.gmtime())}")
-        if layers:
-            # fix1-B: one tile per selected layer, all drawn from the same
-            # already-computed pass.
-            layer_urls: dict[str, str] = {}
-            for layer in layers:
-                try:
-                    img = render_layer(frames, tracks, stats, layer,
-                                       faces=faces_list or None,
-                                       cam_id=cam_id)
-                    okj, buf = cv2.imencode(".jpg", img,
-                                            [cv2.IMWRITE_JPEG_QUALITY, 85])
-                    if okj:
-                        fn = f"{stem}_{layer}.jpg"
-                        (BEHAVIOR_DIR / fn).write_bytes(buf.tobytes())
-                        layer_urls[layer] = f"/snapshots/behavior/{fn}"
-                except Exception as _le:
-                    print(f"analyze_window: layer {layer!r} skipped "
-                          f"({type(_le).__name__}: {_le})")
-            result["layers"] = layers
-            result["layer_images"] = layer_urls
-        else:
-            annotated = render_window(frames, tracks, stats=stats,
-                                      lock=lock_info,
-                                      faces=faces_list or None)
-            okj, buf = cv2.imencode(".jpg", annotated,
-                                    [cv2.IMWRITE_JPEG_QUALITY, 85])
-            if okj:
-                (BEHAVIOR_DIR / f"{stem}.jpg").write_bytes(buf.tobytes())
-                result["image_url"] = f"/snapshots/behavior/{stem}.jpg"
+        annotated = render_window(frames, tracks, stats=stats,
+                                  lock=lock_info,
+                                  faces=faces_list or None)
+        okj, buf = cv2.imencode(".jpg", annotated,
+                                [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if okj:
+            (BEHAVIOR_DIR / f"{stem}.jpg").write_bytes(buf.tobytes())
+            result["image_url"] = f"/snapshots/behavior/{stem}.jpg"
         (BEHAVIOR_DIR / f"{stem}.json").write_text(
             json.dumps(result, indent=1), encoding="utf-8")
         result["json_url"] = f"/snapshots/behavior/{stem}.json"

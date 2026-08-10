@@ -167,15 +167,17 @@ class FirebaseStore:
         q = q.order_by("ts").limit(limit_docs)
         return [d.to_dict() for d in q.stream()]
 
-    def upload_snapshot(self, path: str, jpeg_bytes: bytes) -> str | None:
-        """Upload JPEG bytes to Storage at `snapshots/{path}`. Return public URL.
+    def upload_snapshot(self, path: str, jpeg_bytes: bytes,
+                        content_type: str = "image/jpeg") -> str | None:
+        """Upload bytes to Storage at `snapshots/{path}`. Return public URL.
 
         Returns None if Storage isn't configured (collector runs without a bucket).
         Public URL model — the Storage lifecycle rule removes the object after 24h.
+        JPEG by default; the heatmap state publish passes application/json.
         """
         if self.storage is None:
             return None
         blob = self.storage.blob(f"snapshots/{path}")
-        blob.upload_from_string(jpeg_bytes, content_type="image/jpeg")
+        blob.upload_from_string(jpeg_bytes, content_type=content_type)
         blob.make_public()
         return blob.public_url

@@ -137,6 +137,14 @@ def test_body_layer_flags_only_anomalies():
     out = la.draw_body_layer(img.copy(), [walker, faller], stats)
     assert out[100:170, 90:140].sum() == 0           # walker undrawn
     assert out[100:170, 295:340].sum() > 0           # faller boxed
+    assert out[10:60, 10:240].sum() > 0              # status HUD panel
+    assert out[10:40, 200:460, 2].max() > 150        # red ALERT banner
+    # No alert-grade flag -> HUD yes, banner no.
+    calm = la.draw_body_layer(img.copy(), [walker],
+                              {1: {"id": 1, "label": "walking",
+                                   "alert": False}})
+    assert calm[10:60, 10:240].sum() > 0             # HUD still tallies
+    assert calm[10:40, 300:460].sum() == 0           # no banner
 
 
 def test_line_layer_draws_line_and_counts():
@@ -147,26 +155,17 @@ def test_line_layer_draws_line_and_counts():
     assert out[:30].sum() > 0                        # the caption
 
 
-def test_heat_layer_empty_and_hot():
+def test_heat_layer_is_full_heat_vision():
+    # fix 3: picking heat transforms the WHOLE picture (thermal-style
+    # colormap), dwell pushes its zones hotter still.
     img = np.full((*SHAPE, 3), 40, dtype=np.uint8)
     grid = [[0.0] * la.GRID_W for _ in range(la.GRID_H)]
     out = la.draw_heat_layer(img.copy(), grid)
-    assert (out[CAP_H:] == img[CAP_H:]).all()        # zero grid: photo intact
+    assert out.shape == img.shape
+    assert not (out[CAP_H:] == img[CAP_H:]).all()    # colormap everywhere
     grid[la.GRID_H // 2][la.GRID_W // 2] = 50.0
     out2 = la.draw_heat_layer(img.copy(), grid)
-    assert not (out2[CAP_H:] == img[CAP_H:]).all()   # overlay visible
-
-
-def test_one_shot_render_layer_matches_live_semantics():
-    from app.behavior import render_layer
-    frames = [np.zeros((*SHAPE, 3), dtype=np.uint8) for _ in range(3)]
-    tr = Track(1, _box(100, 100), 0.0)
-    tr.add(_box(160, 100), 0.5)
-    tr.boxes[-1]["track_id"] = 1
-    pose = render_layer(frames, [tr], [], "pose")
-    assert pose[CAP_H:].sum() == 0                   # no kps -> no boxes drawn
-    line = render_layer(frames, [tr], [], "line", cam_id=None)
-    assert line[:30].sum() > 0
+    assert not (out2[CAP_H:] == out[CAP_H:]).all()   # dwell zone runs hotter
 
 
 # ---------------------------------------------------------------------------

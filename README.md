@@ -470,6 +470,13 @@ Chart.js 4. Opens with [`python serve.py`](src/serve.py) and renders:
   an anomaly badge showing the collector's latest verdict (▲ spike / ▼ drop,
   which metric, observed vs expected), and a per-tile mini chart of the last
   30 samples with anomalous points enlarged in red on the series that fired.
+- **Heat depth on the model strip** - each strip cell's 🔥 toggle swaps to
+  the camera's dwell heatmap; on the private dashboard two selectors pick
+  the **layer (people / vehicles / other) x daypart (all day / night /
+  morning / afternoon / evening)** combination, rendered on demand by
+  `/api/heatmap` from the grid state the collector publishes next to its
+  overlay (`snapshots/heatmaps/<cam>.json`). The public copy keeps the
+  single published person overlay.
 - **Combined 24 h chart** stacking all four cameras' people series.
 - **Anomaly events table** - every flagged sample of the last 24 h across all
   slots: when, where, spike or drop, people or vehicles, observed vs expected
@@ -556,12 +563,17 @@ Semantics: **one layer per camera, up to four live analyses across the
 grid** (duplicates fine). Layers - `paths` (trails + id boxes + km/h),
 `pose` (skeletons ONLY, on people close enough - never detection boxes),
 `gestures` (skeleton + chip only for detected gestures), `body`
-(fall/erratic/running chips), `faces` (YuNet rectangles), `heat` (the
-SESSION'S own dwell accumulation on this camera), `line` (counting line
-+ live in/out). Every layer states an empty result honestly ("no
-gestures detected right now"). Switching layers mutates the running
-session - stream, tracker, heat grid, line counters and gesture history
-all survive, so heat -> gestures -> heat resumes the accumulated map.
+(fall-detection-style view: status HUD with persons-in-view/flagged
+tallies, red box + skeleton + verdict chip on flagged people, and an
+ALERT banner while a fall/erratic flag is live), `faces` (YuNet
+rectangles), `heat` (full heat-vision: the whole frame re-rendered as a
+thermal-style colormap with the SESSION'S own dwell burning hotter -
+stylized from brightness + dwell, not a thermal sensor), `line`
+(counting line + live in/out). Every layer states an empty result
+honestly ("no gestures detected right now"). Switching layers mutates
+the running session - stream, tracker, heat grid, line counters and
+gesture history all survive, so heat -> gestures -> heat resumes the
+accumulated map.
 
 Compute honesty: sessions share ONE YOLO (`yolov8s`) behind a lock; on
 an operator CPU a single session runs ~1-2 fps, four concurrent

@@ -27,9 +27,9 @@ Compute reality on an operator PC (CPU): one active session runs about
 serializes model access so four sessions degrade gracefully instead of
 thrashing the same weights from four threads.
 
-The draw_* functions are pure (frame + data in, frame out) and shared
-with app/behavior.py's one-shot render_layer, so the on-demand API and
-the live tiles can never diverge in what a layer means.
+The draw_* functions are pure (frame + data in, frame out) - since
+fix 3 removed the one-shot layers branch, this module is the ONLY place
+a layer's look is defined.
 """
 from __future__ import annotations
 
@@ -43,9 +43,8 @@ from app.heatmap import GRID_H, GRID_W
 
 _SRC_ROOT = Path(__file__).resolve().parent.parent
 
-# The seven analysis layers an operator can run live. "line" is new in
-# fix 2 (threshold-crossing was explicitly requested); the other six match
-# behavior.ANALYSIS_LAYERS.
+# The seven analysis layers an operator can run live. "line" is the
+# threshold-crossing layer added in fix 2.
 LIVE_LAYERS = ("paths", "pose", "gestures", "body", "faces", "heat", "line")
 LAYER_TITLES = {
     "paths":    "Paths & speeds",
@@ -232,6 +231,42 @@ def _chip(img, b: dict, txt: str, color) -> None:
                 cv2.LINE_AA)
 
 
+def _hud_panel(img, lines: list[str], alert: bool = False) -> None:
+    """Bordered status panel, top-left - the fall-detection-reference HUD
+    (system name, persons in view, flagged count). Red border on alert."""
+    import cv2
+    lh, pad = 18, 8
+    w = 240
+    h = pad * 2 + lh * len(lines) - 4
+    x0, y0 = 8, 8
+    roi = img[y0:y0 + h, x0:x0 + w]
+    roi[:] = (roi * 0.25).astype(img.dtype)
+    cv2.rectangle(img, (x0, y0), (x0 + w, y0 + h),
+                  (0, 0, 230) if alert else (160, 160, 160), 2)
+    y = y0 + pad + 8
+    for i, t in enumerate(lines):
+        cv2.putText(img, t, (x0 + 8, y), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.48 if i == 0 else 0.42,
+                    (255, 255, 255) if i == 0 else (210, 210, 210),
+                    1, cv2.LINE_AA)
+        y += lh
+
+
+def _alert_banner(img, txt: str) -> None:
+    """Loud red banner, top-center - fires only while an alert-grade flag
+    (fall/erratic) is live, exactly like the operator's reference clip."""
+    import cv2
+    H, W = img.shape[:2]
+    (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.75, 2)
+    x0 = max(8, (W - tw) // 2 - 12)
+    y0 = 8
+    cv2.rectangle(img, (x0, y0), (min(W - 8, x0 + tw + 24), y0 + th + 18),
+                  (0, 0, 210), -1)
+    cv2.putText(img, txt, (x0 + 12, y0 + th + 9),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2,
+                cv2.LINE_AA)
+
+
 def draw_paths_layer(img, tracks, last_boxes: list[dict],
                      stats_by_id: dict):
     """Trails + id boxes + km/h chips - the one layer that legitimately
@@ -306,13 +341,14 @@ def draw_gestures_layer(img, boxes: list[dict], stats_by_id: dict,
 
 
 def draw_body_layer(img, boxes: list[dict], stats_by_id: dict):
-    """Behavior-anomaly chips (fall/erratic/running + sustained pose
-    flags) on people only; normal street life draws nothing."""
+    """Fall-detection-style live view (the operator's reference clip):
+    a status HUD tallies everyone, flagged people get a red box +
+    skeleton + verdict chip, and an ALERT banner burns while a
+    fall/erratic flag is live. Normal street life stays unmarked."""
     import cv2
+    persons = [b for b in boxes if b.get("cls") == "person"]
     flagged = []
-    for b in boxes:
-        if b.get("cls") != "person":
-            continue
+    for b in persons:
         s = stats_by_id.get(b.get("track_id"))
         if not s:
             continue
@@ -322,16 +358,29 @@ def draw_body_layer(img, boxes: list[dict], stats_by_id: dict):
         color = (0, 0, 220) if s.get("alert") else (0, 150, 230)
         cv2.rectangle(img, (int(b["x1"]), int(b["y1"])),
                       (int(b["x2"]), int(b["y2"])), color, 2)
-        txt = s.get("label") or ""
-        extra = [f for f in (s.get("pose_flags") or []) if f and f != txt]
+        if b.get("kps"):
+            from app.pose import draw_skeleton
+            draw_skeleton(img, [b])
+        txt = f"#{s.get('id', '?')} {(s.get('label') or '').upper()}"
+        extra = [f for f in (s.get("pose_flags") or [])
+                 if f and f != s.get("label")]
         if extra:
             txt += " " + "+".join(extra)
         _chip(img, b, txt, color)
-    note = ("Body anomalies - "
-            + ", ".join(f"#{s.get('id', '?')} {s.get('label')}"
-                        for _, s in flagged)
-            if flagged else "Body anomalies - none")
-    return _caption(img, [note])
+    alerts = [s for _, s in flagged if s.get("alert")]
+    _hud_panel(img, ["BODY ANOMALIES",
+                     f"persons in view: {len(persons)}",
+                     f"flagged: {len(flagged)}"
+                     + ("" if flagged else " (none right now)")],
+               alert=bool(alerts))
+    if alerts:
+        kinds: dict[str, int] = {}
+        for s in alerts:
+            k = (s.get("label") or "?").upper().replace("_", " ")
+            kinds[k] = kinds.get(k, 0) + 1
+        _alert_banner(img, "ALERT! " + ", ".join(
+            f"{n} {k}" for k, n in sorted(kinds.items())))
+    return img
 
 
 def draw_faces_layer_img(img, faces_list: list[dict], available: bool = True):
@@ -347,24 +396,43 @@ def draw_faces_layer_img(img, faces_list: list[dict], available: bool = True):
 
 
 def draw_heat_layer(img, grid: list, since: float | None = None):
-    """Dwell overlay of the SESSION'S OWN accumulation on this camera -
-    never another camera's published map (the fix1-B heat layer pulled
-    the VM's Storage overlay, which belongs to whatever camera the CLOUD
-    runs; fix 2 forbids that mixing)."""
-    from app.heatmap import overlay
-    out = overlay(grid, base_frame=img)
+    """Full heat-vision view (fix 3, per the operator's requirement that
+    picking heat CHANGES THE WHOLE PICTURE): the frame is re-rendered as
+    a thermal-style colormap driven by its own brightness, and the
+    session's dwell accumulation on THIS camera burns its zones toward
+    the hot end. Not a thermal sensor - the caption says exactly what
+    drives the colors. The accumulation itself never belongs to another
+    camera (the fix 2 rule)."""
+    import cv2
+    import numpy as np
+    H, W = img.shape[:2]
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+    signal = gray * 0.72
+    g = np.asarray(grid, dtype=np.float32)
+    peak = float(g.max())
+    if peak > 0:
+        dwell = np.sqrt(g / peak)
+        dwell = cv2.resize(dwell, (W, H), interpolation=cv2.INTER_LINEAR)
+        dwell = cv2.GaussianBlur(dwell, (0, 0), sigmaX=max(2.0, W / 96.0))
+        m = float(dwell.max())
+        if m > 0:
+            dwell /= m
+        signal = np.clip(signal + dwell * 0.55, 0.0, 1.0)
+    out = cv2.applyColorMap((signal * 255).astype(np.uint8),
+                            cv2.COLORMAP_INFERNO)
     if since:
         el = int(time.time() - since)
         mm, ss = divmod(el, 60)
-        note = (f"Heat signature - dwell accumulating since "
+        note = (f"Heat vision - dwell accumulating since "
                 f"{time.strftime('%H:%M:%S', time.localtime(since))} "
                 f"({mm}m{ss:02d}s)")
     else:
-        note = "Heat signature - dwell over this window"
-    peak = max((max(row) for row in grid), default=0.0)
+        note = "Heat vision - dwell over this window"
     if peak <= 0:
-        note += " - no activity banked yet"
-    return _caption(out, [note])
+        note += " - no dwell banked yet (brightness only)"
+    return _caption(out, [note,
+                          "stylized: brightness + dwell, not a thermal "
+                          "sensor"])
 
 
 def draw_line_layer(img, line: list, cross: dict):
