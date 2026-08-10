@@ -112,7 +112,12 @@ cd src && python serve.py                    # opens http://localhost:8000 with 
 ```
 
 Cloud deployment (for the maintainer only, requires a Firebase Admin
-service-account key) lives in [`src/deploy/gcp-vm/`](src/deploy/gcp-vm/README.md).
+service-account key), disaster recovery, VM commands, health-check battery,
+Firebase setup, the Cloudflare Worker for IBB, and the GCP billing
+kill-switch all live in one consolidated guide:
+
+- English: [`src/docs/PROJECT_GUIDE.md`](src/docs/PROJECT_GUIDE.md)
+- Hebrew (verbose, RTL): [`src/docs/PROJECT_GUIDE_HE.md`](src/docs/PROJECT_GUIDE_HE.md)
 
 **Connecting to the collector VM** (`turkey-collector`, zone `us-east1-c`,
 project `turkey-footfall`) - Console → Compute Engine → the **SSH** button,
@@ -122,22 +127,17 @@ or from your own machine:
 gcloud compute ssh turkey-collector --zone=us-east1-c
 ```
 
-The deploy README has the full [connect + VM health-check battery](src/deploy/gcp-vm/README.md#connecting-to-the-vm)
+The guide's [health-check battery](src/docs/PROJECT_GUIDE.md#45-health-check-battery--is-the-vm-really-feeding-the-report)
 (service status, live sampling, memory, and an end-to-end "grab a real
-Turkey frame now" test) - the report is only as good as that collector,
-so those checks are the fastest way to confirm it before trusting a run.
-
-**Disaster recovery** - the VM is disposable by design. Rebuilding it
-from nothing (identical machine on GCP, or the same stack on any other
-provider), including the re-mint path for every secret, is documented in
-[src/deploy/REBUILD.md](src/deploy/REBUILD.md).
+Turkey frame now" test) is the fastest way to confirm the collector
+before trusting any report. The VM is disposable by design; the
+[rebuild-from-zero](src/docs/PROJECT_GUIDE.md#48-full-rebuild-from-zero)
+recipe covers both a GCP-identical machine and any other Linux provider,
+including the re-mint path for every secret.
 
 `serve.py` is a small no-cache static server that binds `web/` on port 8000 (override
 with `--port`, suppress the browser pop with `--no-browser`, auto-falls-back to the
 next free port if 8000 is busy).
-
-Firebase project/service-account setup and security rules:
-see [`docs/firebase_setup.md`](src/docs/firebase_setup.md).
 
 ---
 
@@ -839,4 +839,4 @@ python -m app.detect_core --resolve konya_hukumet,otogar_kavsagi
 | [`tools/roi_grid.py`](src/tools/roi_grid.py) | Capture a frame with a coordinate grid to configure ROI/line polygons. |
 | [`tools/search_by_image.py`](src/tools/search_by_image.py) | CLI for search-by-example (+ demo index seeding from still images). |
 | [`web/`](src/web/) | Static HTML/JS dashboard. |
-| [`docs/firebase_setup.md`](src/docs/firebase_setup.md) | Firebase project + security rules walkthrough. |
+| [`docs/PROJECT_GUIDE.md`](src/docs/PROJECT_GUIDE.md) / [`PROJECT_GUIDE_HE.md`](src/docs/PROJECT_GUIDE_HE.md) | Single consolidated project guide (English + verbose Hebrew): architecture, VM setup + commands + rebuild, live analysis layers, notebook, Firebase, Cloudflare proxy, billing kill-switch. |

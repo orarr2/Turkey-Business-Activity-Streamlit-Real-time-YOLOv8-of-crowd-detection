@@ -32,7 +32,8 @@ Firebase Storage layout — public bucket, 24h lifecycle rule:
   snapshots/returning/{slot_id}/eid{N}_seen{K}_{ts}.jpg
   snapshots/returning/{slot_id}/eid{N}_seen{K}_{ts}_full.jpg
 
-Setup (see docs/firebase_setup.md and src/deploy/gcp-vm/README.md):
+Setup (see the "Firebase project setup" and "The VM" chapters in
+src/docs/PROJECT_GUIDE.md):
   1. Firebase console -> Firestore -> Time-to-live -> footfall.expire_at.
   2. GCP console -> Cloud Storage -> {bucket} -> Lifecycle ->
      Delete objects older than 1 day matching prefix `snapshots/`.
@@ -66,7 +67,8 @@ class FirebaseStore:
         if not cred_path or not os.path.exists(cred_path):
             raise FileNotFoundError(
                 "Firebase service-account JSON not found. Set FIREBASE_CREDENTIALS "
-                "or pass cred_path. See docs/firebase_setup.md."
+                "or pass cred_path. See the 'Firebase project setup' chapter of "
+                "src/docs/PROJECT_GUIDE.md."
             )
         storage_bucket = storage_bucket or os.environ.get("FIREBASE_STORAGE_BUCKET")
         app_options = {"storageBucket": storage_bucket} if storage_bucket else None
@@ -98,7 +100,8 @@ class FirebaseStore:
     def write_event(self, event: dict) -> None:
         """Append an operational event (loiter / returning / anomaly_push)
         to the `events` collection. Same 24h TTL model as footfall - set the
-        Firestore TTL policy on events.expire_at (see docs/firebase_setup.md).
+        Firestore TTL policy on events.expire_at (see chapter 11 of
+        src/docs/PROJECT_GUIDE.md).
         """
         expire_at = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=TTL_HOURS)
         self.db.collection("events").add({**event, "expire_at": expire_at})
