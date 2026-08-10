@@ -58,3 +58,6 @@ turkey_business_activity_yolov8n.ipynb
 
 # per-user local dashboard grid (the cameras picked in the notebook)
 src/web/local_grid.json
+
+# local editor / assistant tooling config - never commit
+.claude/
