@@ -184,3 +184,36 @@ even need it; test first with `tools.probe_country --country turkey`.
   [gcp-vm/README.md](gcp-vm/README.md#managing-the-collector-from-your-phone)).
 - Routine code updates never need this guide:
   `sudo git -C /opt/turkey-footfall fetch origin main && sudo git -C /opt/turkey-footfall reset --hard origin/main && sudo systemctl restart collector`.
+
+## Post-rebuild sanity for the operator dashboard's live analysis (fix 2/3)
+
+- The private operator dashboard (`python src/serve.py`) runs everything
+  in `app/live_analysis.py` and the on-demand `/api/analysis/*` endpoints
+  locally on the operator's own machine - the VM has no role in that
+  flow. To use it, hit `/api/ping` from the browser: `{ok:true,
+  private:true}` means the analyze buttons and send-report field will
+  appear.
+- On the machine that runs the dashboard, create `src/data/mailer.env`
+  with the same `GMAIL_USER` / `GMAIL_APP_PASSWORD` the VM has, so the
+  Send Report From VM button on the private dashboard can compose reports
+  locally (independent of the archive-only VM timer).
+- The heat-depth strip selectors need the VM to publish
+  `snapshots/heatmaps/<cam>.json` (fix 3). This happens automatically the
+  first time `_save_heatmap_view` runs post-restart. If you need it
+  immediately after a rebuild, seed it once from the VM:
+  ```
+  sudo /opt/turkey-footfall/src/.venv/bin/python -c "
+  import json, sys; sys.path.insert(0,'/opt/turkey-footfall/src')
+  from google.cloud import storage
+  from app import heatmap
+  b = storage.Client.from_service_account_json(
+      '/etc/turkey-footfall/serviceAccount.json'
+  ).bucket('<BUCKET>')
+  for c in ('taksim_yeni','beyazit_meydan_yeni','sarachane_yeni','sultanahmet_1_yeni'):
+      heatmap._load(c); st = heatmap.export_state(c)
+      if st:
+          blob = b.blob(f'snapshots/heatmaps/{c}.json')
+          blob.upload_from_string(json.dumps(st), content_type='application/json')
+          blob.make_public()
+  "
+  ```

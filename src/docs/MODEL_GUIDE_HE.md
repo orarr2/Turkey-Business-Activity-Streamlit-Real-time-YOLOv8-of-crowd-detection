@@ -12,6 +12,8 @@
 4. [הפרמטרים המרכזיים ואיזון עלות-דיוק](#4-הפרמטרים-המרכזיים-ואיזון-עלות-דיוק)
 5. [הליכה על המחברת תא-אחר-תא](#5-הליכה-על-המחברת-תא-אחר-תא)
 6. [מפת src/app/ — מה כל קובץ שם](#6-מפת-srcapp--מה-כל-קובץ-שם)
+   * 6.1 צלילה מלאה: `collector.py`
+   * 6.2 מנוע הניתוח החי — 7 שכבות ניתוח מתקדם
 7. [מפת src/tools/ — הכלים בשורת הפקודה](#7-מפת-srctools--הכלים-בשורת-הפקודה)
 8. [מדוע נוצרות "הזיות" ואיך לצמצם אותן](#8-מדוע-נוצרות-הזיות-ואיך-לצמצם-אותן)
 9. [מסלולי שיפור מעשיים](#9-מסלולי-שיפור-מעשיים)
@@ -1467,7 +1469,9 @@ per camera @ imgsz=960:
 
 **`alerts.py`** — דחיפת התראות (Telegram/Webhook) עם קצב מוגבל; כבוי כשאין טוקנים בסביבה.
 
-**`dashboard_server.py`** — השרת המקומי: מגיש את `web/`, פרוקסי ל-tvkur, וכל נקודות ה-API של תיוג/חיפוש/מדדים/גלריה/עקומת-הלמידה (`/api/al-curve`).
+**`dashboard_server.py`** — השרת המקומי: מגיש את `web/`, פרוקסי ל-tvkur, וכל נקודות ה-API של תיוג/חיפוש/מדדים/גלריה/עקומת-הלמידה (`/api/al-curve`). מאז fix 2 הוא גם מארח את מנוע הניתוח החי (`/api/analysis/start|frame|stop`), כפתור שליחת דוח פרטי (`/api/send-report`), ובדיקת "האם השרת פרטי" (`/api/ping`) שמכריעה איזה UI לחשוף. מאז fix 3 `/api/heatmap` מבצע fallback מתוך `snapshots/heatmaps/<cam>.json` שה-VM מפרסם, כך שכל שילוב שכבה×חלק-יממה מוחזר גם כשהמחשב המקומי לא צובר בעצמו.
+
+**`live_analysis.py`** *(חדש, fix 2)* — מנוע הניתוח החי: `LiveSession` פר-מצלמה (עד 4 סימולטניות; שכבה אחת לכל אחת) שמושכת את אותו זרם שהאריח מנגן, מריצה זיהוי + מעקב, ובלולאה מפרסמת פריים JPEG אחרון עם רוחב פס דו-כיווני של כ-1 fps לסשן בודד (0.2-0.5 fps תחת עומס מרובע). החלפת שכבה שומרת על הזרם והמצברים (מפת חום, מוני קו, היסטוריית מחוות). מאז fix 3 השכבות מקבלות ציור עשיר: `body` = לוח מצב + תיבה אדומה + שלד + באנר ALERT (כמו הרפרנס של fall detection); `heat` = ראיית חום מלאה של הפריים כולו עם אזורי השהייה בוערים חזק יותר.
 
 ### 6.1 צלילה מלאה: `collector.py` — מה באמת קורה בכל סבב
 
@@ -1483,9 +1487,184 @@ per camera @ imgsz=960:
 
 **ג. שכבת האנומליות — תפעולית בלבד.** שלושה סוגים עם קירור פר-(מצלמה,סוג) של 30 דקות ותקציב אזהרה של 8 ביום: ‏`extreme_load` (≥50 אנשים או עומס רכבים משוקלל ≥38), ‏`camera_obstructed` (תיבה ≥50% מהפריים בביטחון ≥0.45), ‏`camera_dark` (צניחת luma מ-≥90 ל-≤25). השכבה הסטטיסטית הישנה (חלון מתגלגל robust-z ופרופיל שעה-בשבוע) **הוסרה לגמרי ב-2026-07-18** — פסקי הדין שלה הושתקו עוד קודם ("עמוס מהרגיל" זה מזג אוויר, לא אירוע), והיא רק עלתה בכתיבות Firestore.
 
-**ד. שכבת התחזוקה — בין סבבים.** כל 10 סבבים: טעינה מחדש של הכיול/דחיפות/blacklist (כך verdict טרי משנה את הזיהוי בלי restart). כל 30 סבבים: בדיקת מצביע האדפטר ב-Storage והחלפת ראש חמה אם קודם ראש חדש. כל 5 סבבים: ‏pool_sync מעלה קבצים חדשים לענן במנות. כל 6 שעות: ניקוי ישויות ישנות. בנוסף: ‏backoff נימוסי כשסבב שלם החטיא (עד 240 שניות), אזהרה כשהסבב חורג מה-interval, ושחזור מלא של יומן-התצפיות מההיסטוריה בעלייה.
+**ד. שכבת התחזוקה — בין סבבים.** כל 10 סבבים: טעינה מחדש של הכיול/דחיפות/blacklist (כך verdict טרי משנה את הזיהוי בלי restart). כל 30 סבבים: בדיקת מצביע האדפטר ב-Storage והחלפת ראש חמה אם קודם ראש חדש. כל 5 סבבים: ‏pool_sync מעלה קבצים חדשים לענן במנות. כל 6 שעות: ניקוי ישויות ישנות. בנוסף: ‏backoff נימוסי כשסבב שלם החטיא (עד 240 שניות), אזהרה כשהסבב חורג מה-interval, ושחזור מלא של יומן-התצפיות מההיסטוריה בעלייה. **פרסום מפת חום עומק (fix 3):** בכל ‏render של ה-overlay ה-VM גם מפרסם את הרשתות הגולמיות לצד ה-JPEG (`snapshots/heatmaps/<cam>.json`) כך שהדשבורד המקומי יכול לרנדר כל שילוב שכבה×חלק-יממה בעצמו.
 
-## 7. מפת src/tools/ — הכלים בשורת הפקודה
+### 6.2 מנוע הניתוח החי — 7 שכבות ניתוח מתקדם
+
+<div dir="rtl">
+
+מאז fix 2 האריח בדשבורד יכול "להתמזג במקום" לזרם ניתוח חי של המצלמה שהוא מנגן: לחיצה על 🔬 בוחרת שכבה אחת, השרת מרים סשן מתמשך ופולט פריים JPEG מנותח כל ~1 שנייה, והלקוח מציג אותו בתוך אריח הווידיאו. עד 4 סשנים במקביל בגריד (אחד לכל אריח), אחד מכל סוג או כפילויות — לפי מה שהמפעיל בחר. מעבר בין שכבות באותו אריח שומר על הזרם ועל כל המצברים (מפת חום, מוני קו, היסטוריית מחוות). ה-VM לא נוגע בזה — הוא ממשיך את העבודה שלו במקביל.
+
+**הצינור המשותף (`app/live_analysis.py::LiveSession.run`).** בכל ‏tick (‏TICK_TARGET_S ≈ 0.8 שניות):
+
+```python
+frame = self._grab()                              # (א) פריים מהזרם
+if frame is None: continue
+boxes = self._infer(frame)                        # (ב) YOLO + פילטרים
+self.tracker.update(boxes, now)                   # (ג) BurstTracker
+if layer in ("pose", "gestures", "body"):
+    self._pose_pass(frame, boxes)                 # (ד) שלד רק אם צריך
+faces_list = self._faces_pass(frame) if layer == "faces" else []
+self._accumulate(frame.shape, boxes, now)         # (ה) מצברי סשן
+img = self._render(frame, faces_list, layer)      # (ו) ציור השכבה
+self._publish(img)                                # (ז) JPEG אחרון
+```
+
+*(א)* — `resolve_stream + grab_frame` מתוך `detect_core.py`. *(ב)* — `detect_with_boxes` תחת נעילה גלובלית `INFER_LOCK` (‏Ultralytics predict לא thread-safe) על מודל אחד משותף לכל הסשנים; ‏CPU של מפעיל מזין 1-2 ‏fps לסשן בודד, כ-0.2-0.5 ‏fps כשארבעה במקביל. *(ג)* — טיפוסי `BurstTracker` שרץ open-ended: כל תיבה מקבלת `track_id` יציב לאורך הסשן. *(ד)* — `attach_keypoints_crops` (‏YOLOv8n-pose על crop-per-person, מודל שני משותף מאחורי אותה נעילה). *(ה)* — צוברים מפה, ספירת קו, וזיהוי מחוות ראשונות פר-track. *(ו-ז)* — ציור השכבה, קידוד JPEG והצבתו כפריים אחרון שהלקוח שואב.
+
+**המסלול לזרם באריח שהמשתמש בחר.** במצב מקומי (‏`web/local_grid.json`) המצלמות הן ‏YouTube live; `live_analysis.resolve_cam` שולף את ה-`local_N` מהקובץ ומייצר dict תואם ל-`detect_core`:
+
+```python
+def _cam_from_slot(slot: dict) -> dict:
+    emb = slot.get("placeholder_embed") or ""
+    m = re.search(r"/embed/([\w-]{11})", emb)
+    if m:
+        return {"id": slot["slot_id"], "name": slot["placeholder_name"],
+                "kind": "youtube",
+                "url": f"https://www.youtube.com/watch?v={m.group(1)}"}
+```
+
+כך אותה מצלמה שהמשתמש רואה בפועל בווידיאו היא בדיוק זו שנפתחת לניתוח - אין אריח כלאיים.
+
+---
+
+**שכבה 1 — Paths & speeds (מסלולים ומהירויות).** *ל`live_analysis.draw_paths_layer`.* השכבה היחידה שמציגה תיבות זיהוי לכל המחלקות. לכל track נשמרות עד `TRAIL_MAX_PTS = 40` נקודות אחרונות של ה-centroid; מציירים קו דרך הנקודות בצבע קבוע לאותו ‏track_id, מסמנים את נקודת ההיוולדות במעגל, ומעל התיבה מוסיפים "km/h" לרכבים בלבד. אומדן הקמ"ש בא מ-`track_stats` שרץ פר-track:
+
+```python
+real_len = VEHICLE_LENGTH_M.get(cls or "")           # 4.5 לרכב, 12 לאוטובוס...
+if real_len and speeds:
+    exts = [max(b["x2"]-b["x1"], b["y2"]-b["y1"]) for b in boxes if ...]
+    m_per_px = real_len / (sum(exts) / len(exts))    # קנה מידה
+    kmh = round(sum(speeds)/len(speeds) * m_per_px * 3.6, 1)
+```
+
+מדובר באומדן `±30-50%` (הרכב לא תמיד מקביל למישור). לכן מפת המהירות הזאת מוצגת רק במיצוע חלון ולא כמספר מוחלט של רכב יחיד.
+
+**שכבה 2 — Pose & skeleton (תנוחה ושלד).** *ל`draw_pose_layer`.* מציירת שלדים בלבד — אין תיבות ואין רכבים בכלל, לפי חוק שכתבת מפורשות. הפרו-בלמה במרחק רחוב: אדם בפריים YOLO רגיל תופס 30-120 פיקסלים, ומעבר pose על הפריים המלא מסמן כמעט שום דבר. הפתרון (‏fix 3 גם ב-VM) הוא **top-down pose**: לכל תיבת person קוצצים סביבתה עם 25% padding ומריצים את מודל ה-pose ‏(YOLOv8n-pose) על ה-crop לבד:
+
+```python
+def attach_keypoints_crops(model, frame, boxes, imgsz=256,
+                            pad_frac=0.25, min_box_h=40, conf=0.25) -> int:
+    persons = [b for b in boxes if b.get("cls") == "person"
+               and (b["y2"] - b["y1"]) >= min_box_h]
+    crops, offsets = [], []
+    for b in persons:
+        bw, bh = b["x2"]-b["x1"], b["y2"]-b["y1"]
+        px, py = bw*pad_frac, bh*pad_frac
+        x1 = max(0, int(b["x1"]-px));  y1 = max(0, int(b["y1"]-py))
+        x2 = min(W, int(b["x2"]+px));  y2 = min(H, int(b["y2"]+py))
+        crops.append(frame[y1:y2, x1:x2]);  offsets.append((b, x1, y1))
+    results = model.predict(crops, imgsz=imgsz, conf=conf, verbose=False)
+    for (b, ox, oy), res in zip(offsets, results):
+        if not len(res.boxes): continue
+        qi = max(range(len(res.boxes.conf)), key=lambda i: res.boxes.conf[i])
+        kps = res.keypoints.data.tolist()[qi]
+        b["kps"] = [[x+ox, y+oy, c] for x, y, c in kps]        # חזרה למרחב הפריים
+```
+
+הפלט: על אותם אנשים שקרובים מספיק מצוירים 17 מפרקים בסדר COCO (‏אף, עיניים, אוזניים, כתפיים, מרפקים, שורשי כף היד, אגן, ברכיים, קרסוליים). מה שרחוק מדי כתוב ביושר בכיתוב ("skeletons on 3 of 12 people, rest too far").
+
+**שכבה 3 — Hand gestures (מחוות ידיים).** *ל`draw_gestures_layer` + `app/gestures.py`.* על אותם שלדים מזהים שלוש מחוות ברמת זרוע: `hand_raised` (יד יחידה מעל הכתף), `both_hands_up` (שתי ידיים מעל שתי הכתפיים), `wave` (שורש כף היד עובר את המרפק שוב ושוב, לפחות פעמיים):
+
+```python
+# gestures.py (מקוצר)
+def _is_hand_up(sh_y, wr_y): return wr_y < sh_y - 0.02*H
+def detect_gestures(kps_seq: list) -> list[str]:
+    per_frame = [_frame_flags(k) for k in kps_seq if k]
+    out = set()
+    if any("hand_raised" in f for f in per_frame): out.add("hand_raised")
+    if any("both_hands_up" in f for f in per_frame): out.add("both_hands_up")
+    if _swing_across_elbow(kps_seq) >= 2: out.add("wave")
+    return sorted(out)
+```
+
+הסשן שומר מונה מצטבר של מחוות (`self.gesture_counts` ב-`LiveSession`) כדי שהצייר יכתוב "session: hand_raised x3, wave x1" מתחת לכיתוב הראשי. בסצנה שאף אחד לא מנפנף מוצג בכנות "no gestures detected right now" — זה תקין, לא באג.
+
+**שכבה 4 — Body anomalies (אנומליות גוף).** *ל`draw_body_layer`, אחרי `fix 3` מעוצבת כמו הרפרנס של Fall Detection ששלחת.* המנוע: `label_track` (‏`app/behavior_labels.py`) מריץ שלוש שכבות של דירוג התנהגות פר-‏track — יחד, ומחזיר בדיוק תווית אחת:
+
+1. **Pose flags מהשלד** (`pose_flags_of`): "התיל" בין מרכז הכתפיים למרכז האגן — הזווית מהאנך; אם עוברים `FALL_TORSO_DEG = 60°` במשך `POSE_FLAG_MIN_FRAMES ≥ 2` פריימים, זה `fall_suspect`.
+2. **Course reversals** (`heading_turns`): מבין הצעדים במסלול — כמה חזרות אחורה חדות של > 90°. `≥3` = `erratic`.
+3. **קינמטיקה טהורה**: מהירות ממוצעת + פיזור, יחס תזוזה נטו לאורך המסלול, ‏moving_frac. משם עולות ‏`running` / `walking` / `standing` / `dwelling` / `driving` / `parked` / `normal`.
+
+השכבה מציגה **רק** תווית לא-נורמלית: מהרשימה `BODY_ANOMALY_LABELS = {"fall_suspect", "erratic", "running"}`. וזה קורה עם הצייר החדש:
+
+```python
+def draw_body_layer(img, boxes, stats_by_id):
+    persons = [b for b in boxes if b.get("cls") == "person"]
+    flagged = [(b, stats_by_id[b["track_id"]]) for b in persons
+               if stats_by_id.get(b["track_id"], {}).get("label") in BODY_ANOMALY_LABELS
+                  or stats_by_id.get(b["track_id"], {}).get("pose_flags")]
+    for b, s in flagged:
+        color = (0, 0, 220) if s.get("alert") else (0, 150, 230)
+        cv2.rectangle(img, ...)                      # תיבה אדומה
+        if b.get("kps"): draw_skeleton(img, [b])     # שלד מעל התיבה
+        _chip(img, b, f"#{s['id']} {s['label'].upper()}", color)
+    alerts = [s for _, s in flagged if s.get("alert")]
+    _hud_panel(img, ["BODY ANOMALIES", f"persons in view: {len(persons)}",
+                     f"flagged: {len(flagged)}"], alert=bool(alerts))
+    if alerts:
+        _alert_banner(img, "ALERT! " + ", ".join(f"{n} {k}" for k, n in ...))
+    return img
+```
+
+באימות הפועל השכבה סימנה בבנגקוק אדם אמיתי כ-`#32 ERRATIC` והציגה באנר `ALERT! 1 ERRATIC` — פריים ההוכחה נשמר. הוראה שאתה קבעת: השם *מתאר את הסצנה בפועל*, לא רק אנומליות "גוף" במובן הקצר; שלד סוטה או ריצה — אלה חלק מהאירועים שנחשבים.
+
+**שכבה 5 — Face detection.** *ל`draw_faces_layer_img` + `app/faces.py`.* מלבני זיהוי בלבד, בלי embeddings ובלי מסד נתונים. הגלאי הוא **YuNet** של OpenCV Zoo (`data/face_detection_yunet_2023mar.onnx`, כ-230KB). מודל מהיר שרץ ‏CPU-only ב-פחות מ-15ms על 960×540, מותאם למרחקים בינוניים. אם המודל לא נטען (למשל, מכונה בלי הקובץ), השכבה אומרת "face model not available on this machine" ומחזירה פריים ריק בכיתוב.
+
+```python
+def detect_faces(frame) -> list[dict]:
+    det = _get_detector()
+    h, w = frame.shape[:2]; det.setInputSize((w, h))
+    _, faces = det.detect(frame)          # (N,15): x,y,w,h + 5 landmarks + score
+    return [{"x1":x, "y1":y, "x2":x+w_, "y2":y+h_, "conf":s}
+            for x,y,w_,h_,*_,s in (faces or [])]
+```
+
+במרחק רחוב הפנים לפעמים נמוכות מדי לרזולוציית ה-detect; הכיתוב "no faces at this distance/resolution" הוא תיאור אמת.
+
+**שכבה 6 — Heat vision (חתימת חום).** *ל`draw_heat_layer`, לפי הדרישה שלך שבחירה של השכבה **משנה את התמונה כולה**.* לא חיישן תרמי — סטיליזציה שקופה מבהירות + שהייה מצטברת. המנגנון:
+
+```python
+def draw_heat_layer(img, grid, since=None):
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+    signal = gray * 0.72                                     # בסיס: הבהירות
+    peak = float(np.asarray(grid).max())
+    if peak > 0:
+        dwell = np.sqrt(grid / peak)                         # gamma לחלק שיא
+        dwell = cv2.resize(dwell, (W, H), INTER_LINEAR)
+        dwell = cv2.GaussianBlur(dwell, (0,0), sigmaX=max(2, W/96))
+        signal = np.clip(signal + dwell*0.55, 0, 1)          # אזורי שהייה בוערים
+    out = cv2.applyColorMap((signal*255).astype(np.uint8), cv2.COLORMAP_INFERNO)
+    return _caption(out, [note, "stylized: brightness + dwell, not a thermal sensor"])
+```
+
+המפה `grid` היא GRID_H×GRID_W של שניות שהייה מצטברות פר-קול: `bump_heat` שם באמצע כל ‏tick את משקל הזמן שעבר בכל תא שמתחת לרגלי אנשים/כלי רכב. תוצאה מובטחת גם כשאין דגימה בכלל (כי הבהירות עצמה נצבעת) ומצטברת עם הזמן; כל מעבר שכבה חזרה ל-heat ממשיך מהמצב שנצבר.
+
+**שכבה 7 — Line crossing (חציית קו).** *ל`draw_line_layer` + `update_crossings`.* קו סופרים אלכסוני בהכללה חופשית לתוך ROI במסך; לרוב מוגדר בקטלוג המצלמה, ואם אין — משתמשים ב-`DEFAULT_LINE = [[0.10,0.62], [0.90,0.62]]` (רצועת המדרכה הטיפוסית). המימוש הוא ‏sign-of-cross מהלינ־אל־ליני, וכל שינוי סימן של נקודת ה-foot של אותו ‏track_id בין שני ‏tick עוקבים הוא "in" או "out":
+
+```python
+def update_crossings(side_state, tracks, frame_shape, line, cross):
+    H, W = frame_shape[:2]
+    for tr in tracks:
+        if tr.misses: continue
+        fx, fy = (tr.boxes[-1]["x1"]+tr.boxes[-1]["x2"])/2, tr.boxes[-1]["y2"]
+        side = _line_side(fx/W, fy/H, line)              # signed cross-product
+        prev = side_state.get(tr.tid)
+        side_state[tr.tid] = side
+        if prev is None: continue
+        if prev < 0 <= side:  cross["in"]  += 1          # דרום → צפון = כניסה
+        elif prev >= 0 > side: cross["out"] += 1         # ההיפך = יציאה
+```
+
+המנייה שרירה על הסשן: בבדיקה שהרצנו IN 15 / OUT 14 הצטברו בכ-דקה על צומת בבנגקוק — שקוף במסך והמונים מוצגים בסיסמת הכיתוב. יתרון על ספירה עולמית: בקו יש כיווניות, וזה מפריד "נכנסים" מ"יוצאים" מהאזור.
+
+---
+
+**מנוע ניתוח החלון החד-פעמי (‏`app/behavior.py::analyze_window`).** מסלול אחר ותוסף לחי — לחלון עמוק אחד. בפועל הפאנל שאתה רואה ב-`Window analysis` מריץ אותו: אוסף `n_frames = 12` פריימים ב-`stride = 12` (≈ 0.5 שניות בין פריים לפריים ב-25fps), יורק פרופיל פר-פרט (מסלול, מרחק, מהירות בפיקסלים לשנייה, כיוון דומיננטי מהרביעיות, אזורי heatmap שביקר בהם, המרחק לשכן הקרוב) ותווית התנהגות אחת + הראיה שלה. השכבות אופציונליות: `pose=1` מוסיפה שלדים למסלול (‏attach_keypoints_crops), `faces=1` מציירת פנים על הפריים האחרון, `lock=auto` בוחר "מטרה" ומצייר עליה כוונת עם הסטת מרכז (`dx, dy` בטווח `[-0.5, 0.5]` - האות שלולאת ‏pan/tilt הייתה צורכת אם הייתה חומרה). ‏CLI מלא: `python -m tools.analyze_window --cam taksim_yeni --pose --faces --lock auto`.
+
+הבידול מהחי: החלון החד-פעמי מספק **פרופיל מפורט** של מה שקרה בחצי-דקה שנחתכה, לא זרם מתמשך. הוא נשאר כשאתה רוצה "רגע רגע, מה בדיוק היה שם?".
+
+</div>
 
 | קובץ | הרצה | מה הוא עושה |
 |---|---|---|
