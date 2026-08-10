@@ -301,16 +301,40 @@ analysisPanel.innerHTML = `
     <div data-an-boxes style="display:grid;grid-template-columns:1fr 1fr;
          gap:8px 14px;margin-bottom:14px"></div>
     <div data-an-err style="color:#f87171;font-size:13px;min-height:18px"></div>
-    <div style="display:flex;gap:10px">
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
       <button data-an-run style="cursor:pointer;background:#2563eb;border:0;
               color:#fff;border-radius:8px;padding:7px 18px;font-size:14px">
         Start</button>
+      <button data-an-editline style="cursor:pointer;background:#334155;border:0;
+              color:#fff;border-radius:8px;padding:7px 14px;font-size:14px;
+              display:none">Edit counting line</button>
       <button data-an-cancel style="cursor:pointer;background:#1e293b;
               border:1px solid #334155;color:#e2e8f0;border-radius:8px;
               padding:7px 14px;font-size:14px">Cancel</button>
     </div>
   </div>`;
 document.body.appendChild(analysisPanel);
+
+// Show/hide the "Edit counting line" button as the user toggles layers.
+analysisPanel.addEventListener("change", (e) => {
+  if (e.target && e.target.name === "an-layer") {
+    const el = analysisPanel.querySelector("[data-an-editline]");
+    el.style.display = (e.target.value === "line") ? "" : "none";
+  }
+});
+
+analysisPanel.querySelector("[data-an-editline]").addEventListener("click",
+  () => {
+    if (!_anTarget) return;
+    const cam = tileAnalysisCamId(_anTarget);
+    if (!cam) { alert("No active camera on this tile yet"); return; }
+    analysisPanel.style.display = "none";
+    // A live analysis frame is the freshest snapshot the tile can offer;
+    // if none is running yet, /api/analysis/frame returns the boot-poster
+    // and the editor still works (the line is normalized, not pixel-tied).
+    window.openLineEditor(cam,
+      `/api/analysis/frame?cam=${encodeURIComponent(cam)}&_=${Date.now()}`);
+  });
 
 const _anBoxes = analysisPanel.querySelector("[data-an-boxes]");
 for (const [key, label] of ANALYSIS_LAYER_DEFS) {
@@ -339,6 +363,11 @@ function openAnalysisPicker(st) {
     rb.checked = rb.value === current;
   analysisPanel.querySelector("[data-an-run]").textContent =
     st.analysis ? "Switch layer" : "Start";
+  // Match the initial visibility of the "Edit counting line" button to
+  // the currently-selected layer (the change listener only fires on
+  // subsequent picks).
+  analysisPanel.querySelector("[data-an-editline]").style.display =
+    (current === "line") ? "" : "none";
   analysisPanel.style.display = "flex";
 }
 
@@ -2019,3 +2048,214 @@ async function renderAlCurve() {
 }
 renderAlCurve();
 setInterval(renderAlCurve, 300000);
+
+
+// -----------------------------------------------------------------------------
+// Counting-line editor + crossing alerts
+// -----------------------------------------------------------------------------
+// Two things live here that the previous Line layer never had:
+//
+//   1. Editor modal - drag on the last-known snapshot to pick two points;
+//      Save posts to /api/lines?cam=<id>. From that moment the collector's
+//      resolve_line() picks the override up on the next round (no restart
+//      needed).
+//   2. Alert loop - while a Line-layer analysis is active on any tile, poll
+//      /api/crossings?cam=<id> and, on every new event, show a red toast
+//      and flash the tile briefly. Small history strip below the tile
+//      shows the last few event snapshots.
+//
+// Both are strictly ADDITIVE - if you never open the editor and never run a
+// Line-layer analysis, nothing here changes the existing dashboard.
+
+const lineEditor = document.createElement("div");
+lineEditor.style.cssText =
+  "display:none;position:fixed;inset:0;z-index:70;background:rgba(2,6,23,.82);" +
+  "align-items:center;justify-content:center";
+lineEditor.innerHTML = `
+  <div style="background:#0f172a;border:1px solid #334155;border-radius:12px;
+              padding:16px 18px;max-width:800px;width:94%;color:#e2e8f0">
+    <h3 style="margin:0 0 4px;font-size:17px">Counting line -
+      <span data-le-cam></span></h3>
+    <div style="color:#94a3b8;font-size:13px;margin-bottom:10px">
+      Drag on the snapshot to place a counting line. Save persists it
+      per-camera; the collector picks it up on the next round.</div>
+    <div style="position:relative;background:#020617;border:1px solid #334155;
+                border-radius:8px;overflow:hidden">
+      <img data-le-img style="display:block;width:100%;height:auto;
+                              user-select:none;-webkit-user-drag:none">
+      <canvas data-le-canvas style="position:absolute;inset:0;width:100%;
+                                     height:100%;cursor:crosshair"></canvas>
+    </div>
+    <div data-le-err style="color:#f87171;font-size:13px;min-height:18px;
+                            margin-top:8px"></div>
+    <div style="display:flex;gap:10px;margin-top:6px">
+      <button data-le-save style="cursor:pointer;background:#2563eb;border:0;
+              color:#fff;border-radius:8px;padding:7px 18px">Save line</button>
+      <button data-le-clear style="cursor:pointer;background:#334155;border:0;
+              color:#fff;border-radius:8px;padding:7px 14px">Clear override</button>
+      <button data-le-cancel style="cursor:pointer;background:#1e293b;
+              border:1px solid #334155;color:#e2e8f0;border-radius:8px;
+              padding:7px 14px">Close</button>
+    </div>
+  </div>`;
+document.body.appendChild(lineEditor);
+
+const _leImg = lineEditor.querySelector("[data-le-img]");
+const _leCanvas = lineEditor.querySelector("[data-le-canvas]");
+const _leErr = lineEditor.querySelector("[data-le-err]");
+let _leCam = null;
+let _lePts = [];   // [[x_norm, y_norm], [x_norm, y_norm]]
+
+function _leDraw() {
+  const c = _leCanvas;
+  c.width = _leImg.clientWidth || _leImg.naturalWidth || 640;
+  c.height = _leImg.clientHeight || _leImg.naturalHeight || 360;
+  const ctx = c.getContext("2d");
+  ctx.clearRect(0, 0, c.width, c.height);
+  if (_lePts.length === 0) return;
+  ctx.strokeStyle = "#f59e0b";
+  ctx.lineWidth = 3;
+  const p0 = [_lePts[0][0] * c.width, _lePts[0][1] * c.height];
+  if (_lePts.length === 1) {
+    ctx.beginPath(); ctx.arc(p0[0], p0[1], 6, 0, Math.PI * 2); ctx.fillStyle = "#f59e0b"; ctx.fill();
+  } else {
+    const p1 = [_lePts[1][0] * c.width, _lePts[1][1] * c.height];
+    ctx.beginPath(); ctx.moveTo(p0[0], p0[1]); ctx.lineTo(p1[0], p1[1]); ctx.stroke();
+    for (const [x, y] of [p0, p1]) {
+      ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fillStyle = "#f59e0b"; ctx.fill();
+    }
+  }
+}
+
+let _leDragging = false;
+_leCanvas.addEventListener("mousedown", (e) => {
+  const r = _leCanvas.getBoundingClientRect();
+  _lePts = [[(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height]];
+  _leDragging = true;
+  _leDraw();
+});
+_leCanvas.addEventListener("mousemove", (e) => {
+  if (!_leDragging) return;
+  const r = _leCanvas.getBoundingClientRect();
+  const pt = [(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height];
+  _lePts = _lePts.length === 0 ? [pt] : [_lePts[0], pt];
+  _leDraw();
+});
+_leCanvas.addEventListener("mouseup", () => { _leDragging = false; });
+window.addEventListener("resize", _leDraw);
+
+lineEditor.querySelector("[data-le-cancel]").addEventListener("click",
+  () => { lineEditor.style.display = "none"; });
+
+lineEditor.querySelector("[data-le-save]").addEventListener("click", async () => {
+  _leErr.textContent = "";
+  if (_lePts.length !== 2) { _leErr.textContent = "Draw a line first (drag on the image)"; return; }
+  try {
+    const r = await fetch(`/api/lines?cam=${encodeURIComponent(_leCam)}`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({line: _lePts}),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    _leErr.style.color = "#4ade80";
+    _leErr.textContent = "Saved - next round picks it up";
+    setTimeout(() => { _leErr.style.color = "#f87171"; _leErr.textContent = ""; }, 2000);
+  } catch (e) {
+    _leErr.style.color = "#f87171";
+    _leErr.textContent = "Save failed: " + e.message;
+  }
+});
+
+lineEditor.querySelector("[data-le-clear]").addEventListener("click", async () => {
+  _leErr.textContent = "";
+  try {
+    const r = await fetch(`/api/lines/clear?cam=${encodeURIComponent(_leCam)}`,
+                          {method: "POST"});
+    if (!r.ok) throw new Error(await r.text());
+    _lePts = [];
+    _leDraw();
+    _leErr.style.color = "#4ade80";
+    _leErr.textContent = "Override cleared - falling back to cameras.py";
+    setTimeout(() => { _leErr.style.color = "#f87171"; _leErr.textContent = ""; }, 2000);
+  } catch (e) {
+    _leErr.style.color = "#f87171";
+    _leErr.textContent = "Clear failed: " + e.message;
+  }
+});
+
+async function openLineEditor(cam, snapshotUrl) {
+  _leCam = cam;
+  _lePts = [];
+  lineEditor.querySelector("[data-le-cam]").textContent = cam;
+  _leImg.src = snapshotUrl || `/api/analysis/frame?cam=${encodeURIComponent(cam)}&_=${Date.now()}`;
+  _leImg.onload = () => {
+    // Load existing line, if any.
+    fetch(`/api/lines?cam=${encodeURIComponent(cam)}`).then(r => r.json()).then(d => {
+      if (d && d.line) _lePts = d.line;
+      _leDraw();
+    }).catch(() => _leDraw());
+  };
+  lineEditor.style.display = "flex";
+}
+
+// Expose so the picker's "Edit line" button can call it.
+window.openLineEditor = openLineEditor;
+
+// ---- Crossing toast + tile flash ---------------------------------------
+
+const _crossToast = document.createElement("div");
+_crossToast.style.cssText =
+  "position:fixed;top:16px;right:16px;z-index:80;display:none;" +
+  "background:#dc2626;color:#fff;padding:10px 14px;border-radius:8px;" +
+  "font-size:14px;font-weight:600;box-shadow:0 6px 20px rgba(0,0,0,.4);" +
+  "max-width:320px";
+document.body.appendChild(_crossToast);
+
+let _crossToastTimer = null;
+function showCrossToast(msg) {
+  _crossToast.textContent = msg;
+  _crossToast.style.display = "block";
+  if (_crossToastTimer) clearTimeout(_crossToastTimer);
+  _crossToastTimer = setTimeout(() => { _crossToast.style.display = "none"; }, 3500);
+}
+
+// Poll /api/crossings?cam=<id> for every tile whose analysis layer is
+// "line". Fire toast + red flash on any new event (tid+ts pair we've not
+// seen). Bounded per-tile memory.
+const _seenCrossings = new Map();  // cam_id -> Set of "ts|tid" keys
+setInterval(async () => {
+  if (typeof tileStates !== "object" || !tileStates) return;
+  for (const st of Object.values(tileStates)) {
+    if (!st || !st.analysis || st.analysis.layer !== "line") continue;
+    const cam = st.analysis.cam;
+    if (!cam) continue;
+    let seen = _seenCrossings.get(cam);
+    if (!seen) { seen = new Set(); _seenCrossings.set(cam, seen); }
+    try {
+      const r = await fetch(`/api/crossings?cam=${encodeURIComponent(cam)}&limit=10`);
+      if (!r.ok) continue;
+      const data = await r.json();
+      const events = (data.events || []).slice().reverse();  // oldest first
+      const boot = seen.size === 0;    // first poll: don't alarm on backlog
+      for (const ev of events) {
+        const key = ev.ts + "|" + ev.tid + "|" + ev.direction;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        if (boot) continue;
+        showCrossToast(`${ev.direction === "in" ? "-> IN" : "OUT ->"}  ` +
+                       `${ev.cls || "object"}  @ ${ev.ts.substr(11, 8)}`);
+        // Flash the tile red briefly.
+        const el = st.root || st.imgEl || null;
+        if (el && el.style) {
+          const prev = el.style.boxShadow;
+          el.style.boxShadow = "0 0 0 4px #dc2626 inset";
+          setTimeout(() => { el.style.boxShadow = prev; }, 800);
+        }
+      }
+      if (seen.size > 200) {  // bound memory
+        const arr = Array.from(seen);
+        _seenCrossings.set(cam, new Set(arr.slice(arr.length - 100)));
+      }
+    } catch (_e) { /* transient - retry next tick */ }
+  }
+}, 4000);

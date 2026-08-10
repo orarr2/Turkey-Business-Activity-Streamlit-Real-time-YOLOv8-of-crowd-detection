@@ -1479,11 +1479,14 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
         # global 640 - its entry may request a larger inference size without
         # taxing the other cams' share of the round.
         eff_imgsz = cam.get("imgsz") or imgsz
+        # line: user override (data/lines/<cam>.json) beats cameras.py.
+        # Drawn from the dashboard's Line layer without redeploying.
+        from app.cameras import resolve_line
         counts, boxes, frame, burst_dbg = detect_burst(
             model, frames, conf=cam_conf, imgsz=eff_imgsz,
             roi=cam.get("roi"), roi_exclude=cam.get("roi_exclude"),
             roi_exclude_class=cam.get("roi_exclude_class"),
-            line=cam.get("line"), per_class_conf=gates,
+            line=resolve_line(cam_id), per_class_conf=gates,
             burst_stride=burst_stride)
         ok = 1
         # WS1: every box that reaches a review pool carries `uncertainty`,

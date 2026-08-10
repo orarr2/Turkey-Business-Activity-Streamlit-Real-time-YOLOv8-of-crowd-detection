@@ -400,6 +400,12 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/heatmap":
             self._heatmap()
             return
+        if path == "/api/lines":
+            self._get_line()
+            return
+        if path == "/api/crossings":
+            self._get_crossings()
+            return
         super().do_GET()
 
     def do_POST(self) -> None:
@@ -442,7 +448,107 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/send-report":
             self._send_report()
             return
+        if path == "/api/lines":
+            self._save_line()
+            return
+        if path == "/api/lines/clear":
+            self._clear_line()
+            return
         self.send_error(404, "unknown POST endpoint")
+
+    # ---- Line-crossing config + event log --------------------------------
+    # The Line layer in the dashboard lets the operator draw a virtual
+    # counting line on a snapshot; every crossing then produces a toast +
+    # a crop in the history strip. Three endpoints:
+    #   GET  /api/lines?cam=<id>       -> {"line": [[x,y],[x,y]] | null, "set_at": ...}
+    #   POST /api/lines?cam=<id>       body: {"line": [[x,y],[x,y]]}
+    #   POST /api/lines/clear?cam=<id> -> delete the override, back to cameras.py
+    #   GET  /api/crossings?cam=<id>&limit=20 -> newest-first events
+
+    def _q_cam(self):
+        """Extract the ?cam= query arg. Returns cam_id or None (and writes 400)."""
+        from urllib.parse import urlparse, parse_qs
+        q = parse_qs(urlparse(self.path).query)
+        cam = (q.get("cam") or [""])[0].strip()
+        if not cam:
+            self.send_error(400, "missing ?cam=")
+            return None
+        return cam
+
+    def _get_line(self) -> None:
+        cam = self._q_cam()
+        if cam is None:
+            return
+        from app.cameras import CAMERAS, _lines_dir
+        p = _lines_dir() / f"{cam}.json"
+        set_at = None
+        line = None
+        if p.exists():
+            try:
+                d = json.loads(p.read_text())
+                line = d.get("line")
+                set_at = d.get("set_at")
+            except (OSError, ValueError):
+                line = None
+        if line is None:
+            line = CAMERAS.get(cam, {}).get("line")
+        body = json.dumps({"cam": cam, "line": line, "set_at": set_at,
+                           "user_override": p.exists()}).encode()
+        self.send_response(200); self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body))); self.end_headers()
+        self.wfile.write(body)
+
+    def _save_line(self) -> None:
+        cam = self._q_cam()
+        if cam is None:
+            return
+        n = int(self.headers.get("Content-Length") or 0)
+        if n <= 0 or n > 1024:
+            self.send_error(400, "empty or oversized body"); return
+        try:
+            data = json.loads(self.rfile.read(n).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            self.send_error(400, "body must be JSON"); return
+        line = data.get("line")
+        from app.cameras import save_line
+        try:
+            save_line(cam, line)
+        except ValueError as e:
+            self.send_error(400, str(e)); return
+        body = json.dumps({"ok": True, "cam": cam, "line": line}).encode()
+        self.send_response(200); self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body))); self.end_headers()
+        self.wfile.write(body)
+
+    def _clear_line(self) -> None:
+        cam = self._q_cam()
+        if cam is None:
+            return
+        from app.cameras import clear_line
+        removed = clear_line(cam)
+        body = json.dumps({"ok": True, "cam": cam, "removed": removed}).encode()
+        self.send_response(200); self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body))); self.end_headers()
+        self.wfile.write(body)
+
+    def _get_crossings(self) -> None:
+        cam = self._q_cam()
+        if cam is None:
+            return
+        from urllib.parse import urlparse, parse_qs
+        q = parse_qs(urlparse(self.path).query)
+        limit = 20
+        try:
+            limit = max(1, min(200, int((q.get("limit") or ["20"])[0])))
+        except ValueError:
+            pass
+        from app.live_analysis import read_crossing_events
+        events = read_crossing_events(cam, limit=limit)
+        body = json.dumps({"cam": cam, "events": events}).encode()
+        self.send_response(200); self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body))); self.end_headers()
+        self.wfile.write(body)
 
     def _send_report(self) -> None:
         """POST /api/send-report?to=<email>[&window_hours=12]

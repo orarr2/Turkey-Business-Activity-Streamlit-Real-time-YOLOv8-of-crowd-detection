@@ -176,7 +176,8 @@ def grid_from_tracks(tracks, frame_shape) -> list:
 
 
 def update_crossings(side_state: dict, tracks, frame_shape, line: list,
-                     cross: dict) -> None:
+                     cross: dict, on_event=None, frame=None,
+                     cam_id: str | None = None) -> None:
     """Advance the session in/out counters from each visible track's
     NEWEST foot point. `side_state` remembers the last STRICTLY-signed
     side per track id (side == 0 means "on the line" and is stored as
@@ -184,7 +185,13 @@ def update_crossings(side_state: dict, tracks, frame_shape, line: list,
     there). A crossing = a strict sign flip between two consecutive
     signed observations. Same convention as
     detect_core.count_line_crossings: negative -> positive side of the
-    A->B line = "in"."""
+    A->B line = "in".
+
+    on_event(direction, track, frame): optional callback fired on each
+    crossing so the caller can persist an event + snapshot to
+    data/crossings/<cam>.jsonl (see log_crossing_event below). cam_id +
+    frame are forwarded to the callback so it can crop the mover for the
+    event image. Absent callback -> counters only, backward-compatible."""
     from app.detect_core import _line_side
     H, W = frame_shape[:2]
     if not (H and W):
@@ -205,10 +212,107 @@ def update_crossings(side_state: dict, tracks, frame_shape, line: list,
         side_state[tr.tid] = side
         if prev is None or prev == 0:
             continue
+        direction = None
         if prev < 0 and side > 0:
             cross["in"] = cross.get("in", 0) + 1
+            direction = "in"
         elif prev > 0 and side < 0:
             cross["out"] = cross.get("out", 0) + 1
+            direction = "out"
+        if direction and on_event is not None:
+            try:
+                on_event(direction=direction, track=tr, frame=frame,
+                         cam_id=cam_id)
+            except Exception as e:
+                # Event persistence must never break the session's counter
+                # loop. Log and move on.
+                print(f"live_analysis: crossing on_event failed: "
+                      f"{type(e).__name__}: {e}")
+
+
+# ---- crossing-event log --------------------------------------------------
+
+# Per-camera JSONL of the most recent line-crossing events. The dashboard's
+# /api/crossings?cam=<id> reads this to render toasts + a history strip on
+# the Line layer. Bounded rewrite: keep the newest CROSSING_LOG_KEEP rows;
+# a full rewrite of ~50 rows is cheap and avoids indefinite growth on a
+# camera with heavy traffic.
+CROSSING_LOG_KEEP = 50
+
+
+def _crossings_dir():
+    from pathlib import Path
+    return Path(__file__).resolve().parent.parent / "data" / "crossings"
+
+
+def log_crossing_event(cam_id: str, direction: str, track, frame=None) -> None:
+    """Append a crossing event to data/crossings/<cam>.jsonl (bounded).
+    When `frame` is provided we also save a small jpeg crop of the mover.
+
+    The event fields the frontend reads:
+      ts        - ISO-8601 UTC
+      direction - "in" | "out"
+      cls       - track class (person/car/bus/...)
+      snap      - relative URL of the crop, or None
+    """
+    import json as _json
+    import time as _t
+    d = _crossings_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    ts = _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime())
+    snap_rel = None
+    if frame is not None:
+        try:
+            import cv2 as _cv
+            from pathlib import Path as _P
+            b = track.boxes[-1]
+            H, W = frame.shape[:2]
+            pad = 20
+            x1 = max(0, int(b["x1"]) - pad); y1 = max(0, int(b["y1"]) - pad)
+            x2 = min(W, int(b["x2"]) + pad); y2 = min(H, int(b["y2"]) + pad)
+            crop = frame[y1:y2, x1:x2]
+            if crop.size:
+                # Snaps go under src/web/snapshots/crossings/ so the
+                # dashboard's static handler serves them at
+                # /snapshots/crossings/<cam>/<file>.jpg with no extra route.
+                web_snaps = (_P(__file__).resolve().parent.parent
+                             / "web" / "snapshots" / "crossings" / cam_id)
+                web_snaps.mkdir(parents=True, exist_ok=True)
+                fname = f"{ts.replace(':', '')}_{track.tid}_{direction}.jpg"
+                _cv.imwrite(str(web_snaps / fname), crop,
+                            [_cv.IMWRITE_JPEG_QUALITY, 72])
+                snap_rel = f"snapshots/crossings/{cam_id}/{fname}"
+        except Exception as e:
+            print(f"log_crossing_event: snap failed: {type(e).__name__}: {e}")
+    row = {"ts": ts, "direction": direction,
+           "cls": getattr(track, "cls", None),
+           "tid": getattr(track, "tid", None), "snap": snap_rel}
+
+    log = d / f"{cam_id}.jsonl"
+    lines = []
+    if log.exists():
+        try:
+            lines = log.read_text().splitlines()[-CROSSING_LOG_KEEP + 1:]
+        except OSError:
+            lines = []
+    lines.append(_json.dumps(row))
+    tmp = log.with_suffix(".jsonl.tmp")
+    tmp.write_text("\n".join(lines) + "\n")
+    tmp.replace(log)
+
+
+def read_crossing_events(cam_id: str, limit: int = 20) -> list:
+    """Newest-first read of the last N crossing events for a camera.
+    Returns [] if the log doesn't exist (nothing has crossed yet)."""
+    import json as _json
+    log = _crossings_dir() / f"{cam_id}.jsonl"
+    if not log.exists():
+        return []
+    try:
+        rows = [_json.loads(x) for x in log.read_text().splitlines() if x.strip()]
+    except (OSError, ValueError):
+        return []
+    return list(reversed(rows))[:limit]
 
 
 # ---------------------------------------------------------------------------
@@ -493,7 +597,9 @@ class LiveSession(threading.Thread):
         self.tracker = None
         self.heat = [[0.0] * GRID_W for _ in range(GRID_H)]
         self.heat_since: float | None = None
-        self.line = cam.get("line") or DEFAULT_LINE
+        # User-drawn override (data/lines/<cam>.json) wins over cameras.py.
+        from app.cameras import resolve_line as _resolve_line
+        self.line = _resolve_line(cam_id) or cam.get("line") or DEFAULT_LINE
         self.cross = {"in": 0, "out": 0}
         self._line_sides: dict[int, float] = {}
         self.gesture_counts: dict[str, int] = {}
@@ -528,7 +634,7 @@ class LiveSession(threading.Thread):
                 faces_list: list[dict] = []
                 if layer == "faces":
                     faces_list = self._faces_pass(frame)
-                self._accumulate(frame.shape, boxes, now)
+                self._accumulate(frame, boxes, now)
                 img = self._render(frame, faces_list, layer)
                 self._publish(img)
                 dt = time.time() - t0
@@ -585,13 +691,14 @@ class LiveSession(threading.Thread):
             self._faces_ok = _faces.available()
         return _faces.detect_faces(frame) if self._faces_ok else []
 
-    def _accumulate(self, frame_shape, boxes, now: float) -> None:
+    def _accumulate(self, frame, boxes, now: float) -> None:
         # First tick has no prior timestamp to measure against, so it
         # borrows the pacing target instead of the old arbitrary 1.0 - the
         # boot sample now weighs about as much as a normal tick (TICK_TARGET_S
         # is the pacing floor the run loop already sleeps to). Later ticks
         # use the real elapsed time, clamped so a long stall doesn't inflate
         # one bin.
+        frame_shape = frame.shape
         if self._last_tick is None:
             w = TICK_TARGET_S
         else:
@@ -600,8 +707,16 @@ class LiveSession(threading.Thread):
         if self.heat_since is None:
             self.heat_since = now
         bump_heat(self.heat, boxes, frame_shape, w)
+        # Persist an event per crossing (bounded JSONL + optional snap).
+        # The dashboard's Line layer polls /api/crossings?cam=<id> for the
+        # toast + history strip. Frame is passed so the crop of the mover
+        # captures the moment they crossed.
+        def _on_cross(direction, track, frame, cam_id):
+            log_crossing_event(cam_id, direction, track, frame=frame)
         update_crossings(self._line_sides, self.tracker.open, frame_shape,
-                         self.line, self.cross)
+                         self.line, self.cross,
+                         on_event=_on_cross, frame=frame,
+                         cam_id=self.cam_id)
 
     def _trim(self) -> None:
         for tr in self.tracker.open:

@@ -54,6 +54,7 @@ Example (uncomment and tune per scene):
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 # Header set IBB's nginx accepts. ffmpeg/OpenCV honor this via OPENCV_FFMPEG_CAPTURE_OPTIONS.
@@ -825,6 +826,70 @@ def camera_country_iso2(cam_id: str) -> str | None:
     """Country ISO-2 code for the `holidays` library. None if unknown."""
     ctry = CAMERAS.get(cam_id, {}).get("country")
     return COUNTRY_ISO2.get(ctry)
+
+
+# Per-camera counting-line override written by the dashboard UI (a user
+# draws a line on a snapshot -> POST /api/lines/<cam>). Overrides the
+# CAMERAS[cam]["line"] if present. Location is relative to the src/
+# directory the collector runs from; the dashboard writes to the same
+# path so both processes see the same source of truth.
+def _lines_dir() -> Path:
+    """The user-drawn line-config directory (src/data/lines/). Created
+    lazily on first write."""
+    return Path(__file__).resolve().parent.parent / "data" / "lines"
+
+
+def resolve_line(cam_id: str) -> list | None:
+    """Return the counting line to use for this camera.
+
+    Precedence: user override (data/lines/<cam>.json) beats the CAMERAS
+    catalog entry. Returns None when neither exists. Malformed overrides
+    fall back to the catalog silently - the collector must never crash
+    because the dashboard wrote a bad file.
+    """
+    p = _lines_dir() / f"{cam_id}.json"
+    if p.exists():
+        try:
+            data = json.loads(p.read_text())
+            line = data.get("line")
+            # Validate shape: two [x, y] points, each in [0, 1].
+            if (isinstance(line, list) and len(line) == 2
+                    and all(isinstance(pt, list) and len(pt) == 2
+                            and all(isinstance(v, (int, float)) and 0.0 <= v <= 1.0 for v in pt)
+                            for pt in line)):
+                return line
+        except (OSError, ValueError):
+            pass
+    return CAMERAS.get(cam_id, {}).get("line")
+
+
+def save_line(cam_id: str, line: list) -> None:
+    """Persist a user-drawn line for this camera. Validates shape; raises
+    ValueError on garbage input so the API layer can return 400."""
+    if not (isinstance(line, list) and len(line) == 2
+            and all(isinstance(pt, list) and len(pt) == 2
+                    and all(isinstance(v, (int, float)) and 0.0 <= v <= 1.0 for v in pt)
+                    for pt in line)):
+        raise ValueError(
+            "line must be exactly two [x, y] points with 0 <= x,y <= 1")
+    d = _lines_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{cam_id}.json").write_text(json.dumps({
+        "line": [[float(line[0][0]), float(line[0][1])],
+                 [float(line[1][0]), float(line[1][1])]],
+        "set_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }))
+
+
+def clear_line(cam_id: str) -> bool:
+    """Delete a user-drawn line override; returns True if a file was
+    removed, False if none existed."""
+    p = _lines_dir() / f"{cam_id}.json"
+    try:
+        p.unlink()
+        return True
+    except OSError:
+        return False
 
 
 # Stamp every catalog entry with its own id (needed by the resolve cache in
