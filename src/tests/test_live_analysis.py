@@ -56,6 +56,31 @@ def test_update_crossings_skips_coasting_tracks():
     assert sides == {} and cross == {}
 
 
+def test_update_crossings_ignores_landing_exactly_on_line():
+    # A foot point that lands EXACTLY on the line has no signed side; the
+    # old convention treated 0 as "positive" and double-counted a track
+    # that jittered neg -> 0 -> neg. Now side == 0 is skipped entirely
+    # (neither counted nor allowed to reset the last known side), so the
+    # touch-and-return produces zero crossings.
+    # Build a line ON the exact centroid row of our synthetic boxes:
+    # foot_y = 180, SHAPE height = 360, so ny = 0.5 lands right on it.
+    line = [[0.10, 0.50], [0.90, 0.50]]
+    tr = Track(1, _box(300, 180 - 60), 0.0)          # foot y = 180 (on)
+    sides, cross = {}, {"in": 0, "out": 0}
+    la.update_crossings(sides, [tr], SHAPE, line, cross)
+    assert cross == {"in": 0, "out": 0}
+    # A subsequent frame ABOVE the line establishes a real signed side.
+    tr.add(_box(300, 170 - 60), 1.0)
+    la.update_crossings(sides, [tr], SHAPE, line, cross)
+    # Coming from "on the line" back to a side is NOT a crossing -
+    # prev was skipped so there is no signed previous state yet.
+    assert cross == {"in": 0, "out": 0}
+    # Now cross for real - established side -> the other side.
+    tr.add(_box(300, 260 - 60), 2.0)
+    la.update_crossings(sides, [tr], SHAPE, line, cross)
+    assert cross["in"] + cross["out"] == 1
+
+
 def test_bump_heat_and_grid_from_tracks():
     grid = [[0.0] * la.GRID_W for _ in range(la.GRID_H)]
     b = _box(320 - 15, 180 - 60)                     # foot at frame center
@@ -65,6 +90,28 @@ def test_bump_heat_and_grid_from_tracks():
     tr.add(_box(400, 200), 1.0)
     g2 = la.grid_from_tracks([tr], SHAPE)
     assert sum(v for row in g2 for v in row) == pytest.approx(2.0)
+
+
+def test_first_tick_heat_weight_uses_pacing_target(monkeypatch):
+    # The first _accumulate call has no prior timestamp; the old code
+    # weighted it with an arbitrary 1.0, so the boot sample carried
+    # ~25% more heat than the ~0.8s ticks that followed. Now it borrows
+    # TICK_TARGET_S, matching what a normal tick banks.
+    from app.tracker import BurstTracker
+    sess = la.LiveSession.__new__(la.LiveSession)    # bypass __init__ (needs cam/model)
+    sess.tracker = BurstTracker(SHAPE)
+    sess.heat = [[0.0] * la.GRID_W for _ in range(la.GRID_H)]
+    sess.heat_since = None
+    sess.line = la.DEFAULT_LINE
+    sess.cross = {"in": 0, "out": 0}
+    sess._line_sides = {}
+    sess._last_tick = None
+    boxes = [_box(320 - 15, 180 - 60)]               # foot at frame center
+    sess._accumulate(SHAPE, boxes, now=100.0)
+    total = sum(v for row in sess.heat for v in row)
+    assert total == pytest.approx(la.TICK_TARGET_S)
+    assert sess.heat_since == 100.0
+    assert sess._last_tick == 100.0
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +140,26 @@ def test_resolve_cam_local_slots(tmp_path):
     assert hls["url"] == "https://content.tvkur.com/l/abc123/master.m3u8"
     with pytest.raises(ValueError):
         la.resolve_cam("local_9", grid_path=p)
+
+
+def test_resolve_cam_local_skyline_slot(tmp_path):
+    # A skyline camera picked via the notebook picker only carries a
+    # placeholder_page (no HLS, no embed) - the picker doesn't know how to
+    # resolve its rotating token. Before the fix the slot fell through to
+    # ValueError("no analyzable stream") and the "analyze" button on that
+    # tile returned 404; now the slot resolves to kind="skyline" so
+    # detect_core.resolve_stream can chase the token live.
+    p = tmp_path / "local_grid.json"
+    p.write_text(json.dumps({"slots": [
+        {"slot_id": "local_sky",
+         "placeholder_name": "Gazi Street, Giresun",
+         "placeholder_page": ("https://www.skylinewebcams.com/en/webcam/"
+                              "turkey/giresun/giresun/gazi-street.html")},
+    ]}), encoding="utf-8")
+    sk = la.resolve_cam("local_sky", grid_path=p)
+    assert sk["kind"] == "skyline"
+    assert sk["page"] == sk["url"]
+    assert "skylinewebcams.com" in sk["url"]
 
 
 # ---------------------------------------------------------------------------
@@ -221,11 +288,41 @@ def test_manager_caps_sessions_and_reaps(stub_manager):
         stub_manager.start(c, "paths", model=None)
     with pytest.raises(la.BusyError):
         stub_manager.start("konya_hukumet", "paths", model=None)
-    # One session dies -> its slot frees on the next start.
+    # One session dies -> its slot frees on the next start. The reaped
+    # session's crash reason is served ONCE on the next frame poll (as
+    # {"error": "..."}) so the client can render "why did it stop"; the
+    # follow-up poll returns None because the reason has been drained.
     stub_manager._sessions["taksim_yeni"]._alive = False
     ok = stub_manager.start("konya_hukumet", "paths", model=None)
     assert ok["active"] == 4
+    ended = stub_manager.frame("taksim_yeni")
+    assert ended == {"error": "session ended unexpectedly"}
     assert stub_manager.frame("taksim_yeni") is None
+
+
+def test_manager_surfaces_run_error_to_next_poll(stub_manager):
+    # A session that died with a specific reason should hand that reason
+    # to the very next frame poll instead of being silently reaped as 404.
+    stub_manager.start("taksim_yeni", "paths", model=None)
+    s = stub_manager._sessions["taksim_yeni"]
+    s.err = "RuntimeError: pose model failed to load"
+    s._alive = False
+    fr = stub_manager.frame("taksim_yeni")
+    assert fr == {"error": "RuntimeError: pose model failed to load"}
+    assert stub_manager.frame("taksim_yeni") is None
+
+
+def test_manager_stop_clears_pending_error(stub_manager):
+    # An operator-initiated stop is not a crash; any pending error from a
+    # previous incarnation must not resurface on the next start.
+    stub_manager.start("taksim_yeni", "paths", model=None)
+    s = stub_manager._sessions["taksim_yeni"]
+    s.err = "boom"; s._alive = False
+    stub_manager.frame("taksim_yeni")               # drains once
+    stub_manager.start("taksim_yeni", "paths", model=None)   # fresh restart
+    fr = stub_manager.frame("taksim_yeni")
+    assert fr.get("error") is None
+    assert fr["layer"] == "paths"
 
 
 def test_manager_stop(stub_manager):

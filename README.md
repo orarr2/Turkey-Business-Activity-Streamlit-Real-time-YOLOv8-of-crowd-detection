@@ -826,7 +826,7 @@ python -m app.detect_core --resolve konya_hukumet,otogar_kavsagi
 | Path | Purpose |
 |------|---------|
 | [`serve.py`](src/serve.py) | One-shot launcher for the dashboard (no-cache static server). |
-| [`turkey_business_activity.ipynb`](src/turkey_business_activity.ipynb) | Offline analytics notebook. |
+| [`turkey_business_activity.ipynb`](turkey_business_activity.ipynb) | Offline analytics notebook (lives at the repo root, not under `src/`). |
 | [`app/collector.py`](src/app/collector.py) | 24/7 sampler that writes to Firestore. |
 | [`app/detect_core.py`](src/app/detect_core.py) | YOLO loading, stream resolution, detection, ROI filter, burst tracking + line crossings. |
 | [`app/reid.py`](src/app/reid.py) | Appearance-based re-identification registry (SQLite). |

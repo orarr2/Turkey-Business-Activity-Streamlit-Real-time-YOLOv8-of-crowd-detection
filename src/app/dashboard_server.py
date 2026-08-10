@@ -726,8 +726,10 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
         Latest analyzed JPEG of the session (200 image/jpeg with X-Seq /
         X-Layer / X-Note headers), 202 JSON while the first frame is
-        still being produced, 404 when no session runs for this camera.
-        Polling this keeps the session's idle clock alive.
+        still being produced, 410 JSON when the session died with a
+        reported reason (so the operator sees WHY, not a bare 404), and
+        404 when no session ever ran for this camera. Polling this keeps
+        the session's idle clock alive.
         """
         from urllib.parse import parse_qs, urlparse
         q = parse_qs(urlparse(self.path).query)
@@ -737,6 +739,11 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if fr is None:
             self._send_json(404, {"error": "no live analysis for this "
                                            "camera"})
+            return
+        if fr.get("error"):
+            # Session crashed / ended - report the reason once so the UI
+            # can distinguish a fatal analysis error from "never started".
+            self._send_json(410, {"error": fr["error"], "ended": True})
             return
         if not fr["jpeg"]:
             self._send_json(202, {"ok": True, "pending": True,

@@ -138,6 +138,12 @@ def _cam_from_slot(slot: dict) -> dict:
     if "webcamera24.com" in page:
         return {"id": cam_id, "name": name, "kind": "webcamera24",
                 "url": page, "page": page}
+    # skylinewebcams pages resolve through detect_core.resolve_skyline; the
+    # picker writes them as a plain page link (no HLS/embed hint), so match
+    # on the host and hand back a kind="skyline" dict.
+    if "skylinewebcams.com" in page:
+        return {"id": cam_id, "name": name, "kind": "skyline",
+                "url": page, "page": page}
     raise ValueError(f"camera {cam_id!r} has no analyzable stream")
 
 
@@ -172,8 +178,11 @@ def grid_from_tracks(tracks, frame_shape) -> list:
 def update_crossings(side_state: dict, tracks, frame_shape, line: list,
                      cross: dict) -> None:
     """Advance the session in/out counters from each visible track's
-    NEWEST foot point. `side_state` remembers the last signed side per
-    track id; a sign flip is one crossing. Same convention as
+    NEWEST foot point. `side_state` remembers the last STRICTLY-signed
+    side per track id (side == 0 means "on the line" and is stored as
+    None - the next tick with a real sign starts the comparison from
+    there). A crossing = a strict sign flip between two consecutive
+    signed observations. Same convention as
     detect_core.count_line_crossings: negative -> positive side of the
     A->B line = "in"."""
     from app.detect_core import _line_side
@@ -188,12 +197,17 @@ def update_crossings(side_state: dict, tracks, frame_shape, line: list,
         fy = b["y2"]
         side = _line_side(fx / W, fy / H, line)
         prev = side_state.get(tr.tid)
-        side_state[tr.tid] = side
-        if prev is None:
+        # Landing exactly on the line is ambiguous: don't classify it as
+        # either side, and don't reset the last known side either - a
+        # track that jitters neg -> 0 -> neg should count zero crossings.
+        if side == 0:
             continue
-        if prev < 0 <= side:
+        side_state[tr.tid] = side
+        if prev is None or prev == 0:
+            continue
+        if prev < 0 and side > 0:
             cross["in"] = cross.get("in", 0) + 1
-        elif prev >= 0 > side:
+        elif prev > 0 and side < 0:
             cross["out"] = cross.get("out", 0) + 1
 
 
@@ -572,8 +586,15 @@ class LiveSession(threading.Thread):
         return _faces.detect_faces(frame) if self._faces_ok else []
 
     def _accumulate(self, frame_shape, boxes, now: float) -> None:
-        w = 1.0
-        if self._last_tick is not None:
+        # First tick has no prior timestamp to measure against, so it
+        # borrows the pacing target instead of the old arbitrary 1.0 - the
+        # boot sample now weighs about as much as a normal tick (TICK_TARGET_S
+        # is the pacing floor the run loop already sleeps to). Later ticks
+        # use the real elapsed time, clamped so a long stall doesn't inflate
+        # one bin.
+        if self._last_tick is None:
+            w = TICK_TARGET_S
+        else:
             w = min(5.0, max(0.2, now - self._last_tick))
         self._last_tick = now
         if self.heat_since is None:
@@ -669,6 +690,11 @@ class LiveAnalysisManager:
     def __init__(self):
         self._lock = threading.Lock()
         self._sessions: dict[str, LiveSession] = {}
+        # Last crash reason per cam_id, kept until the NEXT frame() poll so
+        # the client can render "analysis stopped: <reason>" instead of the
+        # bare 404 the old reap loop returned. Bounded to MAX_SESSIONS
+        # entries by _remember_error_locked (one per possible camera slot).
+        self._errors: dict[str, str] = {}
 
     def start(self, cam_id: str, layer: str, model) -> dict:
         """Start a session for `cam_id`, or switch the layer of a running
@@ -678,6 +704,9 @@ class LiveAnalysisManager:
         cam = resolve_cam(cam_id)     # raises ValueError on unknown ids
         with self._lock:
             self._reap_locked()
+            # A fresh start clears any stale error remembered from the
+            # previous session on this camera.
+            self._errors.pop(cam_id, None)
             s = self._sessions.get(cam_id)
             if s is not None and s.is_alive():
                 switched = s.layer != layer
@@ -698,14 +727,19 @@ class LiveAnalysisManager:
 
     def frame(self, cam_id: str) -> dict | None:
         """Latest JPEG + metadata, or None when no session runs. Every
-        call refreshes the idle clock."""
+        call refreshes the idle clock. A session that crashed is popped
+        AND its error is returned once via {"error": "..."} so the client
+        sees WHY analysis stopped instead of a bare 404."""
         with self._lock:
             s = self._sessions.get(cam_id)
             if s is None:
-                return None
+                err = self._errors.pop(cam_id, None)
+                return {"error": err} if err else None
             if not s.is_alive():
                 self._sessions.pop(cam_id, None)
-                return None
+                self._remember_error_locked(cam_id, s.err
+                                            or "session ended unexpectedly")
+                return {"error": self._errors.pop(cam_id, None)}
         s.last_poll = time.time()
         with s.lock:
             return {"jpeg": s.latest, "seq": s.seq, "layer": s.layer,
@@ -714,6 +748,9 @@ class LiveAnalysisManager:
     def stop(self, cam_id: str) -> bool:
         with self._lock:
             s = self._sessions.pop(cam_id, None)
+            # An operator-initiated stop is not a crash; drop any pending
+            # error so the next start on this camera is a clean slate.
+            self._errors.pop(cam_id, None)
         if s is None:
             return False
         s.stop_event.set()
@@ -723,13 +760,27 @@ class LiveAnalysisManager:
         with self._lock:
             sessions = list(self._sessions.values())
             self._sessions.clear()
+            self._errors.clear()
         for s in sessions:
             s.stop_event.set()
 
     def _reap_locked(self) -> None:
         for cam_id in [c for c, s in self._sessions.items()
                        if not s.is_alive()]:
-            self._sessions.pop(cam_id, None)
+            s = self._sessions.pop(cam_id, None)
+            if s is not None:
+                self._remember_error_locked(
+                    cam_id, getattr(s, "err", None) or "session ended unexpectedly")
+
+    def _remember_error_locked(self, cam_id: str, err: str) -> None:
+        """Cap the error dict at MAX_SESSIONS entries (one per possible
+        camera slot) so a runaway crash loop can never grow it unbounded."""
+        self._errors[cam_id] = err
+        if len(self._errors) > MAX_SESSIONS:
+            # FIFO eviction: pop the oldest remembered error.
+            oldest = next(iter(self._errors))
+            if oldest != cam_id:
+                self._errors.pop(oldest, None)
 
 
 MANAGER = LiveAnalysisManager()

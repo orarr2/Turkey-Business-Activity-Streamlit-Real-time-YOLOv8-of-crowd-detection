@@ -997,10 +997,15 @@ def _line_side(px: float, py: float, line: list) -> float:
 
 def count_line_crossings(tracks: list[list[dict]], frame_shape,
                          line: list) -> dict:
-    """Count tracks whose FOOT POINT crossed the normalized line during the
+    """Count crossings of the normalized line by the FOOT POINT during the
     burst. Returns {"in": n, "out": n, "person_in": ..., "vehicles_in": ...}.
     "in" is a crossing from the negative to the positive side of A->B (pick
     the line's point order so that "in" means into your area of interest).
+    Every strict sign flip is a separate event: a track that walked in and
+    then back out registers both. A foot point that lands exactly on the
+    line (side == 0) is ambiguous and is neither counted nor allowed to
+    reset the previous side - the same convention live_analysis.update_crossings
+    uses so the two counters stay comparable.
     """
     H, W = frame_shape[:2]
     res = {"in": 0, "out": 0,
@@ -1009,21 +1014,21 @@ def count_line_crossings(tracks: list[list[dict]], frame_shape,
     for t in tracks:
         if len(t) < 2:
             continue
-        sides = []
+        metric = "person" if t[0].get("cls") == "person" else "vehicles"
+        prev = None
         for b in t:
             fx, fy = _foot_point(b)
-            sides.append(_line_side(fx / W, fy / H, line))
-        crossed = None
-        for s0, s1 in zip(sides, sides[1:]):
-            if s0 < 0 <= s1:
-                crossed = "in"
-            elif s0 >= 0 > s1:
-                crossed = "out"
-        if crossed is None:
-            continue
-        res[crossed] += 1
-        metric = "person" if t[0].get("cls") == "person" else "vehicles"
-        res[f"{metric}_{crossed}"] += 1
+            side = _line_side(fx / W, fy / H, line)
+            if side == 0:
+                continue
+            if prev is not None:
+                if prev < 0 and side > 0:
+                    res["in"] += 1
+                    res[f"{metric}_in"] += 1
+                elif prev > 0 and side < 0:
+                    res["out"] += 1
+                    res[f"{metric}_out"] += 1
+            prev = side
     return res
 
 
