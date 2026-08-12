@@ -454,34 +454,46 @@ analysisPanel.querySelector("[data-an-run]").addEventListener("click",
 
 const _layerLabel = Object.fromEntries(ANALYSIS_LAYER_DEFS);
 
+// CANVAS OVERLAY approach (2026-08-12): live analysis no longer replaces
+// the tile's video with a 1-fps JPEG stream. Instead we KEEP the video
+// playing at native fps and paint the tick's annotations (boxes /
+// skeleton / heatmap / faces / paths / line) on a canvas layered above
+// it. Metadata rides the X-Analysis-Meta response header of the same
+// /api/analysis/frame endpoint (base64 JSON, produced per-tick by
+// live_analysis.Session._build_meta). Operator sees smooth 30 fps video
+// PLUS refreshing analysis overlays - no more 'video is frozen' feel.
 function beginTileAnalysis(st, cam, layer) {
   if (st.analysis) {
-    // Same tile, new layer: the session already switched server-side
-    // (stream + accumulators kept) - just relabel; the poller runs on.
+    // Same tile, new layer: server switched in-place (stream + accumulators
+    // survive); just relabel the tag, the poller runs on.
     st.analysis.layer = layer;
-    const tag = st.videoWrap.querySelector(".analysis-live-tag");
-    if (tag) tag.textContent = `LIVE ANALYSIS · ${_layerLabel[layer] || layer}`;
+    if (st.analysis.tag)
+      st.analysis.tag.firstChild.textContent =
+        `🔬 ${_layerLabel[layer] || layer}`;
     return;
   }
-  stopTileVideo(st);
-  st._overlayWasHidden = st.overlay.style.display === "none";
-  st.overlay.style.display = "none";
-  const wrap = document.createElement("div");
-  wrap.className = "analysis-wrap";
-  wrap.innerHTML = `
-    <img alt="live analysis" draggable="false" style="display:none">
-    <div class="analysis-status">starting live analysis...</div>
-    <span class="analysis-live-tag">LIVE ANALYSIS ·
-      ${escapeHtml(_layerLabel[layer] || layer)}</span>
-    <button class="analysis-stop">■ Stop - back to video</button>`;
-  st.videoWrap.insertBefore(wrap, st.overlay);
-  wrap.querySelector(".analysis-stop").addEventListener("click",
-    () => stopTileAnalysis(st));
+  // Video stays. Add canvas overlay + a stop tag, both positioned
+  // absolutely inside videoWrap so the tile geometry never shifts.
+  const canvas = document.createElement("canvas");
+  canvas.className = "analysis-overlay on";
+  canvas.width = 640; canvas.height = 360;   // resized to img_w/img_h on 1st meta
+  st.videoWrap.appendChild(canvas);
+
+  const tag = document.createElement("span");
+  tag.className = "analysis-live-tag on";
+  tag.title = "click to stop live analysis and clear the overlay";
+  const lbl = document.createElement("span");
+  lbl.textContent = `🔬 ${_layerLabel[layer] || layer}`;
+  const x = document.createElement("span");
+  x.textContent = " ✕";
+  x.style.marginLeft = "6px";
+  tag.appendChild(lbl); tag.appendChild(x);
+  st.videoWrap.appendChild(tag);
+  tag.addEventListener("click", () => stopTileAnalysis(st));
+
   st.analysis = {
-    cam, layer,
-    img: wrap.querySelector("img"),
-    status: wrap.querySelector(".analysis-status"),
-    lastUrl: null, failures: 0, lastRestart: 0, inflight: false,
+    cam, layer, canvas, ctx: canvas.getContext("2d"), tag,
+    failures: 0, lastRestart: 0, inflight: false,
     timer: setInterval(() => pollAnalysisFrame(st), ANALYSIS_POLL_MS),
   };
   pollAnalysisFrame(st);
@@ -495,28 +507,31 @@ async function pollAnalysisFrame(st) {
     const r = await fetch(
       `/api/analysis/frame?cam=${encodeURIComponent(a.cam)}&_=${Date.now()}`,
       { cache: "no-store" });
-    if (r.status === 200
-        && (r.headers.get("Content-Type") || "").includes("image")) {
-      const blob = await r.blob();
-      const url = URL.createObjectURL(blob);
-      a.img.src = url;
-      a.img.style.display = "";
-      if (a.lastUrl) URL.revokeObjectURL(a.lastUrl);
-      a.lastUrl = url;
-      a.status.style.display = "none";
-      a.failures = 0;
+    if (r.status === 200) {
+      const metaB64 = r.headers.get("X-Analysis-Meta");
+      if (metaB64) {
+        try {
+          // atob->UTF-8 dance for non-ASCII (class names etc.).
+          const bin = atob(metaB64);
+          const bytes = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          const meta = JSON.parse(new TextDecoder("utf-8").decode(bytes));
+          drawAnalysisOverlay(a, meta);
+          if (a.tag && a.tag.firstChild)
+            a.tag.firstChild.textContent =
+              `🔬 ${_layerLabel[meta.layer] || meta.layer}`;
+          a.failures = 0;
+        } catch (e) { console.warn("meta parse failed:", e); }
+      }
     } else if (r.status === 202) {
-      const j = await r.json();
-      a.status.style.display = "";
-      a.status.textContent = j.note || "starting...";
-    } else if (r.status === 404) {
-      // Session ended server-side (idle stop / server restart): restart
-      // it, at most once per 5s so a dead backend isn't hammered.
+      if (a.tag && a.tag.firstChild)
+        a.tag.firstChild.textContent = "🔬 starting...";
+    } else if (r.status === 404 || r.status === 410) {
       a.failures += 1;
       if (Date.now() - a.lastRestart > 5000) {
         a.lastRestart = Date.now();
-        a.status.style.display = "";
-        a.status.textContent = "analysis session ended - restarting...";
+        if (a.tag && a.tag.firstChild)
+          a.tag.firstChild.textContent = "🔬 reconnecting...";
         fetch(`/api/analysis/start?cam=${encodeURIComponent(a.cam)}`
               + `&layer=${encodeURIComponent(a.layer)}`,
               { method: "POST" }).catch(() => {});
@@ -529,31 +544,174 @@ async function pollAnalysisFrame(st) {
   } finally {
     a.inflight = false;
   }
-  if (a.failures > 8) {
-    a.status.style.display = "";
-    a.status.textContent =
-      "analysis unreachable - press Stop to return to video";
-  }
+  if (a.failures > 8 && a.tag && a.tag.firstChild)
+    a.tag.firstChild.textContent = "🔬 unreachable";
 }
 
 function stopTileAnalysis(st) {
   const a = st.analysis;
   if (!a) return;
   clearInterval(a.timer);
-  if (a.lastUrl) URL.revokeObjectURL(a.lastUrl);
   st.analysis = null;
   fetch(`/api/analysis/stop?cam=${encodeURIComponent(a.cam)}`,
         { method: "POST" }).catch(() => {});
-  const wrap = st.videoWrap.querySelector(".analysis-wrap");
-  if (wrap) wrap.remove();
-  // Tear down the Line-layer history strip if one was showing on this tile.
+  if (a.canvas) a.canvas.remove();
+  if (a.tag) a.tag.remove();
+  // Video was never replaced, nothing to rebuild. Tear down the
+  // Line-layer history strip if one was showing on this tile.
   const strip = st.tile && st.tile.querySelector(".crossings-strip");
   if (strip) strip.remove();
-  if (!st._overlayWasHidden) st.overlay.style.display = "";
-  // Rebuild the live video from the remembered inputs (kept current by
-  // applyGridConfig even while the tile was analyzing).
-  if (st.lastVideoBuild)
-    buildVideoInto(st, st.lastVideoBuild.cfg, st.lastVideoBuild.slot);
+}
+
+// ---- Canvas overlay painters ---------------------------------------------
+// All coordinates in meta are ORIGINAL frame pixel space (meta.img_w x
+// meta.img_h). Canvas backing store is sized to that; CSS scales it to
+// fit the displayed video via `.analysis-overlay { inset: 0 }`, so
+// coordinates line up 1:1 with the underlying video regardless of the
+// tile's actual pixel size.
+function drawAnalysisOverlay(a, meta) {
+  const canvas = a.canvas, ctx = a.ctx;
+  if (canvas.width !== meta.img_w || canvas.height !== meta.img_h) {
+    canvas.width = meta.img_w || 640;
+    canvas.height = meta.img_h || 360;
+  }
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const layer = meta.layer;
+  if (layer === "heat")      drawHeatOverlay(ctx, meta);
+  if (layer !== "heat")      drawBoxesOverlay(ctx, meta.boxes || []);
+  if (layer === "pose")      drawSkeletonOverlay(ctx, meta.skeleton || []);
+  if (layer === "faces")     drawFacesOverlay(ctx, meta.faces || [], meta);
+  if (layer === "line")      drawLineOverlay(ctx, meta);
+  if (layer === "paths" || layer === "gestures" || layer === "body")
+    drawTracksOverlay(ctx, meta.tracks || []);
+}
+
+function drawBoxesOverlay(ctx, boxes) {
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = "rgba(79,140,255,0.75)";
+  ctx.font = "12px sans-serif";
+  ctx.fillStyle = "rgba(79,140,255,0.95)";
+  for (const b of boxes) {
+    ctx.strokeRect(b.x1, b.y1, b.x2 - b.x1, b.y2 - b.y1);
+    if (b.cls) {
+      const label = `${b.cls} ${Math.round((b.conf || 0) * 100)}%`;
+      const w = ctx.measureText(label).width + 6;
+      ctx.fillStyle = "rgba(15,23,42,0.85)";
+      ctx.fillRect(b.x1, b.y1 - 14, w, 14);
+      ctx.fillStyle = "rgba(255,255,255,0.95)";
+      ctx.fillText(label, b.x1 + 3, b.y1 - 3);
+    }
+  }
+}
+
+function drawHeatOverlay(ctx, meta) {
+  const grid = meta.heat, gw = meta.heat_w, gh = meta.heat_h;
+  if (!grid || !gw || !gh) return;
+  const cw = ctx.canvas.width / gw, ch = ctx.canvas.height / gh;
+  let mx = 0;
+  for (const row of grid) for (const v of row) if (v > mx) mx = v;
+  if (mx <= 0) return;
+  for (let y = 0; y < gh; y++) {
+    const row = grid[y];
+    for (let x = 0; x < gw; x++) {
+      const v = row[x] / mx;
+      if (v <= 0.05) continue;
+      const a = Math.min(0.65, v * 0.75);
+      // Blue -> yellow -> red gradient
+      const r = Math.round(255 * Math.min(1, v * 1.5));
+      const g = Math.round(255 * Math.max(0, 1 - Math.abs(v - 0.5) * 2));
+      const b = Math.round(255 * Math.max(0, 1 - v * 1.5));
+      ctx.fillStyle = `rgba(${r},${g},${b},${a})`;
+      ctx.fillRect(x * cw, y * ch, cw + 1, ch + 1);
+    }
+  }
+}
+
+const _COCO_POSE_LINKS = [
+  [5,6],[5,7],[7,9],[6,8],[8,10],[5,11],[6,12],[11,12],
+  [11,13],[13,15],[12,14],[14,16],
+];
+function drawSkeletonOverlay(ctx, skeletons) {
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = "rgba(255,204,0,0.9)";
+  ctx.fillStyle = "rgba(255,204,0,0.95)";
+  for (const p of skeletons) {
+    const kps = p.kps || [];
+    for (const [a, b] of _COCO_POSE_LINKS) {
+      const ka = kps[a], kb = kps[b];
+      if (!ka || !kb || (ka[2] || 0) < 0.3 || (kb[2] || 0) < 0.3) continue;
+      ctx.beginPath();
+      ctx.moveTo(ka[0], ka[1]); ctx.lineTo(kb[0], kb[1]);
+      ctx.stroke();
+    }
+    for (const k of kps) {
+      if (k && (k[2] || 0) > 0.3) {
+        ctx.beginPath();
+        ctx.arc(k[0], k[1], 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+}
+
+function drawFacesOverlay(ctx, faces, meta) {
+  if (meta && meta.faces_available === false) {
+    ctx.fillStyle = "rgba(15,23,42,0.85)";
+    ctx.fillRect(6, 6, 280, 22);
+    ctx.fillStyle = "#f0a35e"; ctx.font = "12px sans-serif";
+    ctx.fillText("faces: FACE_MODEL not configured", 12, 21);
+    return;
+  }
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = "rgba(236,72,153,0.9)";
+  ctx.fillStyle = "rgba(236,72,153,0.95)";
+  ctx.font = "11px sans-serif";
+  for (const f of faces) {
+    const [x1, y1, x2, y2] = f.box;
+    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+    if (f.conf) ctx.fillText(`face ${Math.round(f.conf * 100)}%`, x1 + 2, y1 - 3);
+  }
+}
+
+function drawLineOverlay(ctx, meta) {
+  const W = ctx.canvas.width, H = ctx.canvas.height;
+  const line = meta.line;
+  if (line && line.length === 2 && line[0].length === 2) {
+    const [[x1, y1], [x2, y2]] = line;
+    ctx.strokeStyle = "rgba(0,255,136,0.9)";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(x1 * W, y1 * H); ctx.lineTo(x2 * W, y2 * H);
+    ctx.stroke();
+  }
+  ctx.fillStyle = "rgba(15,23,42,0.85)";
+  ctx.fillRect(6, 6, 240, 26);
+  ctx.fillStyle = "#e2e8f0"; ctx.font = "14px sans-serif";
+  ctx.fillText(`IN ${meta.cross_in || 0} · OUT ${meta.cross_out || 0}`, 12, 25);
+}
+
+function drawTracksOverlay(ctx, tracks) {
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = "rgba(56,189,248,0.85)";
+  ctx.fillStyle = "rgba(56,189,248,0.95)";
+  ctx.font = "11px sans-serif";
+  for (const t of tracks) {
+    const p = t.path || [];
+    if (p.length < 2) continue;
+    ctx.beginPath();
+    ctx.moveTo(p[0][0], p[0][1]);
+    for (let i = 1; i < p.length; i++) ctx.lineTo(p[i][0], p[i][1]);
+    ctx.stroke();
+    const last = p[p.length - 1];
+    ctx.beginPath();
+    ctx.arc(last[0], last[1], 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "rgba(15,23,42,0.85)";
+    ctx.fillRect(last[0] + 5, last[1] - 14, 30, 14);
+    ctx.fillStyle = "rgba(255,255,255,0.95)";
+    ctx.fillText(`#${t.tid}`, last[0] + 8, last[1] - 3);
+    ctx.fillStyle = "rgba(56,189,248,0.95)";
+  }
 }
 
 // Tear down whatever player the tile currently runs (hls.js / YT API /

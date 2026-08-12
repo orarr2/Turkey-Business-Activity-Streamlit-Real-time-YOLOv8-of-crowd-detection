@@ -51,6 +51,19 @@
       display: none !important;
     }
 
+    /* Canvas overlay above the tile video for live analysis (see the
+       drawAnalysisOverlay function in app.js). Twin mode does not expose
+       the 🔬 button today, but we keep the CSS symmetric so re-enabling
+       it later is a one-line template change. */
+    .analysis-overlay { position: absolute; inset: 0;
+      pointer-events: none; display: none; }
+    .analysis-overlay.on { display: block; }
+    .analysis-live-tag { position: absolute; top: 8px; right: 8px;
+      background: rgba(239,68,68,0.85); color: #fff; padding: 2px 8px;
+      border-radius: 6px; font-size: 11px; font-weight: 600;
+      pointer-events: auto; cursor: pointer; z-index: 3; display: none; }
+    .analysis-live-tag.on { display: inline-block; }
+
     /* Model quality tab: 4 headline cards + per-class table + learning curve.
        Fed by /api/model-metrics (verdicts) + /api/al-curve (training gates). */
     .quality-wrap h2 { margin: 0 0 4px; }
@@ -928,9 +941,9 @@
   <!-- firebase-config.js is gitignored per-clone; see docs/firebase_setup.md -->
   <!-- ?v=N is a cache-buster: bump it whenever any of the JS files changes,
        so the browser doesn't serve a stale ES-module from disk cache. -->
-  <script type="module" src="./firebase-config.js?v=41"></script>
-  <script type="module" src="./cameras.js?v=41"></script>
-  <script type="module" src="./app.js?v=51"></script>
+  <script type="module" src="./firebase-config.js?v=42"></script>
+  <script type="module" src="./cameras.js?v=42"></script>
+  <script type="module" src="./app.js?v=52"></script>
 
   <!-- Search UI. INLINE and NON-MODULE on purpose: it wires POST /api/search
        on this same server, has no Firebase dependency, and must keep working

@@ -1017,6 +1017,20 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Seq", str(fr["seq"]))
         self.send_header("X-Layer", fr["layer"])
+        # Canvas-overlay metadata: base64 JSON of the tick's raw detection
+        # data. Frontend decodes this to paint boxes/skeleton/heatmap over
+        # the still-playing <video>, so operator sees smooth video PLUS
+        # annotations at ~1 fps instead of a frozen JPEG replacing video.
+        # ACCESS: browsers HIDE non-standard response headers from JS by
+        # default; we expose them explicitly so fetch().headers.get() sees
+        # X-Analysis-Meta / X-Seq / X-Layer / X-Note.
+        meta_b = fr.get("meta_json") or b""
+        if meta_b:
+            import base64 as _b64
+            self.send_header("X-Analysis-Meta",
+                             _b64.b64encode(meta_b).decode("ascii"))
+        self.send_header("Access-Control-Expose-Headers",
+                         "X-Seq, X-Layer, X-Note, X-Analysis-Meta")
         note = (fr["note"] or "").encode("ascii", "replace").decode("ascii")
         if note:
             self.send_header("X-Note", note)
