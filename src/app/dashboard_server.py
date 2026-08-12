@@ -479,19 +479,20 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         cam = self._q_cam()
         if cam is None:
             return
-        from app.cameras import CAMERAS, _lines_dir
+        # Route through resolve_line so a malformed override on disk falls
+        # back to the CAMERAS catalog silently - the same rule the collector
+        # follows on the next round. Reading the JSON here without the
+        # validator would let a bad hand-edit paint a line the frontend
+        # believes in but the counter never uses.
+        from app.cameras import _lines_dir, resolve_line
         p = _lines_dir() / f"{cam}.json"
         set_at = None
-        line = None
         if p.exists():
             try:
-                d = json.loads(p.read_text())
-                line = d.get("line")
-                set_at = d.get("set_at")
+                set_at = json.loads(p.read_text()).get("set_at")
             except (OSError, ValueError):
-                line = None
-        if line is None:
-            line = CAMERAS.get(cam, {}).get("line")
+                set_at = None
+        line = resolve_line(cam)
         body = json.dumps({"cam": cam, "line": line, "set_at": set_at,
                            "user_override": p.exists()}).encode()
         self.send_response(200); self.send_header("Content-Type", "application/json")

@@ -106,8 +106,10 @@ def test_first_tick_heat_weight_uses_pacing_target(monkeypatch):
     sess.cross = {"in": 0, "out": 0}
     sess._line_sides = {}
     sess._last_tick = None
+    sess.cam_id = "camX"
+    frame = np.zeros((*SHAPE, 3), dtype=np.uint8)    # crossing-snap needs the array
     boxes = [_box(320 - 15, 180 - 60)]               # foot at frame center
-    sess._accumulate(SHAPE, boxes, now=100.0)
+    sess._accumulate(frame, boxes, now=100.0)
     total = sum(v for row in sess.heat for v in row)
     assert total == pytest.approx(la.TICK_TARGET_S)
     assert sess.heat_since == 100.0

@@ -2224,8 +2224,8 @@ function showCrossToast(msg) {
 // seen). Bounded per-tile memory.
 const _seenCrossings = new Map();  // cam_id -> Set of "ts|tid" keys
 setInterval(async () => {
-  if (typeof tileStates !== "object" || !tileStates) return;
-  for (const st of Object.values(tileStates)) {
+  if (typeof tileState !== "object" || !tileState) return;
+  for (const st of Object.values(tileState)) {
     if (!st || !st.analysis || st.analysis.layer !== "line") continue;
     const cam = st.analysis.cam;
     if (!cam) continue;
@@ -2244,8 +2244,11 @@ setInterval(async () => {
         if (boot) continue;
         showCrossToast(`${ev.direction === "in" ? "-> IN" : "OUT ->"}  ` +
                        `${ev.cls || "object"}  @ ${ev.ts.substr(11, 8)}`);
-        // Flash the tile red briefly.
-        const el = st.root || st.imgEl || null;
+        // Flash the tile red briefly. tileState entries expose the DOM
+        // node as `tile` (see the tile-render block near the top of this
+        // file); fall back to videoWrap so the flash still lands if the
+        // tile schema ever changes.
+        const el = st.tile || st.videoWrap || null;
         if (el && el.style) {
           const prev = el.style.boxShadow;
           el.style.boxShadow = "0 0 0 4px #dc2626 inset";
