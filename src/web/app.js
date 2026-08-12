@@ -34,6 +34,34 @@ try {
   firebaseConfig = (await import("./firebase-config.js" + _q)).firebaseConfig;
 } catch (_) { /* handled below */ }
 
+// Twin-mode: the yolov8n twin notebook opens this page as ?mode=twin. In that
+// mode we hide four panels that don't apply to the twin (Send Report From VM,
+// per-tile Live Analysis, Model view - live, Window analysis) and put the RL
+// tab's Review section above the Learning-proof section. The MAIN dashboard
+// (no query param) is untouched. See index.html for the CSS half; this JS
+// half is belt-and-suspenders (explicit hide by id/class) plus the tile-
+// template skip and the review/boost reorder.
+const TWIN_MODE = new URLSearchParams(location.search).get("mode") === "twin";
+if (TWIN_MODE) {
+  document.documentElement.setAttribute("data-mode", "twin");
+  // Belt + suspenders: explicit hide by id/class in case the CSS block above
+  // is edited or overridden later. Cheap and idempotent.
+  for (const id of ["send-report-public", "send-report-private", "deepwin-section"]) {
+    const el = document.getElementById(id);
+    if (el) el.style.display = "none";
+  }
+  for (const el of document.querySelectorAll(".model-section, .analyze-btn")) {
+    el.style.display = "none";
+  }
+  // RL tab reorder: put Review at the top, Learning-proof below. Main mode
+  // keeps the source order (boost-section first, review-section second).
+  const review = document.getElementById("review-section");
+  const boost  = document.getElementById("boost-section");
+  if (review && boost && boost.parentNode === review.parentNode) {
+    review.parentNode.insertBefore(review, boost);
+  }
+}
+
 const statusEl = document.getElementById("status");
 const tilesEl  = document.getElementById("tiles");
 
@@ -128,9 +156,9 @@ for (const slot of GRID_SLOTS) {
         <div class="city" data-cam-area>${escapeHtml(slot.display_area)}</div>
       </div>
       <div class="tile-head-right">
-        <button class="analyze-btn" data-analyze
+        ${TWIN_MODE ? "" : `<button class="analyze-btn" data-analyze
                 title="Live analysis - pick one layer for this camera"
-                style="cursor:pointer;border:1px solid #334155;background:#1e293b;color:#e2e8f0;border-radius:6px;padding:2px 8px;font-size:13px">🔬</button>
+                style="cursor:pointer;border:1px solid #334155;background:#1e293b;color:#e2e8f0;border-radius:6px;padding:2px 8px;font-size:13px">🔬</button>`}
         <span class="activity-badge act-unknown" data-activity>
           <span class="dot"></span><span data-activity-text>-/10</span>
         </span>

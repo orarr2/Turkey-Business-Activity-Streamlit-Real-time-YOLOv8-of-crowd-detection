@@ -13,6 +13,18 @@
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
   <style>
     :root { color-scheme: dark; }
+    /* Twin-mode dashboard (opened from turkey_business_activity_yolov8n.ipynb
+       Section 7 as http://localhost:8000/?mode=twin) hides four panels that
+       the twin has no counterpart for: the "Send Report From VM" header
+       buttons, the per-tile Live Analysis 🔬 button, the "Model view - live"
+       section, and the "Window analysis" section. app.js sets
+       data-mode="twin" on <html> at boot when the query param is present.
+       The MAIN dashboard (no query param) is untouched. */
+    html[data-mode="twin"] #send-report-public,
+    html[data-mode="twin"] #send-report-private,
+    html[data-mode="twin"] .model-section,
+    html[data-mode="twin"] #deepwin-section,
+    html[data-mode="twin"] .analyze-btn { display: none !important; }
     * { box-sizing: border-box; }
     body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0;
            background: #0f1115; color: #e7e9ee; }
@@ -984,7 +996,7 @@ alerting one, else the largest person in view">
        so the browser doesn't serve a stale ES-module from disk cache. -->
   <script type="module" src="./firebase-config.js?v=40"></script>
   <script type="module" src="./cameras.js?v=40"></script>
-  <script type="module" src="./app.js?v=46"></script>
+  <script type="module" src="./app.js?v=48"></script>
 
   <!-- Search UI. INLINE and NON-MODULE on purpose: it wires POST /api/search
        on this same server, has no Firebase dependency, and must keep working
