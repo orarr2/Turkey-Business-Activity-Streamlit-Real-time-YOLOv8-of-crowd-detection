@@ -479,12 +479,13 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         cam = self._q_cam()
         if cam is None:
             return
-        # Route through resolve_line so a malformed override on disk falls
-        # back to the CAMERAS catalog silently - the same rule the collector
-        # follows on the next round. Reading the JSON here without the
-        # validator would let a bad hand-edit paint a line the frontend
-        # believes in but the counter never uses.
-        from app.cameras import _lines_dir, resolve_line
+        # Route through resolve_line + resolve_line_classes so a malformed
+        # override on disk falls back to the CAMERAS catalog silently -
+        # the same rule the collector follows on the next round. Reading
+        # the JSON here without the validator would let a bad hand-edit
+        # paint a line the frontend believes in but the counter never uses.
+        from app.cameras import (LINE_ALLOWED_CLASSES, _lines_dir,
+                                 resolve_line, resolve_line_classes)
         p = _lines_dir() / f"{cam}.json"
         set_at = None
         if p.exists():
@@ -493,7 +494,11 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             except (OSError, ValueError):
                 set_at = None
         line = resolve_line(cam)
-        body = json.dumps({"cam": cam, "line": line, "set_at": set_at,
+        classes = resolve_line_classes(cam)
+        body = json.dumps({"cam": cam, "line": line,
+                           "classes": classes,
+                           "allowed_classes": sorted(LINE_ALLOWED_CLASSES),
+                           "set_at": set_at,
                            "user_override": p.exists()}).encode()
         self.send_response(200); self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body))); self.end_headers()
@@ -511,12 +516,14 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         except (ValueError, UnicodeDecodeError):
             self.send_error(400, "body must be JSON"); return
         line = data.get("line")
+        classes = data.get("classes")
         from app.cameras import save_line
         try:
-            save_line(cam, line)
+            save_line(cam, line, classes=classes)
         except ValueError as e:
             self.send_error(400, str(e)); return
-        body = json.dumps({"ok": True, "cam": cam, "line": line}).encode()
+        body = json.dumps({"ok": True, "cam": cam, "line": line,
+                           "classes": classes}).encode()
         self.send_response(200); self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body))); self.end_headers()
         self.wfile.write(body)

@@ -70,6 +70,16 @@ GRAB_FAIL_REFRESH = 3     # consecutive grab failures before re-resolving
 # typical street view. Same normalized [[x,y],[x,y]] convention as
 # cameras.py; crossing negative -> positive side of A->B counts as "in".
 DEFAULT_LINE = [[0.10, 0.62], [0.90, 0.62]]
+# Hot-reload cadence: every N seconds the session restats the line JSON
+# and picks up any change the operator saved while a session is running,
+# so redrawing the line takes effect without a stop/start round-trip.
+LINE_RELOAD_POLL_S = 5.0
+# Per-tid crossing cooldown: a foot point that jitters within a few pixels
+# of the line can produce a real neg->pos->neg burst in one second. This
+# rejects any crossing for a tid that already crossed within N seconds,
+# regardless of direction. 2 s is small enough that a person who really
+# doubled back is still counted twice, and large enough to eat the jitter.
+CROSSING_COOLDOWN_S = 2.0
 
 # Serializes EVERY model call in this process (detection + pose, live
 # sessions + the one-shot deep window): ultralytics predict is not
@@ -177,7 +187,11 @@ def grid_from_tracks(tracks, frame_shape) -> list:
 
 def update_crossings(side_state: dict, tracks, frame_shape, line: list,
                      cross: dict, on_event=None, frame=None,
-                     cam_id: str | None = None) -> None:
+                     cam_id: str | None = None,
+                     classes: list | set | None = None,
+                     last_cross_ts: dict | None = None,
+                     cooldown_s: float = CROSSING_COOLDOWN_S,
+                     now: float | None = None) -> None:
     """Advance the session in/out counters from each visible track's
     NEWEST foot point. `side_state` remembers the last STRICTLY-signed
     side per track id (side == 0 means "on the line" and is stored as
@@ -191,13 +205,29 @@ def update_crossings(side_state: dict, tracks, frame_shape, line: list,
     crossing so the caller can persist an event + snapshot to
     data/crossings/<cam>.jsonl (see log_crossing_event below). cam_id +
     frame are forwarded to the callback so it can crop the mover for the
-    event image. Absent callback -> counters only, backward-compatible."""
+    event image. Absent callback -> counters only, backward-compatible.
+
+    `classes`: iterable of class names to count (None = every class).
+    Tracks whose `cls` is not in the set are skipped BEFORE side tracking
+    so their sign changes never update `side_state` and never fire a
+    counter or event.
+
+    `last_cross_ts` + `cooldown_s`: per-tid cooldown to swallow the
+    jitter burst you get when a foot point rides right on the line. If a
+    tid already crossed within `cooldown_s` seconds, the next crossing
+    (either direction) is dropped. Pass None for `last_cross_ts` to
+    disable cooldown (the pre-cooldown behavior)."""
     from app.detect_core import _line_side
     H, W = frame_shape[:2]
     if not (H and W):
         return
+    cls_filter = set(classes) if classes else None
+    if now is None:
+        now = time.time()
     for tr in tracks:
         if getattr(tr, "misses", 0):
+            continue
+        if cls_filter is not None and getattr(tr, "cls", None) not in cls_filter:
             continue
         b = tr.boxes[-1]
         fx = (b["x1"] + b["x2"]) / 2.0
@@ -214,12 +244,26 @@ def update_crossings(side_state: dict, tracks, frame_shape, line: list,
             continue
         direction = None
         if prev < 0 and side > 0:
-            cross["in"] = cross.get("in", 0) + 1
             direction = "in"
         elif prev > 0 and side < 0:
-            cross["out"] = cross.get("out", 0) + 1
             direction = "out"
-        if direction and on_event is not None:
+        if not direction:
+            continue
+        if last_cross_ts is not None:
+            prev_ts = last_cross_ts.get(tr.tid)
+            if prev_ts is not None and (now - prev_ts) < cooldown_s:
+                # Jitter suppression: same tid crossed less than
+                # cooldown_s ago. Skip without touching the counter or
+                # firing an event, but keep the newest side in
+                # side_state so the tid can cross again once it moves
+                # off the line.
+                continue
+            last_cross_ts[tr.tid] = now
+        if direction == "in":
+            cross["in"] = cross.get("in", 0) + 1
+        else:
+            cross["out"] = cross.get("out", 0) + 1
+        if on_event is not None:
             try:
                 on_event(direction=direction, track=tr, frame=frame,
                          cam_id=cam_id)
@@ -598,10 +642,18 @@ class LiveSession(threading.Thread):
         self.heat = [[0.0] * GRID_W for _ in range(GRID_H)]
         self.heat_since: float | None = None
         # User-drawn override (data/lines/<cam>.json) wins over cameras.py.
+        # The line + its class filter are hot-reloaded on the fly (see
+        # _maybe_reload_line) so redrawing while a session runs takes
+        # effect within LINE_RELOAD_POLL_S seconds without restart.
         from app.cameras import resolve_line as _resolve_line
+        from app.cameras import resolve_line_classes as _resolve_classes
         self.line = _resolve_line(cam_id) or cam.get("line") or DEFAULT_LINE
+        self.line_classes = _resolve_classes(cam_id)
+        self._line_mtime = self._line_json_mtime()
+        self._next_line_check = time.time() + LINE_RELOAD_POLL_S
         self.cross = {"in": 0, "out": 0}
         self._line_sides: dict[int, float] = {}
+        self._last_cross_ts: dict[int, float] = {}
         self.gesture_counts: dict[str, int] = {}
         self._track_gestures: dict[int, set] = {}
         self._faces_ok: bool | None = None
@@ -691,6 +743,46 @@ class LiveSession(threading.Thread):
             self._faces_ok = _faces.available()
         return _faces.detect_faces(frame) if self._faces_ok else []
 
+    def _line_json_mtime(self) -> float | None:
+        """Current mtime of data/lines/<cam>.json, or None when the file
+        does not exist. Used by _maybe_reload_line to detect a fresh save
+        or a clear that happened while the session is running."""
+        from app.cameras import _lines_dir
+        p = _lines_dir() / f"{self.cam_id}.json"
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return None
+
+    def _maybe_reload_line(self, now: float) -> None:
+        """Hot-reload the line + class filter if the JSON has been
+        rewritten (or removed) since the last check.
+
+        Cadence is bounded by LINE_RELOAD_POLL_S so this is at most one
+        stat call every few seconds - cheap next to the inference tick.
+        When the line moves, side_state is dropped so stale side
+        observations from the OLD line can't fabricate a fake crossing
+        against the NEW line; the counter itself is preserved (session
+        totals keep accumulating across edits). The per-tid cooldown
+        map is dropped too - it's per-line by design."""
+        if now < self._next_line_check:
+            return
+        self._next_line_check = now + LINE_RELOAD_POLL_S
+        mtime = self._line_json_mtime()
+        if mtime == self._line_mtime:
+            return
+        self._line_mtime = mtime
+        from app.cameras import (resolve_line as _resolve_line,
+                                 resolve_line_classes as _resolve_classes)
+        new_line = (_resolve_line(self.cam_id)
+                    or self.cam.get("line") or DEFAULT_LINE)
+        new_classes = _resolve_classes(self.cam_id)
+        if new_line != self.line or new_classes != self.line_classes:
+            self.line = new_line
+            self.line_classes = new_classes
+            self._line_sides.clear()
+            self._last_cross_ts.clear()
+
     def _accumulate(self, frame, boxes, now: float) -> None:
         # First tick has no prior timestamp to measure against, so it
         # borrows the pacing target instead of the old arbitrary 1.0 - the
@@ -707,6 +799,7 @@ class LiveSession(threading.Thread):
         if self.heat_since is None:
             self.heat_since = now
         bump_heat(self.heat, boxes, frame_shape, w)
+        self._maybe_reload_line(now)
         # Persist an event per crossing (bounded JSONL + optional snap).
         # The dashboard's Line layer polls /api/crossings?cam=<id> for the
         # toast + history strip. Frame is passed so the crop of the mover
@@ -716,7 +809,9 @@ class LiveSession(threading.Thread):
         update_crossings(self._line_sides, self.tracker.open, frame_shape,
                          self.line, self.cross,
                          on_event=_on_cross, frame=frame,
-                         cam_id=self.cam_id)
+                         cam_id=self.cam_id,
+                         classes=self.line_classes,
+                         last_cross_ts=self._last_cross_ts, now=now)
 
     def _trim(self) -> None:
         for tr in self.tracker.open:

@@ -502,6 +502,9 @@ function stopTileAnalysis(st) {
         { method: "POST" }).catch(() => {});
   const wrap = st.videoWrap.querySelector(".analysis-wrap");
   if (wrap) wrap.remove();
+  // Tear down the Line-layer history strip if one was showing on this tile.
+  const strip = st.tile && st.tile.querySelector(".crossings-strip");
+  if (strip) strip.remove();
   if (!st._overlayWasHidden) st.overlay.style.display = "";
   // Rebuild the live video from the remembered inputs (kept current by
   // applyGridConfig even while the tile was analyzing).
@@ -2078,7 +2081,8 @@ lineEditor.innerHTML = `
       <span data-le-cam></span></h3>
     <div style="color:#94a3b8;font-size:13px;margin-bottom:10px">
       Drag on the snapshot to place a counting line. Save persists it
-      per-camera; the collector picks it up on the next round.</div>
+      per-camera; a running Line-layer session picks it up within a few
+      seconds without a restart.</div>
     <div style="position:relative;background:#020617;border:1px solid #334155;
                 border-radius:8px;overflow:hidden">
       <img data-le-img style="display:block;width:100%;height:auto;
@@ -2086,6 +2090,11 @@ lineEditor.innerHTML = `
       <canvas data-le-canvas style="position:absolute;inset:0;width:100%;
                                      height:100%;cursor:crosshair"></canvas>
     </div>
+    <div data-le-classes style="display:flex;flex-wrap:wrap;gap:10px 16px;
+                                 margin-top:10px;font-size:13px;
+                                 color:#cbd5e1"></div>
+    <div style="color:#94a3b8;font-size:12px;margin-top:4px">
+      Nothing checked = count every tracked class.</div>
     <div data-le-err style="color:#f87171;font-size:13px;min-height:18px;
                             margin-top:8px"></div>
     <div style="display:flex;gap:10px;margin-top:6px">
@@ -2103,8 +2112,34 @@ document.body.appendChild(lineEditor);
 const _leImg = lineEditor.querySelector("[data-le-img]");
 const _leCanvas = lineEditor.querySelector("[data-le-canvas]");
 const _leErr = lineEditor.querySelector("[data-le-err]");
+const _leClasses = lineEditor.querySelector("[data-le-classes]");
 let _leCam = null;
 let _lePts = [];   // [[x_norm, y_norm], [x_norm, y_norm]]
+
+function _leRenderClasses(allowed, picked) {
+  // Checkbox row for the class filter. `allowed` comes from the server
+  // (mirrors cameras.LINE_ALLOWED_CLASSES); `picked` is the current
+  // override or null / [] for "count everything".
+  _leClasses.innerHTML = "";
+  const set = new Set(picked || []);
+  for (const name of (allowed || [])) {
+    const id = "le-cls-" + name;
+    const lab = document.createElement("label");
+    lab.style.cssText = "display:inline-flex;align-items:center;gap:5px;" +
+                        "cursor:pointer";
+    lab.innerHTML = `<input type="checkbox" data-le-cls value="${name}" ` +
+      `id="${id}"${set.has(name) ? " checked" : ""}> ${name}`;
+    _leClasses.appendChild(lab);
+  }
+}
+
+function _leCollectClasses() {
+  // Return the picked filter or null when the user checked nothing
+  // (server treats null as "count every class").
+  const boxes = _leClasses.querySelectorAll("[data-le-cls]:checked");
+  if (!boxes.length) return null;
+  return Array.from(boxes, (b) => b.value);
+}
 
 function _leDraw() {
   const c = _leCanvas;
@@ -2150,16 +2185,17 @@ lineEditor.querySelector("[data-le-cancel]").addEventListener("click",
 lineEditor.querySelector("[data-le-save]").addEventListener("click", async () => {
   _leErr.textContent = "";
   if (_lePts.length !== 2) { _leErr.textContent = "Draw a line first (drag on the image)"; return; }
+  const classes = _leCollectClasses();
   try {
     const r = await fetch(`/api/lines?cam=${encodeURIComponent(_leCam)}`, {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({line: _lePts}),
+      body: JSON.stringify({line: _lePts, classes}),
     });
     if (!r.ok) throw new Error(await r.text());
     _leErr.style.color = "#4ade80";
-    _leErr.textContent = "Saved - next round picks it up";
-    setTimeout(() => { _leErr.style.color = "#f87171"; _leErr.textContent = ""; }, 2000);
+    _leErr.textContent = "Saved - a running session picks it up in a few seconds";
+    setTimeout(() => { _leErr.style.color = "#f87171"; _leErr.textContent = ""; }, 2500);
   } catch (e) {
     _leErr.style.color = "#f87171";
     _leErr.textContent = "Save failed: " + e.message;
@@ -2173,6 +2209,7 @@ lineEditor.querySelector("[data-le-clear]").addEventListener("click", async () =
                           {method: "POST"});
     if (!r.ok) throw new Error(await r.text());
     _lePts = [];
+    _leRenderClasses(_leLastAllowed, []);   // reset checkboxes too
     _leDraw();
     _leErr.style.color = "#4ade80";
     _leErr.textContent = "Override cleared - falling back to cameras.py";
@@ -2183,15 +2220,23 @@ lineEditor.querySelector("[data-le-clear]").addEventListener("click", async () =
   }
 });
 
+// Cache the allowed-classes list from the last /api/lines call so
+// Clear can re-render an empty checkbox row without a second fetch.
+let _leLastAllowed = ["person", "bicycle", "car", "motorcycle", "bus", "truck"];
+
 async function openLineEditor(cam, snapshotUrl) {
   _leCam = cam;
   _lePts = [];
   lineEditor.querySelector("[data-le-cam]").textContent = cam;
   _leImg.src = snapshotUrl || `/api/analysis/frame?cam=${encodeURIComponent(cam)}&_=${Date.now()}`;
+  _leRenderClasses(_leLastAllowed, []);    // placeholder until fetch lands
   _leImg.onload = () => {
-    // Load existing line, if any.
+    // Load existing line + class filter + allowed vocabulary.
     fetch(`/api/lines?cam=${encodeURIComponent(cam)}`).then(r => r.json()).then(d => {
       if (d && d.line) _lePts = d.line;
+      if (d && Array.isArray(d.allowed_classes) && d.allowed_classes.length)
+        _leLastAllowed = d.allowed_classes;
+      _leRenderClasses(_leLastAllowed, (d && d.classes) || []);
       _leDraw();
     }).catch(() => _leDraw());
   };
@@ -2220,22 +2265,108 @@ function showCrossToast(msg) {
 }
 
 // Poll /api/crossings?cam=<id> for every tile whose analysis layer is
-// "line". Fire toast + red flash on any new event (tid+ts pair we've not
-// seen). Bounded per-tile memory.
-const _seenCrossings = new Map();  // cam_id -> Set of "ts|tid" keys
+// "line". Three jobs per tick per tile: (1) fire a toast + red flash on
+// every unseen event, (2) render the last N snapshot thumbs under the
+// tile, (3) drop that strip the moment the layer changes off "line".
+const _seenCrossings = new Map();  // cam_id -> Set of "ts|tid|dir" keys
+const CROSSINGS_STRIP_MAX = 8;
+const CROSSINGS_POLL_LIMIT = CROSSINGS_STRIP_MAX + 4;
+
+function _ensureCrossingsStrip(st) {
+  if (!st || !st.tile) return null;
+  let strip = st.tile.querySelector(".crossings-strip");
+  if (strip) return strip;
+  strip = document.createElement("div");
+  strip.className = "crossings-strip";
+  strip.style.cssText =
+    "display:flex;gap:6px;overflow-x:auto;padding:6px 8px;background:#0b1220;" +
+    "border-top:1px solid #1f2937";
+  strip.dataset.empty = "1";
+  strip.textContent = "waiting for the first crossing...";
+  strip.style.color = "#64748b";
+  strip.style.fontSize = "12px";
+  st.tile.appendChild(strip);
+  return strip;
+}
+
+function _renderCrossingsStrip(strip, events) {
+  // events are newest-first from the API; render the newest ones on the
+  // LEFT so a new arrival visibly slides in from that side. Only rebuild
+  // when the top event changes to avoid thrashing the DOM every tick.
+  if (!strip) return;
+  const top = events[0];
+  const topKey = top ? (top.ts + "|" + top.tid + "|" + top.direction) : "";
+  if (strip.dataset.topKey === topKey) return;
+  strip.dataset.topKey = topKey;
+  strip.style.color = "";
+  strip.style.fontSize = "";
+  strip.innerHTML = "";
+  if (!top) {
+    strip.dataset.empty = "1";
+    strip.style.color = "#64748b";
+    strip.style.fontSize = "12px";
+    strip.textContent = "waiting for the first crossing...";
+    return;
+  }
+  strip.dataset.empty = "0";
+  for (const ev of events.slice(0, CROSSINGS_STRIP_MAX)) {
+    const card = document.createElement("div");
+    card.style.cssText =
+      "flex:0 0 auto;width:88px;background:#111827;border:1px solid #1f2937;" +
+      "border-radius:6px;overflow:hidden;text-align:center";
+    const dir = (ev.direction === "in") ? "IN" : "OUT";
+    const color = (ev.direction === "in") ? "#22c55e" : "#f97316";
+    const hhmmss = (ev.ts || "").substr(11, 8);
+    if (ev.snap) {
+      const img = document.createElement("img");
+      img.src = "/" + ev.snap;
+      img.alt = dir;
+      img.style.cssText = "display:block;width:100%;height:56px;object-fit:cover";
+      card.appendChild(img);
+    } else {
+      const placeholder = document.createElement("div");
+      placeholder.style.cssText = "height:56px;background:#020617;" +
+        "display:flex;align-items:center;justify-content:center;" +
+        "color:#475569;font-size:11px";
+      placeholder.textContent = "no crop";
+      card.appendChild(placeholder);
+    }
+    const meta = document.createElement("div");
+    meta.style.cssText = "padding:3px 4px;font-size:11px;line-height:1.2;" +
+                         "color:#e2e8f0";
+    meta.innerHTML =
+      `<div style="color:${color};font-weight:600">${dir} · ${escapeHtml(ev.cls || "obj")}</div>` +
+      `<div style="color:#94a3b8">${escapeHtml(hhmmss)}</div>`;
+    card.appendChild(meta);
+    strip.appendChild(card);
+  }
+}
+
 setInterval(async () => {
   if (typeof tileState !== "object" || !tileState) return;
   for (const st of Object.values(tileState)) {
-    if (!st || !st.analysis || st.analysis.layer !== "line") continue;
+    if (!st) continue;
+    // Strip lives only while the tile is on the Line layer. Tear it down
+    // (and the seen-set) on any other layer / no analysis.
+    const onLine = st.analysis && st.analysis.layer === "line";
+    if (!onLine) {
+      const stale = st.tile && st.tile.querySelector(".crossings-strip");
+      if (stale) stale.remove();
+      continue;
+    }
     const cam = st.analysis.cam;
     if (!cam) continue;
     let seen = _seenCrossings.get(cam);
     if (!seen) { seen = new Set(); _seenCrossings.set(cam, seen); }
+    const strip = _ensureCrossingsStrip(st);
     try {
-      const r = await fetch(`/api/crossings?cam=${encodeURIComponent(cam)}&limit=10`);
+      const r = await fetch(`/api/crossings?cam=${encodeURIComponent(cam)}` +
+                            `&limit=${CROSSINGS_POLL_LIMIT}`);
       if (!r.ok) continue;
       const data = await r.json();
-      const events = (data.events || []).slice().reverse();  // oldest first
+      const eventsNewestFirst = data.events || [];
+      _renderCrossingsStrip(strip, eventsNewestFirst);
+      const events = eventsNewestFirst.slice().reverse();  // oldest first for toast dedup
       const boot = seen.size === 0;    // first poll: don't alarm on backlog
       for (const ev of events) {
         const key = ev.ts + "|" + ev.tid + "|" + ev.direction;

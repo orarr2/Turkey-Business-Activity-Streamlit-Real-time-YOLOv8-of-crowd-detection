@@ -99,14 +99,21 @@ def test_first_tick_heat_weight_uses_pacing_target(monkeypatch):
     # TICK_TARGET_S, matching what a normal tick banks.
     from app.tracker import BurstTracker
     sess = la.LiveSession.__new__(la.LiveSession)    # bypass __init__ (needs cam/model)
+    sess.cam = {"id": "camX"}
+    sess.cam_id = "camX"
     sess.tracker = BurstTracker(SHAPE)
     sess.heat = [[0.0] * la.GRID_W for _ in range(la.GRID_H)]
     sess.heat_since = None
     sess.line = la.DEFAULT_LINE
+    sess.line_classes = None
     sess.cross = {"in": 0, "out": 0}
     sess._line_sides = {}
+    sess._last_cross_ts = {}
     sess._last_tick = None
-    sess.cam_id = "camX"
+    # Skip the hot-reload path on this fixture-only tick: pretend the
+    # next check is far in the future so _maybe_reload_line short-circuits.
+    sess._line_mtime = None
+    sess._next_line_check = 1e18
     frame = np.zeros((*SHAPE, 3), dtype=np.uint8)    # crossing-snap needs the array
     boxes = [_box(320 - 15, 180 - 60)]               # foot at frame center
     sess._accumulate(frame, boxes, now=100.0)

@@ -839,6 +839,35 @@ def _lines_dir() -> Path:
     return Path(__file__).resolve().parent.parent / "data" / "lines"
 
 
+# Classes the crossing counter is allowed to filter on. Kept narrow on
+# purpose - the picker checkboxes mirror this list, and an unknown token
+# in a hand-edited override is rejected instead of silently dropping every
+# real detection.
+LINE_ALLOWED_CLASSES = frozenset({
+    "person", "bicycle", "car", "motorcycle", "bus", "truck",
+})
+
+
+def _valid_line_shape(line) -> bool:
+    return (isinstance(line, list) and len(line) == 2
+            and all(isinstance(pt, list) and len(pt) == 2
+                    and all(isinstance(v, (int, float)) and 0.0 <= v <= 1.0
+                            for v in pt)
+                    for pt in line))
+
+
+def _valid_classes(classes) -> bool:
+    """None means "count every class"; a list means "count only these".
+    An empty list is rejected - the operator meant something, and an empty
+    filter would silently count nothing."""
+    if classes is None:
+        return True
+    if not isinstance(classes, list) or not classes:
+        return False
+    return all(isinstance(c, str) and c in LINE_ALLOWED_CLASSES
+               for c in classes)
+
+
 def resolve_line(cam_id: str) -> list | None:
     """Return the counting line to use for this camera.
 
@@ -852,33 +881,60 @@ def resolve_line(cam_id: str) -> list | None:
         try:
             data = json.loads(p.read_text())
             line = data.get("line")
-            # Validate shape: two [x, y] points, each in [0, 1].
-            if (isinstance(line, list) and len(line) == 2
-                    and all(isinstance(pt, list) and len(pt) == 2
-                            and all(isinstance(v, (int, float)) and 0.0 <= v <= 1.0 for v in pt)
-                            for pt in line)):
+            if _valid_line_shape(line):
                 return line
         except (OSError, ValueError):
             pass
     return CAMERAS.get(cam_id, {}).get("line")
 
 
-def save_line(cam_id: str, line: list) -> None:
-    """Persist a user-drawn line for this camera. Validates shape; raises
-    ValueError on garbage input so the API layer can return 400."""
-    if not (isinstance(line, list) and len(line) == 2
-            and all(isinstance(pt, list) and len(pt) == 2
-                    and all(isinstance(v, (int, float)) and 0.0 <= v <= 1.0 for v in pt)
-                    for pt in line)):
+def resolve_line_classes(cam_id: str) -> list | None:
+    """Class filter for the crossing counter, if the user set one.
+
+    None (the default) means "count every tracked class"; a validated
+    list of class names means "count only these". Malformed overrides
+    fall back to None so the counter degrades to the old permissive
+    behavior instead of going silent."""
+    p = _lines_dir() / f"{cam_id}.json"
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text())
+        classes = data.get("classes")
+        if classes is None:
+            return None
+        if _valid_classes(classes):
+            return list(classes)
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def save_line(cam_id: str, line: list, classes: list | None = None) -> None:
+    """Persist a user-drawn line for this camera. Validates shape + the
+    optional class filter; raises ValueError on garbage input so the API
+    layer can return 400.
+
+    `classes`: None keeps the current behavior (count every class); a list
+    like ["person"] restricts the counter to the named classes (must all
+    be in LINE_ALLOWED_CLASSES, and the list must be non-empty)."""
+    if not _valid_line_shape(line):
         raise ValueError(
             "line must be exactly two [x, y] points with 0 <= x,y <= 1")
+    if not _valid_classes(classes):
+        raise ValueError(
+            f"classes must be null or a non-empty list of names from "
+            f"{sorted(LINE_ALLOWED_CLASSES)}")
     d = _lines_dir()
     d.mkdir(parents=True, exist_ok=True)
-    (d / f"{cam_id}.json").write_text(json.dumps({
+    payload = {
         "line": [[float(line[0][0]), float(line[0][1])],
                  [float(line[1][0]), float(line[1][1])]],
         "set_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }))
+    }
+    if classes is not None:
+        payload["classes"] = list(classes)
+    (d / f"{cam_id}.json").write_text(json.dumps(payload))
 
 
 def clear_line(cam_id: str) -> bool:
