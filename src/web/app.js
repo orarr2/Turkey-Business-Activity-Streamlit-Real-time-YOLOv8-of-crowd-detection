@@ -64,35 +64,14 @@ try {
   localStorage.removeItem("dashboardActiveTab");
 } catch (_) { /* private mode - fine */ }
 
-if (TWIN_MODE) {
-  // Belt + suspenders: explicit hide by id/class in case the CSS block above
-  // is edited or overridden later. Cheap and idempotent.
-  for (const id of ["send-report-public", "send-report-private",
-                    "deepwin-section", "snap-capture-btn"]) {
-    const el = document.getElementById(id);
-    if (el) el.style.display = "none";
-  }
-  for (const el of document.querySelectorAll(".analyze-btn, .model-strip select")) {
-    el.style.display = "none";
-  }
-  // RL tab reorder: put Review at the top, Learning-proof below.
-  const review = document.getElementById("review-section");
-  const boost  = document.getElementById("boost-section");
-  if (review && boost && boost.parentNode === review.parentNode) {
-    review.parentNode.insertBefore(review, boost);
-  }
-}
-if (MAIN_MODE) {
-  // Belt + suspenders: hide the main-mode-forbidden bits explicitly. The
-  // Snapshots tab (data-tab="snapshots") is added by index.html; hide the
-  // RL button in the tabbar and the RL section so a stale localStorage
-  // active-tab can't force it visible.
-  for (const el of document.querySelectorAll(
-      ".model-section, #deepwin-section, .model-strip select, " +
-      "[data-tab-btn=\"rl\"], [data-tab=\"rl\"]")) {
-    el.style.display = "none";
-  }
-}
+// The mode-specific hides are gone: each mode has its own HTML file
+// (index_main.html / index_twin.html) that physically lacks the panels
+// not applicable to it. dashboard_server.py routes / and /index.html to
+// the file matching ?mode=. The JS below still uses MODE for one thing
+// the tile TEMPLATE builds dynamically (the analyze-btn appended per
+// tile inside createTile) - see the ternary in that template further
+// down. Everything else that used to be belt-and-suspenders JS hide is
+// unnecessary now: the elements simply do not exist.
 
 const statusEl = document.getElementById("status");
 const tilesEl  = document.getElementById("tiles");
@@ -625,24 +604,10 @@ if (stripEl) {
                        border-radius:4px;color:inherit;cursor:pointer;
                        font-size:11px;padding:0 5px">🔥</button>
       </div>
-      <!-- fix 3: the stored heat depth, finally selectable. Only shown in
-           heat mode on the PRIVATE dashboard (the API renders any combo
-           from the VM-published grids; the public copy keeps the single
-           published overlay). -->
-      <div class="heat-controls" data-heat-controls hidden>
-        <select data-heat-layer title="which detections feed the map">
-          <option value="person">people</option>
-          <option value="vehicles">vehicles</option>
-          <option value="other">other</option>
-        </select>
-        <select data-heat-part title="local-time daypart">
-          <option value="">all day</option>
-          <option value="night">night</option>
-          <option value="morning">morning</option>
-          <option value="afternoon">afternoon</option>
-          <option value="evening">evening</option>
-        </select>
-      </div>
+      <!-- R5 (2026-08-12): tile-footer heat-layer/daypart dropdowns
+           physically removed per operator - they were an operator-only
+           debug control that cluttered the strip. The heatmap toggle
+           button (🔥 above) still works with the default layer+part. -->
       <div class="age" data-age></div>`;
     stripEl.appendChild(cell);
     const s = {

@@ -350,6 +350,25 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         sys.stdout.write("  " + (fmt % args) + "\n")
 
     def do_GET(self) -> None:
+        # Split-mode routing: physically serve DIFFERENT HTML per mode.
+        # Two source files (index_main.html + index_twin.html) each hold
+        # ONLY the panels applicable to that mode - the client never
+        # receives bytes for panels that don't apply. Query resolves to
+        # main by default (no ?mode= == main). See the "Dual-mode
+        # dashboard" comment near the top of src/web/app.js for the
+        # element split.
+        from urllib.parse import urlparse, parse_qs
+        _base = self.path.split("?")[0]
+        if _base in ("/", "/index.html"):
+            _q = parse_qs(urlparse(self.path).query)
+            _mode = (_q.get("mode") or ["main"])[0]
+            _resolved = "/index_twin.html" if _mode == "twin" else "/index_main.html"
+            # Preserve the query string on the rewritten path so app.js
+            # can still read URLSearchParams(location.search).get("mode")
+            _qs = urlparse(self.path).query
+            self.path = _resolved + ("?" + _qs if _qs else "")
+            super().do_GET()
+            return
         if self.path.startswith("/tvkur/"):
             self._proxy_tvkur()
             return
