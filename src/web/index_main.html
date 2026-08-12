@@ -45,10 +45,29 @@
     .tabbar button:hover { color: #e7e9ee; }
     main[data-active-tab="analysis"]  > [data-tab]:not([data-tab="analysis"]),
     main[data-active-tab="search"]    > [data-tab]:not([data-tab="search"]),
+    main[data-active-tab="quality"]   > [data-tab]:not([data-tab="quality"]),
     main[data-active-tab="rl"]        > [data-tab]:not([data-tab="rl"]),
     main[data-active-tab="snapshots"] > [data-tab]:not([data-tab="snapshots"]) {
       display: none !important;
     }
+
+    /* Model quality tab: 4 headline cards + per-class table + learning curve.
+       Fed by /api/model-metrics (verdicts) + /api/al-curve (training gates). */
+    .quality-wrap h2 { margin: 0 0 4px; }
+    .qcard { background: #171a21; border: 1px solid #232733; border-radius: 10px;
+             padding: 12px 14px; display: flex; flex-direction: column; gap: 4px; }
+    .qcard .qlabel { color: #8b909a; font-size: 11px; text-transform: uppercase;
+             letter-spacing: 0.05em; }
+    .qcard .qval   { color: #e7e9ee; font-size: 28px; font-weight: 700;
+             font-family: monospace; line-height: 1.1; }
+    .qcard .qhint  { color: #6f7480; font-size: 11px; }
+    #q-per-class table { width: 100%; border-collapse: collapse; font-size: 13px;
+             margin-top: 6px; }
+    #q-per-class th, #q-per-class td { text-align: left; padding: 6px 10px;
+             border-bottom: 1px solid #232733; }
+    #q-per-class th { color: #8b909a; font-weight: 600; text-transform: uppercase;
+             font-size: 11px; letter-spacing: 0.05em; }
+    #q-per-class td.num { text-align: right; font-family: monospace; }
 
     /* Snapshots tab (main-mode only): grid of thumbnails of the 4-tile
        PNG captures the operator saved via the "📸 Snapshot grid" button.
@@ -586,6 +605,7 @@
   <nav class="tabbar" id="tabbar">
     <button data-tab-btn="analysis" class="on">Analysis</button>
     <button data-tab-btn="search">Search</button>
+    <button data-tab-btn="quality">Model quality</button>
     <button data-tab-btn="snapshots">Snapshots</button>
   </nav>
 
@@ -727,6 +747,67 @@
       <div id="events-table-wrap"></div>
     </div>
 
+    <!-- Model quality tab: F1 / Precision / Recall / mAP@50 headlines +
+         per-class table + review-batch learning curve. Fed by
+         /api/model-metrics (crop + frame verdicts) and /api/al-curve
+         (training gate history for mAP). Same section in main + twin
+         so the user compares models across the two notebooks apples-to-
+         apples. -->
+    <section class="quality-wrap" data-tab="quality">
+      <h2>Model quality - how good is this detector?</h2>
+      <div class="sub" style="line-height:1.7">
+        Metrics computed from <b>your</b> review verdicts (correct /
+        wrong / missed) plus the training-run gate history for
+        <b>mAP@50</b>. Percentages unlock once the sample gets large
+        enough to trust. A <b>rising F1</b> or a <b>falling mistake
+        rate</b> on the curve at the bottom means the model is learning
+        from your feedback.
+      </div>
+
+      <div class="quality-grid" id="quality-headline"
+           style="margin-top:14px;display:grid;gap:12px;
+                  grid-template-columns:repeat(auto-fill,minmax(180px,1fr))">
+        <div class="qcard">
+          <div class="qlabel">F1 score</div>
+          <div class="qval" id="q-f1">-</div>
+          <div class="qhint" id="q-f1-hint">no data</div>
+        </div>
+        <div class="qcard">
+          <div class="qlabel">Precision (accuracy)</div>
+          <div class="qval" id="q-precision">-</div>
+          <div class="qhint" id="q-precision-hint">no data</div>
+        </div>
+        <div class="qcard">
+          <div class="qlabel">Recall</div>
+          <div class="qval" id="q-recall">-</div>
+          <div class="qhint" id="q-recall-hint">no data</div>
+        </div>
+        <div class="qcard">
+          <div class="qlabel">mAP @ 0.50</div>
+          <div class="qval" id="q-map50">-</div>
+          <div class="qhint" id="q-map50-hint">no training run yet</div>
+        </div>
+      </div>
+
+      <h3 style="margin:22px 0 4px;font-size:15px">Per-class breakdown</h3>
+      <div class="sub" style="margin-bottom:6px">
+        n = how many of that class you have judged so far.
+      </div>
+      <div id="q-per-class">
+        <div class="sub">Loading...</div>
+      </div>
+
+      <h3 style="margin:22px 0 4px;font-size:15px">Learning curve - mistake rate per review batch</h3>
+      <div class="sub" style="margin-bottom:6px">
+        Each point = one batch of frames you reviewed, in order. Falling
+        = model is getting better on the queue it was served. Plateau
+        does not always mean failure - the sampler serves the hardest
+        remaining frames.
+      </div>
+      <canvas id="q-curve-chart" style="max-height:220px"></canvas>
+      <div class="sub" id="q-curve-note" style="margin-top:6px"></div>
+    </section>
+
     <!-- Snapshots tab (main-mode only): the operator hits "📸 Snapshot
          grid" on the header, the current 4-tile Analysis grid is captured
          as one PNG server-side and saved to data/snapshots/<ts>.png; this
@@ -751,9 +832,9 @@
   <!-- firebase-config.js is gitignored per-clone; see docs/firebase_setup.md -->
   <!-- ?v=N is a cache-buster: bump it whenever any of the JS files changes,
        so the browser doesn't serve a stale ES-module from disk cache. -->
-  <script type="module" src="./firebase-config.js?v=40"></script>
-  <script type="module" src="./cameras.js?v=40"></script>
-  <script type="module" src="./app.js?v=50"></script>
+  <script type="module" src="./firebase-config.js?v=41"></script>
+  <script type="module" src="./cameras.js?v=41"></script>
+  <script type="module" src="./app.js?v=51"></script>
 
   <!-- Search UI. INLINE and NON-MODULE on purpose: it wires POST /api/search
        on this same server, has no Firebase dependency, and must keep working
@@ -1714,6 +1795,111 @@
     let saved = null;
     try { saved = localStorage.getItem("dash-tab"); } catch (_) {}
     if (saved && btns.some((b) => b.dataset.tabBtn === saved)) activate(saved);
+  })();
+  </script>
+
+  <!-- Model quality tab: fetches /api/model-metrics + /api/al-curve and
+       renders headline cards (F1/Precision/Recall/mAP@50) + per-class
+       table + review-batch mistake-rate line chart. Only polls while the
+       tab is active so idle sessions stay quiet. -->
+  <script>
+  (function initModelQuality() {
+    if (!document.querySelector('[data-tab="quality"]')) return;
+    const pct = (v) => v == null ? "-" : (v * 100).toFixed(1) + "%";
+    const setCard = (id, val, hint) => {
+      const v = document.getElementById(id);
+      const h = document.getElementById(id + "-hint");
+      if (v) v.textContent = val;
+      if (h && hint != null) h.textContent = hint;
+    };
+    let poll = null, qChart = null;
+
+    async function loadOnce() {
+      let m = null, a = null;
+      try { const r = await fetch("/api/model-metrics"); if (r.ok) m = await r.json(); } catch (_) {}
+      try { const r = await fetch("/api/al-curve");      if (r.ok) a = await r.json(); } catch (_) {}
+
+      setCard("q-f1", pct(m && m.f1),
+              m && m.f1 != null
+                ? `over ${m.n_recall} boxes + misses`
+                : "unlocks after ~1 frame review with missed detections");
+      setCard("q-precision", pct(m && m.accuracy),
+              m && m.accuracy != null
+                ? `${m.tp} / ${m.n_precision} verdicts correct`
+                : `need ${Math.max(0, 20 - ((m && m.n_precision) || 0))} more verdicts (min 20)`);
+      setCard("q-recall", pct(m && m.recall),
+              m && m.recall != null
+                ? `caught ${m.tp} of ${(m.tp||0) + (m.fn||0)} true objects`
+                : "unlocks after missed-detection verdicts");
+      const gates = (a && a.points || []).filter((p) => p.map50 != null);
+      const bestGate = gates.length ? gates[gates.length - 1] : null;
+      setCard("q-map50", bestGate ? pct(bestGate.map50) : "-",
+              bestGate ? `latest run: ${bestGate.adapter || "?"}${bestGate.promoted ? " (promoted)" : ""}`
+                       : "no training run yet");
+
+      const rows = (m && m.per_class) || [];
+      const box = document.getElementById("q-per-class");
+      if (box) {
+        if (!rows.length) {
+          box.innerHTML = '<div class="sub">No per-class data yet - review a few frames first.</div>';
+        } else {
+          let html = '<table><tr><th>Class</th><th class="num">n</th>'
+                   + '<th class="num">Precision</th><th class="num">Recall</th>'
+                   + '<th class="num">Missed</th></tr>';
+          for (const c of rows) {
+            html += `<tr><td>${c.cls}</td><td class="num">${c.n}</td>`
+                  + `<td class="num">${pct(c.precision)}</td>`
+                  + `<td class="num">${pct(c.recall)}</td>`
+                  + `<td class="num">${c.fn}</td></tr>`;
+          }
+          html += "</table>";
+          box.innerHTML = html;
+        }
+      }
+
+      const pts = ((m && m.curve) || []).filter((p) => p.error_rate != null);
+      const canvas = document.getElementById("q-curve-chart");
+      const note = document.getElementById("q-curve-note");
+      if (canvas && typeof Chart !== "undefined") {
+        if (qChart) { qChart.destroy(); qChart = null; }
+        if (pts.length < 2) {
+          canvas.style.display = "none";
+          if (note) note.textContent = pts.length
+            ? "Need at least 2 batches to draw a trend."
+            : "No review batches yet.";
+        } else {
+          canvas.style.display = "block";
+          qChart = new Chart(canvas, {
+            type: "line",
+            data: { labels: pts.map((p) => "batch " + p.batch),
+                    datasets: [{ label: "mistake rate %",
+                                 data: pts.map((p) => Math.round(p.error_rate * 100)),
+                                 borderColor: "#ef4444",
+                                 backgroundColor: "rgba(239,68,68,0.10)",
+                                 fill: true, tension: 0.25 }] },
+            options: { responsive: true, maintainAspectRatio: false,
+                       plugins: { legend: { display: false } },
+                       scales: { y: { min: 0, max: 100,
+                                      ticks: { callback: (v) => v + "%" } } } }
+          });
+          if (note) note.textContent = `${pts.length} batches - lower is better.`;
+        }
+      }
+    }
+
+    // Load whenever the quality tab is opened; poll every 30s while active.
+    document.getElementById("tabbar")?.addEventListener("click", (ev) => {
+      const b = ev.target?.closest?.("[data-tab-btn]");
+      if (!b) return;
+      if (b.dataset.tabBtn === "quality") {
+        loadOnce();
+        if (poll) clearInterval(poll);
+        poll = setInterval(loadOnce, 30000);
+      } else if (poll) { clearInterval(poll); poll = null; }
+    });
+    // Also load on page open if the persisted tab was quality.
+    const main = document.querySelector("main");
+    if (main && main.dataset.activeTab === "quality") loadOnce();
   })();
   </script>
 

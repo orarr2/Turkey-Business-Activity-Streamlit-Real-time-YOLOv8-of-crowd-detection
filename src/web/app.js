@@ -238,7 +238,12 @@ for (const slot of GRID_SLOTS) {
     { active_hls: slot.placeholder_hls, active_embed: slot.placeholder_embed,
       active_page: slot.placeholder_page },
     slot);
-  tile.querySelector("[data-analyze]").addEventListener("click", () =>
+  // The 🔬 Live Analysis button only exists in main mode (see the
+  // TWIN_MODE ternary in the template above). In twin mode the button
+  // is not rendered, so querySelector returns null - guard so we don't
+  // crash the for-loop and end up with a 1-tile grid instead of 2x2.
+  const _anBtn = tile.querySelector("[data-analyze]");
+  if (_anBtn) _anBtn.addEventListener("click", () =>
     openAnalysisPicker(tileState[slot.slot_id]));
 }
 
