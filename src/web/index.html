@@ -13,18 +13,36 @@
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
   <style>
     :root { color-scheme: dark; }
-    /* Twin-mode dashboard (opened from turkey_business_activity_yolov8n.ipynb
-       Section 7 as http://localhost:8000/?mode=twin) hides four panels that
-       the twin has no counterpart for: the "Send Report From VM" header
-       buttons, the per-tile Live Analysis 🔬 button, the "Model view - live"
-       section, and the "Window analysis" section. app.js sets
-       data-mode="twin" on <html> at boot when the query param is present.
-       The MAIN dashboard (no query param) is untouched. */
+    /* Dual-mode dashboard. app.js sets data-mode="main" or "twin" on <html>
+       at boot from the ?mode= URL param (default: main). Each notebook's
+       Section 7 launches its dashboard with the appropriate URL. Both modes
+       hide their non-applicable panels via CSS; app.js also toggles a few
+       JS-only bits (tile-template analyze-btn, RL/Snapshots tab reorder).
+
+       Twin (from turkey_business_activity_yolov8n.ipynb, ?mode=twin):
+         hides Send Report From VM, per-tile Live Analysis 🔬, Window
+         analysis, and the model-strip dropdowns. KEEPS Model view - live
+         (the twin IS the VM's data) and the RL tab (the twin IS the
+         review tool).
+
+       Main (from turkey_business_activity.ipynb, ?mode=main or no param):
+         hides Model view - live (hardcoded Turkey cams the picked country
+         may not use), Window analysis, model-strip dropdowns, and the RL
+         tab (no persistent review data - each run is ephemeral). Shows a
+         new Snapshots tab instead of RL. */
     html[data-mode="twin"] #send-report-public,
     html[data-mode="twin"] #send-report-private,
-    html[data-mode="twin"] .model-section,
     html[data-mode="twin"] #deepwin-section,
-    html[data-mode="twin"] .analyze-btn { display: none !important; }
+    html[data-mode="twin"] .analyze-btn,
+    html[data-mode="twin"] .model-strip select,
+    html[data-mode="twin"] [data-tab-btn="snapshots"],
+    html[data-mode="twin"] [data-tab="snapshots"] { display: none !important; }
+
+    html[data-mode="main"] .model-section,
+    html[data-mode="main"] #deepwin-section,
+    html[data-mode="main"] .model-strip select,
+    html[data-mode="main"] [data-tab-btn="rl"],
+    html[data-mode="main"] [data-tab="rl"] { display: none !important; }
     * { box-sizing: border-box; }
     body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0;
            background: #0f1115; color: #e7e9ee; }
@@ -55,11 +73,45 @@
     .tabbar button.on { background: #1d2129; color: #e7e9ee;
               border-color: #2e3442; font-weight: 600; }
     .tabbar button:hover { color: #e7e9ee; }
-    main[data-active-tab="analysis"] > [data-tab]:not([data-tab="analysis"]),
-    main[data-active-tab="search"]   > [data-tab]:not([data-tab="search"]),
-    main[data-active-tab="rl"]       > [data-tab]:not([data-tab="rl"]) {
+    main[data-active-tab="analysis"]  > [data-tab]:not([data-tab="analysis"]),
+    main[data-active-tab="search"]    > [data-tab]:not([data-tab="search"]),
+    main[data-active-tab="rl"]        > [data-tab]:not([data-tab="rl"]),
+    main[data-active-tab="snapshots"] > [data-tab]:not([data-tab="snapshots"]) {
       display: none !important;
     }
+
+    /* Snapshots tab (main-mode only): grid of thumbnails of the 4-tile
+       PNG captures the operator saved via the "📸 Snapshot grid" button.
+       Each thumbnail carries the capture timestamp, a click-to-download,
+       and a delete-one action. */
+    .snap-toolbar { display: flex; gap: 10px; align-items: center;
+                    padding: 10px 0 14px; }
+    .snap-toolbar button { cursor: pointer; background: #2563eb; border: 0;
+                    color: #fff; border-radius: 8px; padding: 8px 14px;
+                    font-size: 13.5px; font-weight: 600; }
+    .snap-toolbar button.secondary { background: #334155; }
+    .snap-toolbar #snap-status { font-size: 12.5px; color: #94a3b8; }
+    .snap-grid { display: grid; gap: 12px;
+                 grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+    .snap-card { background: #171a21; border: 1px solid #232733;
+                 border-radius: 10px; overflow: hidden;
+                 display: flex; flex-direction: column; }
+    .snap-card img { display: block; width: 100%; height: auto; }
+    .snap-card-body { padding: 8px 10px; display: flex;
+                      justify-content: space-between; align-items: center;
+                      font-size: 12px; }
+    .snap-card-ts { color: #cbd5e1; font-family: monospace; }
+    .snap-card-del { cursor: pointer; background: none; border: 0;
+                     color: #ef4444; font-size: 16px; }
+    .snap-empty { color: #8b909a; font-size: 13px; padding: 24px 0; }
+    /* The 📸 button lives next to the send-report block in the header so
+       it's reachable from any tab. Hidden in twin mode by CSS above via
+       [data-tab-btn="snapshots"] (the button lives on the header, not the
+       tabbar - but same rule pattern applies via #snap-capture-btn). */
+    #snap-capture-btn { cursor: pointer; background: #16a34a; border: 0;
+       color: #fff; border-radius: 8px; padding: 7px 14px; font-size: 14px;
+       font-weight: 600; }
+    html[data-mode="twin"] #snap-capture-btn { display: none !important; }
 
     .grid { display: grid; gap: 8px;
             grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -550,6 +602,12 @@
                        border-radius:8px;padding:7px 14px;font-size:14px;font-weight:600">
           📧 Send Report From VM</button>
       </div>
+      <!-- Main-mode: capture the current 4-tile Analysis grid as one PNG,
+           save under data/snapshots/<timestamp>.png, then jump to the
+           Snapshots tab to view/download/delete. Hidden in twin mode. -->
+      <button id="snap-capture-btn"
+              title="Save a PNG of the 4-tile Analysis grid to data/snapshots/">
+        📸 Snapshot grid</button>
     </div>
   </header>
 
@@ -560,6 +618,7 @@
     <button data-tab-btn="analysis" class="on">Analysis</button>
     <button data-tab-btn="search">Search</button>
     <button data-tab-btn="rl">Reinforcement learning</button>
+    <button data-tab-btn="snapshots">Snapshots</button>
   </nav>
 
   <main data-active-tab="analysis">
@@ -989,6 +1048,26 @@ alerting one, else the largest person in view">
         </div>
       </div>
     </div>
+
+    <!-- Snapshots tab (main-mode only): the operator hits "📸 Snapshot
+         grid" on the header, the current 4-tile Analysis grid is captured
+         as one PNG server-side and saved to data/snapshots/<ts>.png; this
+         tab lists every capture as a thumbnail. Click the timestamp to
+         download; click the 🗑 to delete one. Refresh reloads the list.
+         In twin mode the tab button is hidden via CSS at the top. -->
+    <div class="snapshots-wrap" data-tab="snapshots">
+      <h2>Snapshots - saved 4-tile grid captures</h2>
+      <div class="sub">Each capture is a PNG of the four Analysis tiles at
+        the moment you clicked. Stored locally under
+        <code>data/snapshots/</code>; nothing is uploaded anywhere.</div>
+      <div class="snap-toolbar">
+        <button id="snap-refresh">Refresh</button>
+        <button id="snap-clear-all" class="secondary"
+                title="Delete every saved snapshot on disk">Clear all</button>
+        <span id="snap-status"></span>
+      </div>
+      <div class="snap-grid" id="snap-grid"></div>
+    </div>
   </main>
 
   <!-- firebase-config.js is gitignored per-clone; see docs/firebase_setup.md -->
@@ -996,7 +1075,7 @@ alerting one, else the largest person in view">
        so the browser doesn't serve a stale ES-module from disk cache. -->
   <script type="module" src="./firebase-config.js?v=40"></script>
   <script type="module" src="./cameras.js?v=40"></script>
-  <script type="module" src="./app.js?v=48"></script>
+  <script type="module" src="./app.js?v=49"></script>
 
   <!-- Search UI. INLINE and NON-MODULE on purpose: it wires POST /api/search
        on this same server, has no Firebase dependency, and must keep working

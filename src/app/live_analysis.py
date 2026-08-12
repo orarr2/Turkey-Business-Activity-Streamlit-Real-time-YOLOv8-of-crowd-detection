@@ -647,8 +647,12 @@ class LiveSession(threading.Thread):
         # effect within LINE_RELOAD_POLL_S seconds without restart.
         from app.cameras import resolve_line as _resolve_line
         from app.cameras import resolve_line_classes as _resolve_classes
-        self.line = _resolve_line(cam_id) or cam.get("line") or DEFAULT_LINE
-        self.line_classes = _resolve_classes(cam_id)
+        # NB: use self.cam_id (assigned at __init__), NOT `cam_id` - there is
+        # no `cam_id` in this scope, and referencing it threw NameError from
+        # every /api/analysis/start call ("Failed to start: NameError: name
+        # 'cam_id' is not defined" surfaced by dashboard_server.py:836).
+        self.line = _resolve_line(self.cam_id) or cam.get("line") or DEFAULT_LINE
+        self.line_classes = _resolve_classes(self.cam_id)
         self._line_mtime = self._line_json_mtime()
         self._next_line_check = time.time() + LINE_RELOAD_POLL_S
         self.cross = {"in": 0, "out": 0}

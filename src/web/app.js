@@ -34,31 +34,63 @@ try {
   firebaseConfig = (await import("./firebase-config.js" + _q)).firebaseConfig;
 } catch (_) { /* handled below */ }
 
-// Twin-mode: the yolov8n twin notebook opens this page as ?mode=twin. In that
-// mode we hide four panels that don't apply to the twin (Send Report From VM,
-// per-tile Live Analysis, Model view - live, Window analysis) and put the RL
-// tab's Review section above the Learning-proof section. The MAIN dashboard
-// (no query param) is untouched. See index.html for the CSS half; this JS
-// half is belt-and-suspenders (explicit hide by id/class) plus the tile-
-// template skip and the review/boost reorder.
-const TWIN_MODE = new URLSearchParams(location.search).get("mode") === "twin";
+// Dual-mode dashboard. Each notebook's Section 7 launches this page with a
+// ?mode= URL param; app.js sets it as an attribute on <html> so the CSS at
+// the top of index.html can hide the panels that do not apply. Default:
+// main (opens as http://localhost:8000/?mode=main OR no param).
+//
+// Twin (yolov8n twin notebook, ?mode=twin): hides Send Report From VM,
+// per-tile Live Analysis 🔬, Window analysis, and the class/time dropdowns
+// in the model-view strip. KEEPS Model view - live (twin IS the VM's own
+// data) and the RL tab (twin IS the review tool). Reorders the RL tab so
+// the Review section sits above Learning proof.
+//
+// Main (turkey_business_activity.ipynb, ?mode=main or no param): hides
+// Model view - live (hardcoded Turkey cams the picked country may not
+// match), Window analysis, model-strip dropdowns, and the RL tab (no
+// persistent review data - each run is ephemeral). Shows a new Snapshots
+// tab in place of RL, and adds a "📸 Snapshot grid" header button.
+const MODE = new URLSearchParams(location.search).get("mode") === "twin"
+             ? "twin" : "main";
+const TWIN_MODE = MODE === "twin";
+const MAIN_MODE = MODE === "main";
+document.documentElement.setAttribute("data-mode", MODE);
+
+// Force the default tab to Analysis on every load. Without this, a stale
+// localStorage entry from an earlier session could re-open the dashboard
+// on RL / Search, which surprised the operator ("why did it open on RL?").
+try {
+  localStorage.removeItem("activeTab");
+  localStorage.removeItem("dashboardActiveTab");
+} catch (_) { /* private mode - fine */ }
+
 if (TWIN_MODE) {
-  document.documentElement.setAttribute("data-mode", "twin");
   // Belt + suspenders: explicit hide by id/class in case the CSS block above
   // is edited or overridden later. Cheap and idempotent.
-  for (const id of ["send-report-public", "send-report-private", "deepwin-section"]) {
+  for (const id of ["send-report-public", "send-report-private",
+                    "deepwin-section", "snap-capture-btn"]) {
     const el = document.getElementById(id);
     if (el) el.style.display = "none";
   }
-  for (const el of document.querySelectorAll(".model-section, .analyze-btn")) {
+  for (const el of document.querySelectorAll(".analyze-btn, .model-strip select")) {
     el.style.display = "none";
   }
-  // RL tab reorder: put Review at the top, Learning-proof below. Main mode
-  // keeps the source order (boost-section first, review-section second).
+  // RL tab reorder: put Review at the top, Learning-proof below.
   const review = document.getElementById("review-section");
   const boost  = document.getElementById("boost-section");
   if (review && boost && boost.parentNode === review.parentNode) {
     review.parentNode.insertBefore(review, boost);
+  }
+}
+if (MAIN_MODE) {
+  // Belt + suspenders: hide the main-mode-forbidden bits explicitly. The
+  // Snapshots tab (data-tab="snapshots") is added by index.html; hide the
+  // RL button in the tabbar and the RL section so a stale localStorage
+  // active-tab can't force it visible.
+  for (const el of document.querySelectorAll(
+      ".model-section, #deepwin-section, .model-strip select, " +
+      "[data-tab-btn=\"rl\"], [data-tab=\"rl\"]")) {
+    el.style.display = "none";
   }
 }
 
@@ -2421,3 +2453,145 @@ setInterval(async () => {
     } catch (_e) { /* transient - retry next tick */ }
   }
 }, 4000);
+
+
+// -----------------------------------------------------------------------------
+// Snapshots (main-mode only): "📸 Snapshot grid" header button saves the four
+// Analysis tiles as ONE 2x2 PNG under data/snapshots/<timestamp>.png. The
+// Snapshots tab lists every saved PNG as a thumbnail card - click to open in
+// a new tab / download, 🗑 deletes one, "Clear all" nukes the folder.
+// Twin mode: nothing wires (button and tab are hidden by CSS/JS above).
+// -----------------------------------------------------------------------------
+
+(function initSnapshots() {
+  if (!MAIN_MODE) return;
+
+  const captureBtn = document.getElementById("snap-capture-btn");
+  const refreshBtn = document.getElementById("snap-refresh");
+  const clearBtn   = document.getElementById("snap-clear-all");
+  const gridEl     = () => document.getElementById("snap-grid");
+  const statusEl   = () => document.getElementById("snap-status");
+
+  function _status(msg, kind = "ok") {
+    const el = statusEl(); if (!el) return;
+    el.textContent = msg;
+    el.style.color = kind === "err" ? "#ef4444"
+                   : kind === "ok"  ? "#4ade80"
+                                    : "#94a3b8";
+    if (msg) setTimeout(() => { el.textContent = ""; }, 3500);
+  }
+
+  async function captureGrid() {
+    // tileState is a module-level object keyed by slot_id - each entry has
+    // a `tile` DOM node (see the createTile block above). Drill down for
+    // each tile's <video>, drawImage into a 2x2 canvas, POST as PNG.
+    const st = (typeof tileState === "object" && tileState) ? tileState : {};
+    const tiles = Object.values(st).slice(0, 4);
+    if (!tiles.length) { _status("No tiles yet - wait a few seconds.", "err"); return; }
+    const videos = tiles.map(t =>
+      (t.tile || t.videoWrap || document).querySelector("video"));
+    const usable = videos.map((v, i) => ({v, i}))
+                         .filter(o => o.v && o.v.videoWidth > 0 && o.v.videoHeight > 0);
+    if (!usable.length) {
+      _status("No decoded video frames yet - reload if the tiles never fill in.", "err");
+      return;
+    }
+    const cw = Math.max(...usable.map(o => o.v.videoWidth));
+    const ch = Math.max(...usable.map(o => o.v.videoHeight));
+    const canvas = document.createElement("canvas");
+    canvas.width  = cw * 2;
+    canvas.height = ch * 2;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#0f1115";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    // Cell labels overlay (top-left of each cell) - name from the tile head.
+    ctx.font = "18px system-ui, -apple-system, Segoe UI, sans-serif";
+    for (let i = 0; i < Math.min(videos.length, 4); i++) {
+      const v = videos[i];
+      const col = i % 2, row = Math.floor(i / 2);
+      const x = col * cw, y = row * ch;
+      if (v && v.videoWidth) {
+        try { ctx.drawImage(v, x, y, cw, ch); }
+        catch (e) { console.warn("snap drawImage failed", i, e); }
+      }
+      const name = (tiles[i]?.tile?.querySelector?.("h2")?.textContent
+                 || tiles[i]?.slot?.placeholder_name
+                 || `slot ${i + 1}`).slice(0, 60);
+      // Semi-transparent label strip
+      ctx.fillStyle = "rgba(0,0,0,0.55)";
+      ctx.fillRect(x, y, cw, 32);
+      ctx.fillStyle = "#e7e9ee";
+      ctx.fillText(name, x + 10, y + 22);
+    }
+    _status("capturing...", "info");
+    const blob = await new Promise(res => canvas.toBlob(res, "image/png"));
+    if (!blob) { _status("canvas toBlob failed - browser refused.", "err"); return; }
+    const fd = new FormData();
+    fd.append("png", blob, "grid.png");
+    try {
+      const r = await fetch("/api/snapshot", { method: "POST", body: fd });
+      if (!r.ok) {
+        const t = await r.text();
+        _status(`save failed: HTTP ${r.status} - ${t.slice(0, 120)}`, "err");
+        return;
+      }
+      const d = await r.json();
+      _status(`saved ${d.name} (${(d.bytes / 1024).toFixed(0)} KB)`, "ok");
+      const active = document.querySelector("main")?.dataset?.activeTab;
+      if (active === "snapshots") loadSnaps();
+    } catch (e) {
+      _status("network error: " + e.message, "err");
+    }
+  }
+
+  async function loadSnaps() {
+    const g = gridEl(); if (!g) return;
+    g.innerHTML = '<div class="snap-empty">loading...</div>';
+    try {
+      const r = await fetch("/api/snapshots-list");
+      if (!r.ok) { g.innerHTML = `<div class="snap-empty">list failed: HTTP ${r.status}</div>`; return; }
+      const d = await r.json();
+      if (!d.items || !d.items.length) {
+        g.innerHTML = '<div class="snap-empty">No snapshots yet. Hit "📸 Snapshot grid" in the header.</div>';
+        return;
+      }
+      g.innerHTML = "";
+      for (const it of d.items) {
+        const card = document.createElement("div");
+        card.className = "snap-card";
+        const safe = escapeHtml(it.name);
+        card.innerHTML = `
+          <a href="${it.url}" target="_blank" rel="noopener" title="Open / download">
+            <img src="${it.url}" loading="lazy" alt="${safe}"></a>
+          <div class="snap-card-body">
+            <span class="snap-card-ts">${safe}</span>
+            <button class="snap-card-del" title="Delete this snapshot">🗑</button>
+          </div>`;
+        card.querySelector(".snap-card-del").addEventListener("click", async () => {
+          if (!confirm(`Delete ${it.name}?`)) return;
+          const dr = await fetch("/api/snapshot?path=" + encodeURIComponent(it.path),
+                                 { method: "DELETE" });
+          if (dr.ok) loadSnaps(); else alert("delete failed: HTTP " + dr.status);
+        });
+        g.appendChild(card);
+      }
+    } catch (e) {
+      g.innerHTML = `<div class="snap-empty">network error: ${escapeHtml(e.message)}</div>`;
+    }
+  }
+
+  if (captureBtn) captureBtn.addEventListener("click", () =>
+    captureGrid().catch(e => _status("capture failed: " + e.message, "err")));
+  if (refreshBtn) refreshBtn.addEventListener("click", loadSnaps);
+  if (clearBtn) clearBtn.addEventListener("click", async () => {
+    if (!confirm("Delete ALL saved snapshots on disk? This cannot be undone.")) return;
+    const r = await fetch("/api/snapshot?path=*", { method: "DELETE" });
+    if (r.ok) loadSnaps(); else alert("clear-all failed: HTTP " + r.status);
+  });
+
+  // Whenever the user clicks the Snapshots tab button, refresh the grid.
+  document.getElementById("tabbar")?.addEventListener("click", (ev) => {
+    const b = ev.target?.closest?.("[data-tab-btn]");
+    if (b && b.dataset.tabBtn === "snapshots") loadSnaps();
+  });
+})();
