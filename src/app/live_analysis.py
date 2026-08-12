@@ -765,7 +765,14 @@ class LiveSession(threading.Thread):
     def _pose_pass(self, frame, boxes) -> None:
         from app.pose import attach_keypoints_crops, load_pose_model
         with INFER_LOCK:
-            attach_keypoints_crops(load_pose_model(), frame, boxes)
+            # 2026-08-13: min_box_h lowered 40 -> 22 and conf 0.25 -> 0.10 so
+            # small people on far-off street cams (typical Bangkok / Patong
+            # crops of 30-80 px) actually get skeletons - the 40-px default
+            # is fine for indoor / close-range cams but skipped the entire
+            # picked-Thailand grid, which reported skeletons=0 on every tick
+            # and made the pose / gestures / body layers look broken.
+            attach_keypoints_crops(load_pose_model(), frame, boxes,
+                                   min_box_h=22, conf=0.10)
 
     def _faces_pass(self, frame) -> list[dict]:
         from app import faces as _faces

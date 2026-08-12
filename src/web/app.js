@@ -465,11 +465,14 @@ const _layerLabel = Object.fromEntries(ANALYSIS_LAYER_DEFS);
 function beginTileAnalysis(st, cam, layer) {
   if (st.analysis) {
     // Same tile, new layer: server switched in-place (stream + accumulators
-    // survive); just relabel the tag, the poller runs on.
+    // survive); just relabel the tag, the poller runs on. Also refresh
+    // the layer-specific control buttons (line-draw is only shown for
+    // the 'line' layer, hidden for the rest).
     st.analysis.layer = layer;
     if (st.analysis.tag)
       st.analysis.tag.firstChild.textContent =
         `🔬 ${_layerLabel[layer] || layer}`;
+    _updateLineButton(st);
     return;
   }
   // Video stays. Add canvas overlay + a stop tag, both positioned
@@ -491,12 +494,101 @@ function beginTileAnalysis(st, cam, layer) {
   st.videoWrap.appendChild(tag);
   tag.addEventListener("click", () => stopTileAnalysis(st));
 
+  // Line-layer draw button: appears next to the tag when layer='line' so
+  // the operator can define the counting line by clicking two points on
+  // the video, in place, without an out-of-context modal.
+  const lineBtn = document.createElement("span");
+  lineBtn.className = "analysis-line-btn";
+  lineBtn.style.cssText =
+    "position:absolute;top:8px;right:126px;background:rgba(34,197,94,0.9);" +
+    "color:#fff;padding:2px 8px;border-radius:6px;font-size:11px;" +
+    "font-weight:600;pointer-events:auto;cursor:pointer;z-index:3;display:none";
+  lineBtn.textContent = "✎ Draw line";
+  lineBtn.title = "click 2 points on the video to place a counting line";
+  st.videoWrap.appendChild(lineBtn);
+
   st.analysis = {
-    cam, layer, canvas, ctx: canvas.getContext("2d"), tag,
+    cam, layer, canvas, ctx: canvas.getContext("2d"), tag, lineBtn,
+    lineDrawing: false, linePts: [],
     failures: 0, lastRestart: 0, inflight: false,
     timer: setInterval(() => pollAnalysisFrame(st), ANALYSIS_POLL_MS),
   };
+  lineBtn.addEventListener("click", () => _startLineDraw(st));
+  canvas.addEventListener("click", (ev) => _onCanvasClick(st, ev));
+  _updateLineButton(st);
   pollAnalysisFrame(st);
+}
+
+// Show / hide the "Draw line" button based on the current layer.
+function _updateLineButton(st) {
+  const a = st.analysis;
+  if (!a || !a.lineBtn) return;
+  a.lineBtn.style.display = (a.layer === "line") ? "" : "none";
+  if (a.layer !== "line") {
+    a.lineDrawing = false;
+    a.linePts = [];
+    if (a.canvas) a.canvas.style.pointerEvents = "";
+    if (a.canvas) a.canvas.style.cursor = "";
+  }
+}
+
+function _startLineDraw(st) {
+  const a = st.analysis;
+  if (!a || a.layer !== "line") return;
+  a.lineDrawing = true;
+  a.linePts = [];
+  a.canvas.style.pointerEvents = "auto";
+  a.canvas.style.cursor = "crosshair";
+  a.lineBtn.textContent = "click point 1 on video";
+  a.lineBtn.style.background = "rgba(37,99,235,0.95)";
+}
+
+async function _onCanvasClick(st, ev) {
+  const a = st.analysis;
+  if (!a || !a.lineDrawing) return;
+  const rect = a.canvas.getBoundingClientRect();
+  const x = (ev.clientX - rect.left) / rect.width;
+  const y = (ev.clientY - rect.top) / rect.height;
+  a.linePts.push([Number(x.toFixed(4)), Number(y.toFixed(4))]);
+  if (a.linePts.length === 1) {
+    a.lineBtn.textContent = "click point 2 on video";
+    return;
+  }
+  // Two points collected: persist + finish.
+  const body = JSON.stringify({ line: a.linePts });
+  try {
+    const r = await fetch(
+      `/api/lines?cam=${encodeURIComponent(a.cam)}`,
+      { method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      a.lineBtn.textContent = "✕ " + (j.error || `HTTP ${r.status}`);
+      a.lineBtn.style.background = "rgba(239,68,68,0.9)";
+    } else {
+      a.lineBtn.textContent = "✓ line saved";
+      a.lineBtn.style.background = "rgba(34,197,94,0.9)";
+      // Reflect the new line on the overlay immediately - the next poll
+      // will paint the server-side version in ~1 s.
+      drawLineOverlay(a.ctx, { line: a.linePts,
+                                cross_in: 0, cross_out: 0 });
+    }
+  } catch (e) {
+    a.lineBtn.textContent = "✕ " + e.message;
+    a.lineBtn.style.background = "rgba(239,68,68,0.9)";
+  }
+  a.lineDrawing = false;
+  a.linePts = [];
+  a.canvas.style.pointerEvents = "";
+  a.canvas.style.cursor = "";
+  // Restore "Draw line" label after a moment.
+  setTimeout(() => {
+    if (a.lineBtn && a.layer === "line") {
+      a.lineBtn.textContent = "✎ Redraw line";
+      a.lineBtn.style.background = "rgba(34,197,94,0.9)";
+    }
+  }, 1500);
 }
 
 async function pollAnalysisFrame(st) {
@@ -557,6 +649,7 @@ function stopTileAnalysis(st) {
         { method: "POST" }).catch(() => {});
   if (a.canvas) a.canvas.remove();
   if (a.tag) a.tag.remove();
+  if (a.lineBtn) a.lineBtn.remove();
   // Video was never replaced, nothing to rebuild. Tear down the
   // Line-layer history strip if one was showing on this tile.
   const strip = st.tile && st.tile.querySelector(".crossings-strip");

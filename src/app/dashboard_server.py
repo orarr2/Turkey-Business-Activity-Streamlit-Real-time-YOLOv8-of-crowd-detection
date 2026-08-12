@@ -1279,10 +1279,14 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
     def _review_stats(self) -> None:
         try:
+            from urllib.parse import parse_qs, urlparse
+            q = parse_qs(urlparse(self.path).query)
+            cams_csv = (q.get("cams") or [""])[0]
+            cam_ids = [c.strip() for c in cams_csv.split(",") if c.strip()] or None
             summary = _review_store().summary()
             try:
                 from app.confidence_boost import summary as _cb_summary
-                summary["boost"] = _cb_summary()
+                summary["boost"] = _cb_summary(cam_ids=cam_ids)
             except Exception as ex:
                 summary["boost"] = {"error": f"{type(ex).__name__}"}
             self._send_json(200, summary)
@@ -1596,29 +1600,47 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
         Powers the dashboard's "Learning proof" panel so the user can
         watch each verdict move the effective confidence for that camera.
+
+        ?cams=csv (2026-08-13 generalization): filter rows to the
+        operator's picked cams. See _model_metrics for the full rationale.
         """
         try:
+            from urllib.parse import parse_qs, urlparse
             from app.confidence_boost import details
-            self._send_json(200, details())
+            q = parse_qs(urlparse(self.path).query)
+            cams_csv = (q.get("cams") or [""])[0]
+            cam_ids = [c.strip() for c in cams_csv.split(",") if c.strip()] or None
+            self._send_json(200, details(cam_ids=cam_ids))
         except Exception as e:
             self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
 
     def _model_metrics(self) -> None:
         """Scoreboard endpoint driving the header line. Cheap - it just
         walks the in-memory review store and does arithmetic. Safe to poll
-        every 10s from the browser."""
+        every 10s from the browser.
+
+        ?cams=csv (2026-08-13 generalization): main dashboard sends its
+        picked cam_ids so the header line + F1/Recall/Precision reflect
+        only the operator's own cameras, not the 25+ Turkey cams the
+        shared review store accumulated. Twin + tools omit the param and
+        keep the full-store aggregate view."""
         try:
+            from urllib.parse import parse_qs, urlparse
             from app.model_metrics import compute, header_line, learning_curve
-            metrics = compute(_review_store())
+            q = parse_qs(urlparse(self.path).query)
+            cams_csv = (q.get("cams") or [""])[0]
+            cam_ids = [c.strip() for c in cams_csv.split(",") if c.strip()] or None
+            metrics = compute(_review_store(), cam_ids=cam_ids)
             try:
                 from app.confidence_boost import summary as _cb_summary
-                boost = _cb_summary()
+                boost = _cb_summary(cam_ids=cam_ids)
             except Exception:
                 boost = None
             metrics["header_line"] = header_line(metrics, boost)
             # Batch-by-batch mistake trend - the "is it actually getting
             # better?" chart the operator asked for.
-            metrics["curve"] = learning_curve(_review_store())
+            metrics["curve"] = learning_curve(_review_store(), cam_ids=cam_ids)
+            metrics["cams_filter"] = cam_ids or []
             self._send_json(200, metrics)
         except Exception as e:
             self._send_json(500, {"error": f"{type(e).__name__}: {e}"})

@@ -63,18 +63,29 @@ const CLOUD_SLOTS = [
 // match `local_*`, so its onSnapshot naturally leaves these tiles alone.
 // When the file is absent (the public cloud dashboard), we fall back to the
 // cloud grid unchanged. Top-level await is fine in an ES module.
+//
+// TWIN-MODE OVERRIDE (2026-08-13): the operator's TWIN dashboard is meant to
+// MIRROR the VM's actual data feed (Turkey Konya at the time of writing),
+// not the operator's local picks. But main + twin share this same served
+// web/ dir and therefore the same local_grid.json - so a picker run on
+// main would also poison the twin view. When ?mode=twin, we deliberately
+// IGNORE local_grid.json and stay on CLOUD_SLOTS, so twin always shows
+// the four cameras the collector is actually running.
+const _MODE = new URLSearchParams(window.location.search).get("mode") || "main";
 let GRID_SLOTS = CLOUD_SLOTS;
 let LOCAL_MODE = false;
-try {
-  const r = await fetch("./local_grid.json?_=" + Date.now(), { cache: "no-store" });
-  if (r.ok) {
-    const j = await r.json();
-    if (Array.isArray(j?.slots) && j.slots.length) {
-      GRID_SLOTS = j.slots;
-      LOCAL_MODE = true;
+if (_MODE !== "twin") {
+  try {
+    const r = await fetch("./local_grid.json?_=" + Date.now(), { cache: "no-store" });
+    if (r.ok) {
+      const j = await r.json();
+      if (Array.isArray(j?.slots) && j.slots.length) {
+        GRID_SLOTS = j.slots;
+        LOCAL_MODE = true;
+      }
     }
-  }
-} catch (_) { /* no local_grid.json -> cloud grid */ }
+  } catch (_) { /* no local_grid.json -> cloud grid */ }
+}
 
 export { GRID_SLOTS, LOCAL_MODE };
 

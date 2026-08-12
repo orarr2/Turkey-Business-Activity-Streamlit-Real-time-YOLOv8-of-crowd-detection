@@ -1140,9 +1140,9 @@ alerting one, else the largest person in view">
   <!-- firebase-config.js is gitignored per-clone; see docs/firebase_setup.md -->
   <!-- ?v=N is a cache-buster: bump it whenever any of the JS files changes,
        so the browser doesn't serve a stale ES-module from disk cache. -->
-  <script type="module" src="./firebase-config.js?v=42"></script>
-  <script type="module" src="./cameras.js?v=42"></script>
-  <script type="module" src="./app.js?v=52"></script>
+  <script type="module" src="./firebase-config.js?v=43"></script>
+  <script type="module" src="./cameras.js?v=43"></script>
+  <script type="module" src="./app.js?v=53"></script>
 
   <!-- Search UI. INLINE and NON-MODULE on purpose: it wires POST /api/search
        on this same server, has no Firebase dependency, and must keep working
@@ -1913,7 +1913,9 @@ alerting one, else the largest person in view">
 
     async function refreshStats() {
       try {
-        const r = await fetch("/api/review-stats", { cache: "no-store" });
+        const _cp = await window._camsParam();
+        const r = await fetch("/api/review-stats" + (_cp ? "?" + _cp : ""),
+                              { cache: "no-store" });
         if (!r.ok) return;
         const s = await r.json();
         const boost = s.boost || {};
@@ -2037,7 +2039,9 @@ alerting one, else the largest person in view">
     async function refresh() {
       let data;
       try {
-        const r = await fetch("/api/boost-status", { cache: "no-store" });
+        const _cp = await window._camsParam();
+        const r = await fetch("/api/boost-status" + (_cp ? "?" + _cp : ""),
+                              { cache: "no-store" });
         if (!r.ok) return;
         data = await r.json();
       } catch { return; }
@@ -2124,7 +2128,11 @@ alerting one, else the largest person in view">
 
     async function loadOnce() {
       let m = null, a = null;
-      try { const r = await fetch("/api/model-metrics"); if (r.ok) m = await r.json(); } catch (_) {}
+      // Main mode: filter to the operator's picked cameras so Model
+      // quality metrics reflect HIS reviews only. Twin omits.
+      const _cp = await window._camsParam();
+      const _camsParam = _cp ? "?" + _cp : "";
+      try { const r = await fetch("/api/model-metrics" + _camsParam); if (r.ok) m = await r.json(); } catch (_) {}
       try { const r = await fetch("/api/al-curve");      if (r.ok) a = await r.json(); } catch (_) {}
 
       setCard("q-f1", pct(m && m.f1),
@@ -2212,6 +2220,19 @@ alerting one, else the largest person in view">
   </script>
 
   <script>
+  // Shared helper for main-mode fetch: append ?cams= from local_grid.json
+  // so backend filters to the operator's picked cameras. Twin returns "".
+  window._camsParam = async function () {
+    const mode = new URLSearchParams(location.search).get("mode") || "main";
+    if (mode !== "main") return "";
+    try {
+      const grid = await (await fetch("./local_grid.json?_=" + Date.now(),
+          { cache: "no-store" })).json();
+      const ids = (grid && grid.slots || []).map((s) => s.slot_id).filter(Boolean);
+      if (ids.length) return "cams=" + encodeURIComponent(ids.join(","));
+    } catch (_) {}
+    return "";
+  };
   (function initModelMetrics() {
     const el = document.getElementById("model-metrics-line");
     if (!el) return;
@@ -2253,7 +2274,9 @@ alerting one, else the largest person in view">
     }
     async function refresh() {
       try {
-        const r = await fetch("/api/model-metrics", { cache: "no-store" });
+        const _cp = await window._camsParam();
+        const r = await fetch("/api/model-metrics" + (_cp ? "?" + _cp : ""),
+                              { cache: "no-store" });
         if (!r.ok) { el.classList.add("stale"); return; }
         const data = await r.json();
         el.classList.remove("stale");
