@@ -128,9 +128,6 @@ for (const slot of GRID_SLOTS) {
         <div class="city" data-cam-area>${escapeHtml(slot.display_area)}</div>
       </div>
       <div class="tile-head-right">
-        <button class="analyze-btn" data-analyze
-                title="Live analysis - pick one layer for this camera"
-                style="cursor:pointer;border:1px solid #334155;background:#1e293b;color:#e2e8f0;border-radius:6px;padding:2px 8px;font-size:13px">🔬</button>
         <span class="activity-badge act-unknown" data-activity>
           <span class="dot"></span><span data-activity-text>-/10</span>
         </span>
