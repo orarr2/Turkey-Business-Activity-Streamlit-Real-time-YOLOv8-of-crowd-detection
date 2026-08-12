@@ -939,6 +939,39 @@ function refreshHeatView(s) {
   s.img.hidden = false;
 }
 
+// LOCAL_MODE local model-view poll (2026-08-13): main mode reads
+// /snapshots/model_view/<slot_id>.json + .jpg produced by the notebook's
+// app.local_producers.ModelViewProducer, then feeds updateStrip so the
+// Model view - live section shows the operator's PICKED cameras instead
+// of the empty "waiting for first sample" cells that used to sit there
+// (they never filled because the VM's Firestore keys are Turkey slots,
+// not the picked local_* ones). Twin mode is unchanged - twin mirrors
+// the VM directly via Firestore.
+if (LOCAL_MODE && stripEl) {
+  const _pollLocalModelView = async () => {
+    for (const slot of GRID_SLOTS) {
+      const meta_url = `/snapshots/model_view/${slot.slot_id}.json?_=` + Date.now();
+      const jpg_url  = `/snapshots/model_view/${slot.slot_id}.jpg?_=`  + Date.now();
+      try {
+        const r = await fetch(meta_url, { cache: "no-store" });
+        if (!r.ok) continue;
+        const j = await r.json();
+        updateStrip(slot.slot_id, {
+          cam_id:              j.cam_id,
+          cam_name:            j.cam_name,
+          person:              j.counts?.person,
+          vehicles:            j.counts?.vehicles,
+          ok:                  true,
+          live_annotated_url:  jpg_url,
+          ts:                  j.at,
+        });
+      } catch (_) { /* file not written yet - keep placeholder */ }
+    }
+  };
+  _pollLocalModelView();
+  setInterval(_pollLocalModelView, 15000);
+}
+
 function updateStrip(slotId, d) {
   const s = stripState[slotId];
   if (!s) return;
