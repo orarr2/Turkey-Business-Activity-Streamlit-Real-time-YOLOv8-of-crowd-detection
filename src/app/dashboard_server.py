@@ -439,6 +439,30 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = self.path.split("?")[0]
+        # Proof-matrix helper (2026-08-13): the live-analysis proof matrix
+        # posts each captured canvas overlay here so the operator can
+        # inspect them offline. Body = raw PNG bytes. Query ?name= names
+        # the file under web/snapshots/proof/. Used only by the automated
+        # test loop; unlisted anywhere in the UI.
+        if path == "/api/proof":
+            from urllib.parse import parse_qs, urlparse
+            import re as _re
+            q = parse_qs(urlparse(self.path).query)
+            name = (q.get("name") or [""])[0]
+            if not _re.match(r"^[A-Za-z0-9_.\-]{1,80}$", name or ""):
+                self.send_error(400, "bad name"); return
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                n = 0
+            if n <= 0 or n > 12 * 1024 * 1024:
+                self.send_error(400, "empty or oversized body"); return
+            data = self.rfile.read(n)
+            d = WEB_DIR / "snapshots" / "proof"
+            d.mkdir(parents=True, exist_ok=True)
+            (d / name).write_bytes(data)
+            self._send_json(200, {"ok": True, "name": name, "bytes": len(data)})
+            return
         # /api/search is the current entry point (image + browse modes).
         # /api/visual-search is the compat alias for the legacy image-only
         # endpoint - the frontend and tools/search_by_image.py both used it
