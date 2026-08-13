@@ -33,7 +33,6 @@ import socketserver
 import ssl
 import sys
 import threading
-import time
 import urllib.request
 from pathlib import Path
 
@@ -106,25 +105,18 @@ class _VisualSearchState:
         # would race the entries dict and double-embed the same backlog.
         self.refresh_lock = threading.Lock()
         self._ready = False
-        self._model_lock = threading.Lock()
-        self._model_ready = False
         self.embedder = None
         self.model = None
         self.index = None
         self.db_path = None
 
-    def get_model(self):
-        """The YOLO model ALONE, loaded on first call (~5-15s).
-
-        Live analysis and the deep window need only the model; the full
-        get() also builds the search index + crop bootstraps, which can
-        take minutes on a cold start with a large synced pool - fix 2
-        decouples them so an analysis click never waits on embedding
-        backlogs. get() reuses this loader, so the model is still loaded
-        exactly once per process.
-        """
-        with self._model_lock:
-            if not self._model_ready:
+    def get(self):
+        with self._lock:
+            if not self._ready:
+                from app.visual_search import DEFAULT_DB, SnapshotIndex
+                from app.reid_embed import make_embedder
+                self.embedder = make_embedder(os.environ.get("REID_MODEL") or None)
+                self.db_path = os.environ.get("REID_DB") or DEFAULT_DB
                 weights = os.environ.get("SEARCH_YOLO", "yolov8s.pt")
                 if weights.lower() not in ("off", "none", ""):
                     try:
@@ -134,17 +126,6 @@ class _VisualSearchState:
                         print(f"visual-search: YOLO unavailable ({e}) - "
                               f"uploads will be embedded whole (no object "
                               f"extraction). pip install ultralytics to fix.")
-                self._model_ready = True
-        return self.model
-
-    def get(self):
-        with self._lock:
-            if not self._ready:
-                from app.visual_search import DEFAULT_DB, SnapshotIndex
-                from app.reid_embed import make_embedder
-                self.embedder = make_embedder(os.environ.get("REID_MODEL") or None)
-                self.db_path = os.environ.get("REID_DB") or DEFAULT_DB
-                self.get_model()
                 self.index = SnapshotIndex(SNAPSHOTS_DIR, embedder=self.embedder)
                 # Extract per-object crops from the accumulated anomaly frames
                 # so search + review can see them. Safe to fail silently: the
@@ -209,8 +190,6 @@ _VISUAL_SEARCH = _VisualSearchState()
 # and ThreadingHTTPServer would happily start several in parallel on a
 # double-clicked button - exactly the CPU spike the round budget forbids.
 _DEEP_ANALYZE_LOCK = threading.Lock()
-# Single-flight for the private dashboard's report sends (fix 2026-08-09).
-_SEND_REPORT_LOCK = threading.Lock()
 
 # Review store - lazily constructed on the first labels endpoint hit. The
 # store is thread-safe (single lock around its dict + rewrite), so all
@@ -272,51 +251,6 @@ def _cloud_training_points() -> list[dict]:
     return points
 
 
-# fix 3: the VM publishes its heatmap grids (snapshots/heatmaps/<cam>.json)
-# next to the overlay JPEG; /api/heatmap renders any layer x daypart from
-# them when THIS machine has no local accumulation for the camera. Cached
-# per camera so flipping the strip's selectors doesn't hammer Storage.
-_VM_HEAT_CACHE: dict[str, tuple[float, dict]] = {}
-_VM_HEAT_TTL_S = 60.0
-
-
-def _vm_heat_state(cam: str) -> dict | None:
-    now = time.time()
-    hit = _VM_HEAT_CACHE.get(cam)
-    if hit and now - hit[0] < _VM_HEAT_TTL_S:
-        return hit[1]
-    try:
-        import json as _json
-        from app.pool_sync import _bucket_name, _http_get
-        bucket = _bucket_name()
-        if not bucket:
-            return hit[1] if hit else None
-        raw = _http_get(f"https://storage.googleapis.com/{bucket}"
-                        f"/snapshots/heatmaps/{cam}.json?t={int(now)}")
-        state = _json.loads(raw.decode("utf-8"))
-        _VM_HEAT_CACHE[cam] = (now, state)
-        return state
-    except Exception:
-        return hit[1] if hit else None
-
-
-def _grid_from_state(state: dict, layer: str, part: str | None):
-    """Requested grid out of a published state dict; dayparts summed when
-    `part` is None. Returns None when the state holds nothing usable."""
-    layer_grids = (state.get("layers") or {}).get(layer) or {}
-    if part:
-        g = layer_grids.get(part)
-        return [row[:] for row in g] if g else None
-    out = None
-    for g in layer_grids.values():
-        if out is None:
-            out = [[0.0] * len(g[0]) for _ in range(len(g))]
-        for y, row in enumerate(g):
-            for x, v in enumerate(row):
-                out[y][x] += v
-    return out
-
-
 def _review_store():
     global _REVIEW_STORE
     with _REVIEW_STORE_LOCK:
@@ -350,39 +284,10 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         sys.stdout.write("  " + (fmt % args) + "\n")
 
     def do_GET(self) -> None:
-        # Split-mode routing: physically serve DIFFERENT HTML per mode.
-        # Two source files (index_main.html + index_twin.html) each hold
-        # ONLY the panels applicable to that mode - the client never
-        # receives bytes for panels that don't apply. Query resolves to
-        # main by default (no ?mode= == main). See the "Dual-mode
-        # dashboard" comment near the top of src/web/app.js for the
-        # element split.
-        from urllib.parse import urlparse, parse_qs
-        _base = self.path.split("?")[0]
-        if _base in ("/", "/index.html"):
-            _q = parse_qs(urlparse(self.path).query)
-            _mode = (_q.get("mode") or ["main"])[0]
-            _resolved = "/index_twin.html" if _mode == "twin" else "/index_main.html"
-            # Preserve the query string on the rewritten path so app.js
-            # can still read URLSearchParams(location.search).get("mode")
-            _qs = urlparse(self.path).query
-            self.path = _resolved + ("?" + _qs if _qs else "")
-            super().do_GET()
-            return
         if self.path.startswith("/tvkur/"):
             self._proxy_tvkur()
             return
         path = self.path.split("?")[0]
-        if path == "/api/ping":
-            # Capability probe: only THIS private server answers it, so the
-            # frontend can tell "operator dashboard with a backend" from the
-            # hosted public copy without sniffing hostnames (which lied
-            # behind proxies). Gates the send-report field + live analysis.
-            self._send_json(200, {"ok": True, "private": True})
-            return
-        if path == "/api/analysis/frame":
-            self._analysis_frame()
-            return
         if path == "/api/review-sample":
             self._review_sample()
             return
@@ -419,50 +324,10 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/heatmap":
             self._heatmap()
             return
-        if path == "/api/lines":
-            self._get_line()
-            return
-        if path == "/api/crossings":
-            self._get_crossings()
-            return
-        if path == "/api/snapshots-list":
-            self._snapshots_list()
-            return
         super().do_GET()
-
-    def do_DELETE(self) -> None:
-        path = self.path.split("?")[0]
-        if path == "/api/snapshot":
-            self._snapshot_delete()
-            return
-        self.send_error(404, "unknown DELETE endpoint")
 
     def do_POST(self) -> None:
         path = self.path.split("?")[0]
-        # Proof-matrix helper (2026-08-13): the live-analysis proof matrix
-        # posts each captured canvas overlay here so the operator can
-        # inspect them offline. Body = raw PNG bytes. Query ?name= names
-        # the file under web/snapshots/proof/. Used only by the automated
-        # test loop; unlisted anywhere in the UI.
-        if path == "/api/proof":
-            from urllib.parse import parse_qs, urlparse
-            import re as _re
-            q = parse_qs(urlparse(self.path).query)
-            name = (q.get("name") or [""])[0]
-            if not _re.match(r"^[A-Za-z0-9_.\-]{1,80}$", name or ""):
-                self.send_error(400, "bad name"); return
-            try:
-                n = int(self.headers.get("Content-Length") or 0)
-            except ValueError:
-                n = 0
-            if n <= 0 or n > 12 * 1024 * 1024:
-                self.send_error(400, "empty or oversized body"); return
-            data = self.rfile.read(n)
-            d = WEB_DIR / "snapshots" / "proof"
-            d.mkdir(parents=True, exist_ok=True)
-            (d / name).write_bytes(data)
-            self._send_json(200, {"ok": True, "name": name, "bytes": len(data)})
-            return
         # /api/search is the current entry point (image + browse modes).
         # /api/visual-search is the compat alias for the legacy image-only
         # endpoint - the frontend and tools/search_by_image.py both used it
@@ -492,331 +357,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/deep-analyze":
             self._deep_analyze()
             return
-        if path == "/api/analysis/start":
-            self._analysis_start()
-            return
-        if path == "/api/analysis/stop":
-            self._analysis_stop()
-            return
-        if path == "/api/send-report":
-            self._send_report()
-            return
-        if path == "/api/lines":
-            self._save_line()
-            return
-        if path == "/api/lines/clear":
-            self._clear_line()
-            return
-        if path == "/api/snapshot":
-            self._snapshot_save()
-            return
         self.send_error(404, "unknown POST endpoint")
-
-    # ---- Operator snapshots (main-mode "📸 Snapshot grid" button) --------
-    # Client canvas-composites the 4 Analysis tiles into a single PNG and
-    # POSTs it as multipart form. We save under web/snapshots/user/ so the
-    # existing static file handler serves them at /snapshots/user/<name>.
-    # `?path=*` on DELETE = clear all. Empty on first use; the .gitkeep
-    # marker keeps the folder tracked without the PNGs.
-    _SNAPS_ROOT = WEB_DIR / "snapshots" / "user"
-    _SNAP_MAX_BYTES = 25 * 1024 * 1024   # sane per-file cap
-
-    def _snapshots_list(self) -> None:
-        d = self._SNAPS_ROOT
-        items = []
-        if d.is_dir():
-            for p in sorted(d.iterdir(),
-                            key=lambda x: x.stat().st_mtime, reverse=True):
-                if not p.is_file() or p.suffix.lower() not in (".png", ".jpg"):
-                    continue
-                if p.name.startswith("."):
-                    continue
-                try:
-                    st = p.stat()
-                except OSError:
-                    continue
-                items.append({"name": p.name,
-                              "path": p.name,
-                              "url": f"/snapshots/user/{p.name}",
-                              "bytes": st.st_size,
-                              "mtime": st.st_mtime})
-        body = json.dumps({"items": items}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _snapshot_save(self) -> None:
-        import cgi
-        n = int(self.headers.get("Content-Length") or 0)
-        if n <= 0 or n > self._SNAP_MAX_BYTES:
-            self.send_error(400, "missing or oversized body")
-            return
-        ctype = self.headers.get("Content-Type", "")
-        if not ctype.startswith("multipart/form-data"):
-            self.send_error(400, "expected multipart/form-data with a 'png' field")
-            return
-        try:
-            fs = cgi.FieldStorage(
-                fp=self.rfile, headers=self.headers,
-                environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": ctype})
-        except Exception as e:
-            self.send_error(400, f"multipart parse failed: {e}")
-            return
-        if "png" not in fs:
-            self.send_error(400, "no 'png' field in the form")
-            return
-        item = fs["png"]
-        data = item.file.read() if hasattr(item, "file") else item.value
-        if not data:
-            self.send_error(400, "empty png")
-            return
-        # timestamp filename: 20260812_224530.png (sortable, human-readable)
-        ts = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
-        # If the same second is claimed twice, append a counter.
-        d = self._SNAPS_ROOT
-        d.mkdir(parents=True, exist_ok=True)
-        name = f"{ts}.png"; i = 1
-        while (d / name).exists():
-            name = f"{ts}_{i}.png"; i += 1
-        (d / name).write_bytes(data)
-        body = json.dumps({"ok": True, "name": name, "path": name,
-                           "url": f"/snapshots/user/{name}",
-                           "bytes": len(data)}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _snapshot_delete(self) -> None:
-        from urllib.parse import urlparse, parse_qs
-        q = parse_qs(urlparse(self.path).query)
-        p = (q.get("path") or [""])[0].strip()
-        if not p:
-            self.send_error(400, "missing ?path=")
-            return
-        d = self._SNAPS_ROOT
-        removed = 0
-        if p == "*":
-            # Clear all
-            if d.is_dir():
-                for f in d.iterdir():
-                    if f.is_file() and f.suffix.lower() in (".png", ".jpg") \
-                            and not f.name.startswith("."):
-                        try: f.unlink(); removed += 1
-                        except OSError: pass
-        else:
-            # Single file - restrict to basename to prevent traversal
-            import re
-            if not re.match(r"^[A-Za-z0-9_.\-]{1,80}$", p):
-                self.send_error(400, "bad path")
-                return
-            target = d / p
-            try:
-                if target.is_file():
-                    target.unlink(); removed = 1
-            except OSError:
-                pass
-        body = json.dumps({"ok": True, "removed": removed}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    # ---- Line-crossing config + event log --------------------------------
-    # The Line layer in the dashboard lets the operator draw a virtual
-    # counting line on a snapshot; every crossing then produces a toast +
-    # a crop in the history strip. Three endpoints:
-    #   GET  /api/lines?cam=<id>       -> {"line": [[x,y],[x,y]] | null, "set_at": ...}
-    #   POST /api/lines?cam=<id>       body: {"line": [[x,y],[x,y]]}
-    #   POST /api/lines/clear?cam=<id> -> delete the override, back to cameras.py
-    #   GET  /api/crossings?cam=<id>&limit=20 -> newest-first events
-
-    def _q_cam(self):
-        """Extract the ?cam= query arg. Returns cam_id or None (and writes 400)."""
-        from urllib.parse import urlparse, parse_qs
-        q = parse_qs(urlparse(self.path).query)
-        cam = (q.get("cam") or [""])[0].strip()
-        if not cam:
-            self.send_error(400, "missing ?cam=")
-            return None
-        return cam
-
-    def _get_line(self) -> None:
-        cam = self._q_cam()
-        if cam is None:
-            return
-        # Route through resolve_line + resolve_line_classes so a malformed
-        # override on disk falls back to the CAMERAS catalog silently -
-        # the same rule the collector follows on the next round. Reading
-        # the JSON here without the validator would let a bad hand-edit
-        # paint a line the frontend believes in but the counter never uses.
-        from app.cameras import (LINE_ALLOWED_CLASSES, _lines_dir,
-                                 resolve_line, resolve_line_classes)
-        p = _lines_dir() / f"{cam}.json"
-        set_at = None
-        if p.exists():
-            try:
-                set_at = json.loads(p.read_text()).get("set_at")
-            except (OSError, ValueError):
-                set_at = None
-        line = resolve_line(cam)
-        classes = resolve_line_classes(cam)
-        body = json.dumps({"cam": cam, "line": line,
-                           "classes": classes,
-                           "allowed_classes": sorted(LINE_ALLOWED_CLASSES),
-                           "set_at": set_at,
-                           "user_override": p.exists()}).encode()
-        self.send_response(200); self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body))); self.end_headers()
-        self.wfile.write(body)
-
-    def _save_line(self) -> None:
-        cam = self._q_cam()
-        if cam is None:
-            return
-        n = int(self.headers.get("Content-Length") or 0)
-        if n <= 0 or n > 1024:
-            self.send_error(400, "empty or oversized body"); return
-        try:
-            data = json.loads(self.rfile.read(n).decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
-            self.send_error(400, "body must be JSON"); return
-        line = data.get("line")
-        classes = data.get("classes")
-        from app.cameras import save_line
-        try:
-            save_line(cam, line, classes=classes)
-        except ValueError as e:
-            self.send_error(400, str(e)); return
-        body = json.dumps({"ok": True, "cam": cam, "line": line,
-                           "classes": classes}).encode()
-        self.send_response(200); self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body))); self.end_headers()
-        self.wfile.write(body)
-
-    def _clear_line(self) -> None:
-        cam = self._q_cam()
-        if cam is None:
-            return
-        from app.cameras import clear_line
-        removed = clear_line(cam)
-        body = json.dumps({"ok": True, "cam": cam, "removed": removed}).encode()
-        self.send_response(200); self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body))); self.end_headers()
-        self.wfile.write(body)
-
-    def _get_crossings(self) -> None:
-        cam = self._q_cam()
-        if cam is None:
-            return
-        from urllib.parse import urlparse, parse_qs
-        q = parse_qs(urlparse(self.path).query)
-        limit = 20
-        try:
-            limit = max(1, min(200, int((q.get("limit") or ["20"])[0])))
-        except ValueError:
-            pass
-        from app.live_analysis import read_crossing_events
-        events = read_crossing_events(cam, limit=limit)
-        body = json.dumps({"cam": cam, "events": events}).encode()
-        self.send_response(200); self.send_header("Content-Type", "application/json")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(body))); self.end_headers()
-        self.wfile.write(body)
-
-    def _send_report(self) -> None:
-        """POST /api/send-report?to=<email>[&window_hours=12]
-
-        The PRIVATE dashboard's send button (2026-08-09): composes the
-        situation report from the live cloud data and mails it FROM the
-        project mailbox to the given address, CC the project mailbox so
-        the archive stays complete. This endpoint exists only on the
-        operator-controlled server - the PUBLIC dashboard's button goes
-        through the send-report GitHub workflow, where GitHub login gates
-        abuse. Credentials resolve from data/mailer.env, falling back to
-        /etc/turkey-footfall/digest.env (the VM). One send at a time with
-        a 60s cooldown."""
-        import re
-        import subprocess
-        import sys as _sys
-        from urllib.parse import parse_qs, urlparse
-        q = parse_qs(urlparse(self.path).query)
-        to = (q.get("to") or [""])[0].strip()
-        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", to):
-            self._send_json(400, {"error": "invalid destination email"})
-            return
-        try:
-            hours = max(1, min(24, int((q.get("window_hours") or ["12"])[0])))
-        except ValueError:
-            hours = 12
-
-        creds: dict[str, str] = {}
-        for env_path in (Path(__file__).resolve().parent.parent
-                         / "data" / "mailer.env",
-                         Path("/etc/turkey-footfall/digest.env")):
-            try:
-                for line in env_path.read_text().splitlines():
-                    k, _, v = line.strip().partition("=")
-                    if k and v and k not in creds:
-                        creds[k] = v
-                if creds.get("GMAIL_USER"):
-                    break
-            except OSError:
-                continue
-        if not creds.get("GMAIL_USER") or not creds.get("GMAIL_APP_PASSWORD"):
-            self._send_json(503, {"error": "no mail credential - create "
-                                           "data/mailer.env with GMAIL_USER "
-                                           "+ GMAIL_APP_PASSWORD"})
-            return
-        from app.training_sync import find_service_account
-        sa = find_service_account()
-        if not sa:
-            self._send_json(503, {"error": "no Firebase service-account key "
-                                           "on this machine"})
-            return
-
-        now = time.time()
-        if now - getattr(self.__class__, "_last_report_send", 0.0) < 60.0:
-            self._send_json(429, {"error": "a report was sent less than a "
-                                           "minute ago - try again shortly"})
-            return
-        if not _SEND_REPORT_LOCK.acquire(blocking=False):
-            self._send_json(409, {"error": "a send is already running"})
-            return
-        try:
-            self.__class__._last_report_send = now
-            archive = creds["GMAIL_USER"]
-            env = dict(os.environ,
-                       FIREBASE_CREDENTIALS=sa,
-                       GMAIL_USER=creds["GMAIL_USER"],
-                       GMAIL_APP_PASSWORD=creds["GMAIL_APP_PASSWORD"],
-                       DIGEST_TO=(to if to == archive
-                                  else f"{to},{archive}"))
-            proc = subprocess.run(
-                [_sys.executable, "-m", "tools.daily_digest",
-                 "--window-hours", str(hours)],
-                cwd=str(Path(__file__).resolve().parent.parent),
-                env=env, capture_output=True, text=True, timeout=300)
-            sent_line = next((l for l in (proc.stdout or "").splitlines()
-                              if "digest sent" in l), "")
-            if proc.returncode == 0 and sent_line:
-                print(f"  report sent to {to} ({sent_line.strip()})")
-                self._send_json(200, {"ok": True, "to": to,
-                                      "detail": sent_line.strip()})
-            else:
-                tail = ((proc.stderr or "") + (proc.stdout or ""))[-400:]
-                self._send_json(502, {"error": f"send failed: {tail}"})
-        except subprocess.TimeoutExpired:
-            self._send_json(504, {"error": "report composition timed out"})
-        except Exception as e:
-            self._send_json(502, {"error": f"{type(e).__name__}: {e}"})
-        finally:
-            _SEND_REPORT_LOCK.release()
 
     def _send_json(self, status: int, payload: dict) -> None:
         body = json.dumps(payload).encode("utf-8")
@@ -870,23 +411,11 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if part is not None and part not in hm.DAYPARTS:
             self._send_json(400, {"error": f"part must be one of {hm.DAYPARTS}"})
             return
-        # Local accumulation first (a collector/notebook run on THIS
-        # machine); empty -> the state the VM publishes next to its
-        # overlay (fix 3), so the operator sees the cloud's depth.
-        grid = hm.grid_for(cam, layer=layer, daypart=part)
-        source = "local"
-        if not any(v for row in grid for v in row):
-            state = _vm_heat_state(cam)
-            vm_grid = _grid_from_state(state, layer, part) if state else None
-            if vm_grid:
-                grid = vm_grid
-                source = "vm"
         if _one("format") == "json":
             payload = hm.stats(cam)
             payload["layer"] = layer
             payload["part"] = part
-            payload["source"] = source
-            payload["grid"] = grid
+            payload["grid"] = hm.grid_for(cam, layer=layer, daypart=part)
             self._send_json(200, payload)
             return
         base = None
@@ -902,7 +431,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                     base = None
         try:
             import cv2
-            img = hm.overlay(grid, base_frame=base)
+            img = hm.render(cam, base_frame=base, layer=layer, daypart=part)
             okj, buf = cv2.imencode(".jpg", img,
                                     [cv2.IMWRITE_JPEG_QUALITY, 85])
             if not okj:
@@ -944,8 +473,8 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         want_faces = _one("faces", int, 0, 0, 1) == 1
         lock = (q.get("lock") or [None])[0] or None
 
-        model = _VISUAL_SEARCH.get_model()
-        if model is None:
+        state = _VISUAL_SEARCH.get()
+        if state.model is None:
             self._send_json(503, {"error": "no detection model loaded "
                                            "(SEARCH_YOLO=off?)"})
             return
@@ -955,16 +484,10 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             return
         try:
             from app.behavior import analyze_window
-            from app.live_analysis import INFER_LOCK
-            # INFER_LOCK: the live-analysis sessions share this exact model
-            # object; ultralytics predict is not thread-safe, so the deep
-            # window holds the same lock (live tiles pause for its ~10-20s
-            # and resume - visible as a longer gap, never a crash).
-            with INFER_LOCK:
-                result = analyze_window(cam, model, n_frames=n_frames,
-                                        stride=stride, imgsz=imgsz,
-                                        pose=pose, lock=lock,
-                                        want_faces=want_faces)
+            result = analyze_window(cam, state.model, n_frames=n_frames,
+                                    stride=stride, imgsz=imgsz,
+                                    pose=pose, lock=lock,
+                                    want_faces=want_faces)
             self._send_json(200, result)
         except ValueError as e:
             self._send_json(404, {"error": str(e)})
@@ -972,106 +495,6 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json(502, {"error": f"{type(e).__name__}: {e}"})
         finally:
             _DEEP_ANALYZE_LOCK.release()
-
-    # -- fix 2: live advanced analysis (app/live_analysis.py) --------------
-
-    def _analysis_start(self) -> None:
-        """POST /api/analysis/start?cam=<id>&layer=<layer>
-
-        Starts a live-analysis session on ONE camera (registry id or a
-        local-picker slot id), or switches the layer of a running session
-        in place - stream, tracker and accumulators survive the switch.
-        At most live_analysis.MAX_SESSIONS run concurrently (409 beyond).
-        """
-        from urllib.parse import parse_qs, urlparse
-        q = parse_qs(urlparse(self.path).query)
-        cam = (q.get("cam") or [""])[0]
-        layer = (q.get("layer") or [""])[0]
-        if not cam or not layer:
-            self._send_json(400, {"error": "need ?cam= and ?layer="})
-            return
-        model = _VISUAL_SEARCH.get_model()
-        if model is None:
-            self._send_json(503, {"error": "no detection model loaded "
-                                           "(SEARCH_YOLO=off?)"})
-            return
-        from app.live_analysis import MANAGER, BusyError
-        try:
-            info = MANAGER.start(cam, layer, model)
-            self._send_json(200, {"ok": True, **info})
-        except BusyError as e:
-            self._send_json(409, {"error": str(e)})
-        except ValueError as e:
-            self._send_json(404, {"error": str(e)})
-        except Exception as e:
-            self._send_json(502, {"error": f"{type(e).__name__}: {e}"})
-
-    def _analysis_frame(self) -> None:
-        """GET /api/analysis/frame?cam=<id>
-
-        Latest analyzed JPEG of the session (200 image/jpeg with X-Seq /
-        X-Layer / X-Note headers), 202 JSON while the first frame is
-        still being produced, 410 JSON when the session died with a
-        reported reason (so the operator sees WHY, not a bare 404), and
-        404 when no session ever ran for this camera. Polling this keeps
-        the session's idle clock alive.
-        """
-        from urllib.parse import parse_qs, urlparse
-        q = parse_qs(urlparse(self.path).query)
-        cam = (q.get("cam") or [""])[0]
-        from app.live_analysis import MANAGER
-        fr = MANAGER.frame(cam) if cam else None
-        if fr is None:
-            self._send_json(404, {"error": "no live analysis for this "
-                                           "camera"})
-            return
-        if fr.get("error"):
-            # Session crashed / ended - report the reason once so the UI
-            # can distinguish a fatal analysis error from "never started".
-            self._send_json(410, {"error": fr["error"], "ended": True})
-            return
-        if not fr["jpeg"]:
-            self._send_json(202, {"ok": True, "pending": True,
-                                  "note": fr["note"] or "starting..."})
-            return
-        body = fr["jpeg"]
-        self.send_response(200)
-        self.send_header("Content-Type", "image/jpeg")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Seq", str(fr["seq"]))
-        self.send_header("X-Layer", fr["layer"])
-        # Canvas-overlay metadata: base64 JSON of the tick's raw detection
-        # data. Frontend decodes this to paint boxes/skeleton/heatmap over
-        # the still-playing <video>, so operator sees smooth video PLUS
-        # annotations at ~1 fps instead of a frozen JPEG replacing video.
-        # ACCESS: browsers HIDE non-standard response headers from JS by
-        # default; we expose them explicitly so fetch().headers.get() sees
-        # X-Analysis-Meta / X-Seq / X-Layer / X-Note.
-        meta_b = fr.get("meta_json") or b""
-        if meta_b:
-            import base64 as _b64
-            self.send_header("X-Analysis-Meta",
-                             _b64.b64encode(meta_b).decode("ascii"))
-        self.send_header("Access-Control-Expose-Headers",
-                         "X-Seq, X-Layer, X-Note, X-Analysis-Meta")
-        note = (fr["note"] or "").encode("ascii", "replace").decode("ascii")
-        if note:
-            self.send_header("X-Note", note)
-        self.end_headers()
-        try:
-            self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
-            pass  # poller gave up mid-frame - the next poll catches up
-
-    def _analysis_stop(self) -> None:
-        """POST /api/analysis/stop?cam=<id> - back to plain video."""
-        from urllib.parse import parse_qs, urlparse
-        q = parse_qs(urlparse(self.path).query)
-        cam = (q.get("cam") or [""])[0]
-        from app.live_analysis import MANAGER
-        stopped = MANAGER.stop(cam) if cam else False
-        self._send_json(200, {"ok": True, "stopped": stopped})
 
     def _visual_search(self) -> None:
         """POST /api/search  (or /api/visual-search - the legacy alias).
@@ -1303,14 +726,10 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
     def _review_stats(self) -> None:
         try:
-            from urllib.parse import parse_qs, urlparse
-            q = parse_qs(urlparse(self.path).query)
-            cams_csv = (q.get("cams") or [""])[0]
-            cam_ids = [c.strip() for c in cams_csv.split(",") if c.strip()] or None
             summary = _review_store().summary()
             try:
                 from app.confidence_boost import summary as _cb_summary
-                summary["boost"] = _cb_summary(cam_ids=cam_ids)
+                summary["boost"] = _cb_summary()
             except Exception as ex:
                 summary["boost"] = {"error": f"{type(ex).__name__}"}
             self._send_json(200, summary)
@@ -1624,47 +1043,29 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
 
         Powers the dashboard's "Learning proof" panel so the user can
         watch each verdict move the effective confidence for that camera.
-
-        ?cams=csv (2026-08-13 generalization): filter rows to the
-        operator's picked cams. See _model_metrics for the full rationale.
         """
         try:
-            from urllib.parse import parse_qs, urlparse
             from app.confidence_boost import details
-            q = parse_qs(urlparse(self.path).query)
-            cams_csv = (q.get("cams") or [""])[0]
-            cam_ids = [c.strip() for c in cams_csv.split(",") if c.strip()] or None
-            self._send_json(200, details(cam_ids=cam_ids))
+            self._send_json(200, details())
         except Exception as e:
             self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
 
     def _model_metrics(self) -> None:
         """Scoreboard endpoint driving the header line. Cheap - it just
         walks the in-memory review store and does arithmetic. Safe to poll
-        every 10s from the browser.
-
-        ?cams=csv (2026-08-13 generalization): main dashboard sends its
-        picked cam_ids so the header line + F1/Recall/Precision reflect
-        only the operator's own cameras, not the 25+ Turkey cams the
-        shared review store accumulated. Twin + tools omit the param and
-        keep the full-store aggregate view."""
+        every 10s from the browser."""
         try:
-            from urllib.parse import parse_qs, urlparse
             from app.model_metrics import compute, header_line, learning_curve
-            q = parse_qs(urlparse(self.path).query)
-            cams_csv = (q.get("cams") or [""])[0]
-            cam_ids = [c.strip() for c in cams_csv.split(",") if c.strip()] or None
-            metrics = compute(_review_store(), cam_ids=cam_ids)
+            metrics = compute(_review_store())
             try:
                 from app.confidence_boost import summary as _cb_summary
-                boost = _cb_summary(cam_ids=cam_ids)
+                boost = _cb_summary()
             except Exception:
                 boost = None
             metrics["header_line"] = header_line(metrics, boost)
             # Batch-by-batch mistake trend - the "is it actually getting
             # better?" chart the operator asked for.
-            metrics["curve"] = learning_curve(_review_store(), cam_ids=cam_ids)
-            metrics["cams_filter"] = cam_ids or []
+            metrics["curve"] = learning_curve(_review_store())
             self._send_json(200, metrics)
         except Exception as e:
             self._send_json(500, {"error": f"{type(e).__name__}: {e}"})

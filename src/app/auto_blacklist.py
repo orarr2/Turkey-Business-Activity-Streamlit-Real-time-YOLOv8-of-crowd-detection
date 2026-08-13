@@ -62,17 +62,6 @@ GRID_COLS = 5
 _CAM_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _CLS_ALLOWED = {"person", "bicycle", "car", "motorcycle",
                 "bus", "train", "truck"}
-# Classes the AUTOMATIC learner (learn_from_positions) may never touch.
-# Its core premise - "fires in >=80% of samples at one spot => stationary
-# background structure" - is FALSE for people on a busy plaza: the near
-# strip of Taksim legitimately has a person in almost every sample, and on
-# 2026-08-06 the learner blacklisted three person cells there (x 0.0-0.62
-# of the bottom strip), silently halving the square's people counts the
-# day after the detector upgrade made those cells fire consistently.
-# Structures that YOLO mislabels are vehicle-shaped classes; person stays
-# operator-only (the review-driven path still accepts it - a human can
-# rightly blacklist a statue).
-_AUTO_LEARN_SKIP = {"person"}
 
 # Bounding-box parser for crop paths that carry the source box in the
 # filename. The anomaly-crop pipeline names files
@@ -349,8 +338,7 @@ def learn_from_positions(review_frames_root: str | Path,
         for b in (meta.get("boxes") or []):
             cls = b.get("cls"); conf = float(b.get("conf") or 0.0)
             box = b.get("box") or []
-            if (cls not in _CLS_ALLOWED or cls in _AUTO_LEARN_SKIP
-                    or conf < min_cls_conf or len(box) < 4):
+            if cls not in _CLS_ALLOWED or conf < min_cls_conf or len(box) < 4:
                 continue
             x_center = (box[0] + box[2]) / 2.0 / w
             # Foot-point y (same convention as the runtime ROI filter): use the

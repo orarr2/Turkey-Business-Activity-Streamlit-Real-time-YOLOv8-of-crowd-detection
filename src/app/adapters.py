@@ -1,12 +1,11 @@
 """Per-camera-fleet Detect-head "adapters": save, promote, overlay, hot-load.
 
-The active-learning loop (see the "Active-learning loop" chapter of
-src/docs/PROJECT_GUIDE.md, or PROJECT_GUIDE_HE.md in Hebrew) fine-tunes
-ONLY the Detect head of the production base model (yolov8n, the VM's
-pinned weights) on operator-reviewed frames - the D2 replacement for LoRA:
-the backbone stays frozen, so the artifact is just the head's tensors
-(~4-6 MB) and loading is "load base, overlay head". No adapter file
-present means the base model runs untouched - bit-identical behavior (D6).
+The active-learning loop (src/plan, WS3) fine-tunes ONLY the Detect head of
+the production base model (yolov8n, the VM's pinned weights) on
+operator-reviewed frames - the D2 replacement for LoRA: the
+backbone stays frozen, so the artifact is just the head's tensors (~4-6 MB)
+and loading is "load base, overlay head". No adapter file present means the
+base model runs untouched - bit-identical behavior (D6).
 
 Filesystem contract (data/adapters/):
   head_YYYYMMDD_HHMMSS.pt   trained head state dicts (full retention - D9)

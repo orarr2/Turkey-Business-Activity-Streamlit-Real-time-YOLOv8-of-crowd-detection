@@ -34,6 +34,9 @@ import os
 # Weights for the pose pass. Any ultralytics *-pose checkpoint works; nano
 # matches the collector's detection tier and auto-downloads on first use.
 POSE_WEIGHTS_DEFAULT = "yolov8n-pose.pt"
+# A skeleton claims a detector person box only above this IoU - below it
+# the two models are looking at different people.
+POSE_MATCH_IOU = 0.50
 # Pose-pass confidence floor. Deliberately permissive: a pose-person that
 # fails to match any detection is dropped anyway, so a loose gate here
 # only costs a few wasted matches, while a tight one loses skeletons for
@@ -89,61 +92,70 @@ def load_pose_model(weights: str | None = None):
     return _model
 
 
-def attach_keypoints_crops(model, frame, boxes: list[dict],
-                           imgsz: int = 256, pad_frac: float = 0.25,
-                           min_box_h: int = 40,
-                           conf: float = POSE_CONF) -> int:
-    """Top-down pose: one pass PER PERSON CROP instead of one full-frame
-    pass. Attaches `"kps"` (frame coordinates) in place; returns matches.
+def _iou(a: dict, b: dict) -> float:
+    """IoU of two {"x1","y1","x2","y2"} dicts. Local copy so this module
+    (and its tests) never import cv2/numpy through detect_core."""
+    ix1, iy1 = max(a["x1"], b["x1"]), max(a["y1"], b["y1"])
+    ix2, iy2 = min(a["x2"], b["x2"]), min(a["y2"], b["y2"])
+    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    area_a = max(0.0, a["x2"] - a["x1"]) * max(0.0, a["y2"] - a["y1"])
+    area_b = max(0.0, b["x2"] - b["x1"]) * max(0.0, b["y2"] - b["y1"])
+    denom = area_a + area_b - inter
+    return inter / denom if denom > 0 else 0.0
 
-    Why: on a street cam a pedestrian is 30-120 px tall; a full-frame pose
-    pass at 640 hands the model ~15 px of person and finds nothing, so
-    gestures/fall/crouch got no input at all on exactly the scenes they
-    exist for. Cropping each detector box (padded 25%) and letting the
-    pose model see it at `imgsz` multiplies the effective resolution per
-    person by 5-15x. The detector stays the source of truth for WHO
-    exists: only its `person` boxes are cropped, and the best pose-person
-    inside each crop claims that box - there is nothing else it could be.
-    Boxes shorter than `min_box_h` px are skipped - below that even a
-    dedicated crop holds no limbs, only upscaling artifacts.
 
-    Cost: one small inference per person, batched into a single
-    model.predict call. Deep-window-only economics, same as the full-frame
-    variant it replaces there.
-    """
-    persons = [b for b in boxes
-               if b.get("cls") == "person"
-               and (b["y2"] - b["y1"]) >= min_box_h]
+def match_poses(person_boxes: list[dict], pose_dets: list[dict],
+                min_iou: float = POSE_MATCH_IOU) -> list[tuple[int, int]]:
+    """Greedy best-IoU pairing of detector person boxes with pose-model
+    person boxes. Returns (person_idx, pose_idx) pairs; each side is used
+    at most once. Pure python - unit-tested without any model."""
+    cands: list[tuple[float, int, int]] = []
+    for pi, pb in enumerate(person_boxes):
+        for qi, qb in enumerate(pose_dets):
+            iou = _iou(pb, qb)
+            if iou >= min_iou:
+                cands.append((iou, pi, qi))
+    cands.sort(reverse=True)
+    used_p: set[int] = set()
+    used_q: set[int] = set()
+    pairs: list[tuple[int, int]] = []
+    for iou, pi, qi in cands:
+        if pi in used_p or qi in used_q:
+            continue
+        used_p.add(pi)
+        used_q.add(qi)
+        pairs.append((pi, qi))
+    return pairs
+
+
+def attach_keypoints(model, frame, boxes: list[dict],
+                     imgsz: int = 640, conf: float = POSE_CONF) -> int:
+    """Run the pose pass on `frame` and attach `"kps"` to every matched
+    `person` box IN PLACE. Returns how many boxes gained a skeleton.
+
+    One inference per call; skipped entirely when the frame holds no
+    person detections (the common night-street case)."""
+    persons = [b for b in boxes if b.get("cls") == "person"]
     if not persons:
         return 0
-    H, W = frame.shape[:2]
-    crops, offsets = [], []
-    for b in persons:
-        bw, bh = b["x2"] - b["x1"], b["y2"] - b["y1"]
-        px, py = bw * pad_frac, bh * pad_frac
-        x1 = max(0, int(b["x1"] - px)); y1 = max(0, int(b["y1"] - py))
-        x2 = min(W, int(b["x2"] + px)); y2 = min(H, int(b["y2"] + py))
-        if x2 - x1 < 8 or y2 - y1 < 8:
-            continue
-        crops.append(frame[y1:y2, x1:x2])
-        offsets.append((b, x1, y1))
-    if not crops:
+    res = model.predict(frame, imgsz=imgsz, conf=conf, verbose=False)[0]
+    if res.boxes is None or res.keypoints is None or len(res.boxes) == 0:
         return 0
-    results = model.predict(crops, imgsz=imgsz, conf=conf, verbose=False)
-    matched = 0
-    for (b, ox, oy), res in zip(offsets, results):
-        if res.boxes is None or res.keypoints is None or len(res.boxes) == 0:
-            continue
-        # The crop is one person's neighborhood; take the pose-person with
-        # the highest box confidence (bystanders clipped at the crop edge
-        # score lower and lose).
-        confs = [float(c) for c in res.boxes.conf.tolist()]
-        qi = max(range(len(confs)), key=confs.__getitem__)
-        kps = res.keypoints.data.tolist()[qi]
-        b["kps"] = [[round(x + ox, 1), round(y + oy, 1), round(c, 3)]
-                    for x, y, c in kps]
-        matched += 1
-    return matched
+    pose_dets: list[dict] = []
+    for bb, kps in zip(res.boxes, res.keypoints.data.tolist()):
+        x1, y1, x2, y2 = (float(v) for v in bb.xyxy[0].tolist())
+        pose_dets.append({
+            "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+            "kps": [[round(x, 1), round(y, 1), round(c, 3)]
+                    for x, y, c in kps],
+        })
+    pairs = match_poses(persons, pose_dets)
+    for pi, qi in pairs:
+        persons[pi]["kps"] = pose_dets[qi]["kps"]
+    return len(pairs)
 
 
 def draw_skeleton(img, boxes: list[dict], min_conf: float = KP_MIN_CONF):

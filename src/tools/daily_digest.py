@@ -3,11 +3,9 @@
     python -m tools.daily_digest --dry-run      # compose + print, no send
     python -m tools.daily_digest                # compose + send via Gmail
 
-Runs ON DEMAND only (the twice-daily timer was cancelled 2026-08-09):
-`sudo systemctl start digest.service` on the VM, or any trigger path that
-invokes this module. Mail is sent FROM the project mailbox configured in
-/etc/turkey-footfall/digest.env; DIGEST_TO defaults there to the same
-mailbox, which doubles as the report archive.
+Runs on the VM from a systemd timer (deploy/gcp-vm/digest.timer, 12:00 and
+20:00 Asia/Jerusalem) - the operator's PC plays no part. Gmail's phone app
+turns the mail into the push notification the operator asked for.
 
 Sections (all sourced from what the collector already writes):
   * scene events from Firestore `events`, aggregated per (kind, camera)
@@ -61,16 +59,7 @@ KIND_LABELS = {
     "loiter":            "Loitering",
     "returning":         "Returning visitor",
     "static_departed":   "Static object left",
-    "unattended_object": "Unattended object",
-    "crowd_rush":        "Crowd rush",
 }
-
-# The seven-class business set + the aggregate; anything else in a sample's
-# counts dict is an EXTRA_CLASSES addition (birds, bags, umbrellas...) and
-# gets its own compact "other objects" line under the peaks table (fix1-A5)
-# - without it the extras are counted but invisible in the report.
-_BASE_COUNT_KEYS = {"person", "bicycle", "car", "motorcycle", "bus",
-                    "train", "truck", "vehicles"}
 
 
 def _israel_now() -> dt.datetime:
@@ -124,9 +113,7 @@ def footfall_stats(records: list[dict]) -> list[dict]:
                                   "samples": 0, "misses": 0,
                                   "peak_person": 0, "peak_person_ts": "",
                                   "peak_vehicles": 0, "typ_kmh": 0.0,
-                                  "extra_peaks": {},
-                                  "cross_in": 0, "cross_out": 0,
-                                  "has_line": False, "_spd": []})
+                                  "_spd": []})
         p = r.get("person")
         v = r.get("vehicles")
         # A "sample" is a round that actually produced usable frames. A MISS
@@ -145,33 +132,12 @@ def footfall_stats(records: list[dict]) -> list[dict]:
             c["peak_person_ts"] = str(r.get("ts") or "")
         if isinstance(v, (int, float)) and v > c["peak_vehicles"]:
             c["peak_vehicles"] = int(v)
-        for cls, n in (r.get("counts") or {}).items():
-            if (cls not in _BASE_COUNT_KEYS
-                    and isinstance(n, (int, float)) and n > 0
-                    and n > c["extra_peaks"].get(cls, 0)):
-                c["extra_peaks"][cls] = int(n)
-        # fix1-A10: per-window flow totals for cameras with a counting line.
-        cr = r.get("crossings")
-        if isinstance(cr, dict):
-            c["has_line"] = True
-            c["cross_in"] += int(cr.get("in") or 0)
-            c["cross_out"] += int(cr.get("out") or 0)
         spd = (r.get("speeds") or {}).get("median_kmh")
         if isinstance(spd, (int, float)) and spd > 0:
             c["_spd"].append(float(spd))
-    # Typical-speed honesty gate (2026-08-08): a pedestrian square produces a
-    # handful of garbage speed pairs a day (two far-off or misclassified
-    # "vehicles" fused across burst frames), and their median printed as
-    # "~40 km/h typical" on Beyazit's plaza. Measured on live 12h windows:
-    # a real road carries speeds on 15-40% of its samples (Sarachane 419/1058,
-    # Taksim 156/1060), noise cams carry 3-4% (Beyazit 42/1059, Sultanahmet
-    # 36/1036). Show the stat only when >= 10% of the camera's good samples
-    # (and >= 5 absolute) produced a speed; otherwise render "-".
     for c in cams.values():
         spds = sorted(c.pop("_spd"))
-        enough = (len(spds) >= 5
-                  and len(spds) >= 0.10 * max(1, c["samples"]))
-        c["typ_kmh"] = spds[len(spds) // 2] if (spds and enough) else 0.0
+        c["typ_kmh"] = spds[len(spds) // 2] if spds else 0.0
     return sorted(cams.values(), key=lambda c: c["peak_person"], reverse=True)
 
 
@@ -211,26 +177,6 @@ def _save_last_report(state: dict) -> None:
         print(f"digest: could not persist last-report state: {e}")
 
 
-def _parse_any_ts(s) -> dt.datetime | None:
-    try:
-        return dt.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
-    except (ValueError, TypeError):
-        return None
-
-
-def _op_ats_after(reviews: dict, sent_at) -> list[dt.datetime]:
-    """Operator-attributed review timestamps newer than the last report."""
-    cut = _parse_any_ts(sent_at)
-    out = []
-    for a in reviews.get("op_reviewed_ats") or []:
-        t = _parse_any_ts(a)
-        if t is None:
-            continue
-        if cut is None or t > cut:
-            out.append(t)
-    return out
-
-
 def _training_lines(training: dict | None,
                     reviews: dict | None,
                     prev: dict | None = None) -> list[str]:
@@ -240,20 +186,11 @@ def _training_lines(training: dict | None,
     with no new labels still read 'you have labeled 36 frames' - misleading
     progress signal. We now stash the last snapshot on disk and describe
     what moved. First-ever run prints the current totals as the baseline.
-
-    Two honesty rules (2026-08-08, after the midday report credited the
-    operator with 60 frames a script bulk-wrote in 3 minutes):
-      * frames carrying source == "auto" are reported as their own line
-        ("auto-labeled ... after approval"), never as "you labeled";
-      * an operator-attributed delta that arrived machine-fast (>= 10 frames
-        at under ~6s/frame) is called out as an unmarked bulk import
-        instead of being credited to the operator.
     """
     lines: list[str] = []
     r = reviews or {}
     prev = prev or {}
     cur_frames = r.get("frames_labeled", 0)
-    cur_auto = r.get("frames_auto", 0)
     cur_conf = r.get("boxes_confirmed", 0)
     cur_rej = r.get("boxes_rejected", 0)
     cur_miss = r.get("missed_marked", 0)
@@ -267,41 +204,20 @@ def _training_lines(training: dict | None,
         else:
             lines.append("No frames labeled yet - open the Reinforcement "
                          "Learning tab in the dashboard and start tagging.")
-        if cur_auto:
-            lines.append(f"Also on file: {cur_auto} auto-labeled frame(s) "
-                         f"(approved model-assisted batches).")
     else:
         d_frames = cur_frames - prev.get("frames_labeled", 0)
-        d_auto = cur_auto - prev.get("frames_auto", 0)
         d_conf = cur_conf - prev.get("boxes_confirmed", 0)
         d_rej = cur_rej - prev.get("boxes_rejected", 0)
         d_miss = cur_miss - prev.get("missed_marked", 0)
-        bulk_note = None
-        if d_frames >= 10:
-            ats = _op_ats_after(r, prev.get("sent_at"))
-            if len(ats) >= 10:
-                span = (max(ats) - min(ats)).total_seconds()
-                if span < len(ats) * 6.0:
-                    bulk_note = (
-                        f"{len(ats)} frame review(s) appeared machine-fast "
-                        f"({span/60:.0f} min for {len(ats)} frames) from an "
-                        f"unmarked process - NOT counted as your labeling. "
-                        f"Bulk labeling must go through the approval flow.")
-        if bulk_note:
-            lines.append(bulk_note)
-        elif d_frames > 0 or d_conf > 0 or d_rej > 0 or d_miss > 0:
+        if d_frames > 0 or d_conf > 0 or d_rej > 0 or d_miss > 0:
             lines.append(f"Since the last report you labeled {d_frames} new "
                          f"frame(s) (+{d_conf} confirmed, +{d_rej} rejected, "
                          f"+{d_miss} objects added). Running total: "
                          f"{cur_frames} frames.")
-        elif d_auto <= 0:
+        else:
             lines.append(f"No new labels since the last report - "
                          f"{cur_frames} frames on file. The trainer needs "
                          f"more diverse examples before the next promotion.")
-        if d_auto > 0:
-            lines.append(f"{d_auto} auto-labeled frame(s) added after "
-                         f"operator approval. Auto-labeled total: "
-                         f"{cur_auto} frames.")
 
     prev_train = prev.get("last_training") if prev else None
     if training and training != prev_train:
@@ -395,7 +311,6 @@ def compose_digest(now_il: dt.datetime, window_hours: int,
                    grid: dict | None = None,
                    dominant: str | None = None,
                    prev: dict | None = None,
-                   no_data: bool = False,
                    ) -> tuple[str, str, str]:
     """Returns (subject, plain_text, html). English throughout, phone-first.
     `grid` is config/grid - the collector's CURRENT country; `dominant` is
@@ -404,14 +319,8 @@ def compose_digest(now_il: dt.datetime, window_hours: int,
     the data majority and mention the current grid as a footnote."""
     part = "Midday report" if now_il.hour < 16 else "Evening report"
     grid_label = _country_label(grid)
-    # no_data (2026-07-31): not one ok-sample in the whole window - the
-    # digest must not masquerade as whatever country the ladder happened
-    # to be PROBING when it fired (the 31.07 midday report titled itself
-    # "Japan" after an all-miss night). Say what actually happened.
     label = (_COUNTRY_LABELS.get(dominant, dominant.title())
              if dominant else grid_label)
-    if no_data:
-        label = f"No live data ({grid_label} grid)" if grid_label else "No live data"
     subject = f"{label} - {part} {now_il.strftime('%d.%m')}"
 
     lines: list[str] = [f"{part} - last {window_hours} hours", ""]
@@ -514,45 +423,24 @@ def compose_digest(now_il: dt.datetime, window_hours: int,
         html.append(f"<h3 style='margin:14px 0 6px'>{title}</h3>")
         html.append("<table cellpadding='4' style='border-collapse:collapse'>"
                     "<tr><th align='left'>Camera</th><th>Peak people</th>"
-                    "<th>Peak vehicles</th><th>Typical traffic</th>"
-                    "<th>Crossings in/out</th></tr>")
+                    "<th>Peak vehicles</th><th>Typical traffic</th></tr>")
         for c in rows:
             when = f" at {_fmt_ts(c['peak_person_ts'])}" if c["peak_person_ts"] else ""
             spd = (f"~{c['typ_kmh']:.0f} km/h typical"
                    if c["typ_kmh"] > 0 else "-")
-            cross = (f"{c.get('cross_in', 0)} / {c.get('cross_out', 0)}"
-                     if c.get("has_line") else "-")
             lines.append(f"  - {c['cam']}: up to {c['peak_person']} people{when}, "
-                         f"up to {c['peak_vehicles']} vehicles, {spd}"
-                         + (f", crossings in/out {cross}"
-                            if c.get("has_line") else ""))
+                         f"up to {c['peak_vehicles']} vehicles, {spd}")
             html.append(f"<tr><td>{c['cam']}</td>"
                         f"<td align='center'>{c['peak_person']}{when}</td>"
                         f"<td align='center'>{c['peak_vehicles']}</td>"
-                        f"<td align='center'>{spd}</td>"
-                        f"<td align='center'>{cross}</td></tr>")
+                        f"<td align='center'>{spd}</td></tr>")
         html.append("</table>")
-
-    def _extras_note(rows):
-        parts = []
-        for c in rows:
-            ep = c.get("extra_peaks") or {}
-            if ep:
-                inner = ", ".join(f"{cls} {n}" for cls, n in
-                                  sorted(ep.items(), key=lambda kv: -kv[1]))
-                parts.append(f"{c['cam']}: {inner}")
-        if parts:
-            note = "Other objects (window peaks) - " + "; ".join(parts)
-            lines.append("  " + note)
-            html.append(f"<p style='color:#475569;font-size:13px'>{note}</p>")
 
     if act_rows:
         _peaks_table(act_rows, f"Activity peaks - {label}")
-        _extras_note(act_rows)
     if other_rows:
         _peaks_table(other_rows,
                      "Earlier in this window (before the grid settled here)")
-        _extras_note(other_rows)
     if not visible:
         lines.append("Activity peaks:")
         lines.append("  No footfall samples in this window - check the VM journal.")
@@ -747,35 +635,23 @@ def fetch_review_stats() -> dict | None:
         data = json.loads(raw.decode("utf-8"))
         frame_reviews = data.get("frame_reviews") or []
         crops = data.get("reviews") or []
-        # source == "auto" marks approved model-assisted batches; everything
-        # else (including legacy rows with no source) is operator work. The
-        # operator-facing counters below deliberately cover ONLY operator
-        # rows - "you labeled" must mean the operator did.
-        op = [fr for fr in frame_reviews
-              if (fr.get("source") or "operator") == "operator"]
-        auto = [fr for fr in frame_reviews
-                if (fr.get("source") or "operator") != "operator"]
-        confirmed = sum(1 for fr in op
+        confirmed = sum(1 for fr in frame_reviews
                         for v in (fr.get("box_verdicts") or {}).values()
                         if v == "correct")
-        rejected = sum(1 for fr in op
+        rejected = sum(1 for fr in frame_reviews
                        for v in (fr.get("box_verdicts") or {}).values()
                        if v == "wrong")
-        relabeled = sum(1 for fr in op
+        relabeled = sum(1 for fr in frame_reviews
                         for v in (fr.get("box_verdicts") or {}).values()
                         if isinstance(v, str) and v.startswith("relabel:"))
         missed = sum(len(fr.get("missed_detections") or [])
-                     for fr in op)
-        return {"frames_labeled": len(op),
-                "frames_auto":    len(auto),
+                     for fr in frame_reviews)
+        return {"frames_labeled": len(frame_reviews),
                 "crop_reviews":   len(crops),
                 "boxes_confirmed": confirmed,
                 "boxes_rejected":  rejected,
                 "boxes_relabeled": relabeled,
-                "missed_marked":  missed,
-                "op_reviewed_ats": sorted(str(fr.get("reviewed_at") or "")
-                                          for fr in op
-                                          if fr.get("reviewed_at"))}
+                "missed_marked":  missed}
     except Exception:
         return None
 
@@ -794,17 +670,11 @@ def send_gmail(subject: str, text: str, html: str,
     if not user or not pwd:
         raise SystemExit("GMAIL_USER and GMAIL_APP_PASSWORD must be set "
                          "(see /etc/turkey-footfall/digest.env)")
-    # DIGEST_TO takes a comma list since 2026-08-09: the on-demand send
-    # goes to the requested address with the project mailbox CC'd, so the
-    # archive accumulates every report ever sent.
-    recipients = [t.strip() for t in to.split(",") if t.strip()]
 
     outer = MIMEMultipart("mixed")
     outer["Subject"] = subject
     outer["From"] = user
-    outer["To"] = recipients[0]
-    if len(recipients) > 1:
-        outer["Cc"] = ", ".join(recipients[1:])
+    outer["To"] = to
 
     body = MIMEMultipart("alternative")
     body.attach(MIMEText(text, "plain", "utf-8"))
@@ -826,7 +696,7 @@ def send_gmail(subject: str, text: str, html: str,
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as s:
         s.login(user, pwd)
-        s.sendmail(user, recipients, outer.as_string())
+        s.sendmail(user, [to], outer.as_string())
 
 
 def _build_pdf(now_il: dt.datetime, window_hours: int,
@@ -838,8 +708,7 @@ def _build_pdf(now_il: dt.datetime, window_hours: int,
                out_path: Path, grid: dict | None = None,
                dominant: str | None = None,
                prev: dict | None = None,
-               latest: list[dict] | None = None,
-               no_data: bool = False) -> Path | None:
+               latest: list[dict] | None = None) -> Path | None:
     """Compose the PDF; returns the path or None if reportlab is missing
     (the plain-text mail still ships in that case, which is the pre-PDF
     behavior and better than silently dropping the whole run)."""
@@ -859,9 +728,6 @@ def _build_pdf(now_il: dt.datetime, window_hours: int,
                                                    bucket)
     grid_label = (_COUNTRY_LABELS.get(dominant, dominant.title())
                   if dominant else _country_label(grid))
-    if no_data:
-        _gl = _country_label(grid)
-        grid_label = (f"No live data ({_gl} grid)" if _gl else "No live data")
     return report_pdf.compose_pdf(
         out_path,
         now_il=now_il, window_hours=window_hours,
@@ -907,20 +773,16 @@ def main() -> None:
     stale = stale_from_latest(latest, active_slots=active or None,
                               window_ok_by_slot=window_ok_by_slot)
     dominant = dominant_country(footfall)
-    no_data = not window_ok_by_slot          # not one ok-sample all window
     now_il = _israel_now()
 
     subject, text, html = compose_digest(
         now_il, args.window_hours, groups, cam_stats, training, stale,
         reviews=reviews, grid=grid, dominant=dominant,
-        prev=prev_state, no_data=no_data)
+        prev=prev_state)
 
     # Country slug for the PDF filename: the DATA majority when it exists,
-    # not the momentary grid - matches the report's subject line. An
-    # all-miss window is named for what it is, not for the probe country.
-    country_slug = dominant or (
-        "no-signal" if not window_ok_by_slot
-        else str((grid or {}).get("country") or "grid"))
+    # not the momentary grid - matches the report's subject line.
+    country_slug = dominant or str((grid or {}).get("country") or "grid")
     default_pdf = (Path("./daily_digest.pdf") if args.dry_run
                    else Path(tempfile.mkdtemp(prefix="digest-"))
                         / f"{country_slug}_report_{now_il.strftime('%Y%m%d_%H%M')}.pdf")
@@ -929,7 +791,7 @@ def main() -> None:
                        training, reviews, stale, len(footfall),
                        total_events=len(events), out_path=pdf_path,
                        grid=grid, dominant=dominant, prev=prev_state,
-                       latest=latest, no_data=no_data)
+                       latest=latest)
 
     if args.dry_run:
         print(f"SUBJECT: {subject}\n\n{text}")
@@ -944,7 +806,6 @@ def main() -> None:
     # unsent report's numbers.
     _save_last_report({
         "frames_labeled":  (reviews or {}).get("frames_labeled", 0),
-        "frames_auto":     (reviews or {}).get("frames_auto", 0),
         "boxes_confirmed": (reviews or {}).get("boxes_confirmed", 0),
         "boxes_rejected":  (reviews or {}).get("boxes_rejected", 0),
         "missed_marked":   (reviews or {}).get("missed_marked", 0),

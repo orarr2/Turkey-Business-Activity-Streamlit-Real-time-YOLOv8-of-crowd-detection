@@ -30,21 +30,13 @@ def _noon(day=1):
     return dt.datetime(2026, 7, day, 12, 0, tzinfo=TZ).timestamp()
 
 
-def _foot_cell_of_test_box():
-    """Grid cell of _box(100, 100)'s foot point (x=110, y=140 on 640x360),
-    computed from the CURRENT grid constants so a resolution change moves
-    the expectation with it."""
-    gx = min(heatmap.GRID_W - 1, int(110 / 640 * heatmap.GRID_W))
-    gy = min(heatmap.GRID_H - 1, int(140 / 360 * heatmap.GRID_H))
-    return gx, gy
-
-
 def test_accumulate_lands_in_the_foot_cell(tmp_path):
+    # Foot point of this box: x=(100+120)/2=110, y=140 ->
+    # gx = 110/640*32 = 5, gy = 140/360*18 = 7.
     heatmap.accumulate("camA", [_box(100, 100)], SHAPE,
                        now=_noon(), tz=TZ, root=tmp_path)
     grid = heatmap.grid_for("camA", layer="person", root=tmp_path)
-    gx, gy = _foot_cell_of_test_box()
-    assert grid[gy][gx] == pytest.approx(heatmap.WEIGHT_DEFAULT_S)
+    assert grid[7][5] == pytest.approx(heatmap.WEIGHT_DEFAULT_S)
     assert sum(sum(r) for r in grid) == pytest.approx(heatmap.WEIGHT_DEFAULT_S)
 
 
@@ -91,8 +83,7 @@ def test_daily_decay():
     heatmap.accumulate("camA", [_box(500, 300)], SHAPE,
                        now=_noon(11), tz=TZ)
     grid = heatmap.grid_for("camA", layer="person")
-    gx, gy = _foot_cell_of_test_box()
-    decayed_cell = grid[gy][gx]
+    decayed_cell = grid[7][5]
     assert decayed_cell == pytest.approx(
         before * heatmap.DAILY_DECAY ** 10, rel=1e-6)
 
@@ -108,8 +99,7 @@ def test_persistence_roundtrip(tmp_path):
     # Fresh process: state reloads from disk.
     heatmap.reset()
     grid = heatmap.grid_for("camA", layer="person", root=tmp_path)
-    gx, gy = _foot_cell_of_test_box()
-    assert grid[gy][gx] == pytest.approx(heatmap.WEIGHT_DEFAULT_S, abs=0.01)
+    assert grid[7][5] == pytest.approx(heatmap.WEIGHT_DEFAULT_S, abs=0.01)
 
 
 def test_render_due_cadence():

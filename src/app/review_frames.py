@@ -206,24 +206,10 @@ def load_metadata(frame_rel_path: str,
         return None
 
 
-def _reviewed_rels(snapshots_root: str | Path) -> set[str]:
-    """Frame rels the operator has REVIEWED (jpg + json sibling). These are
-    the training set: evicting one deletes the image behind a verdict, and
-    tools/export_labels.py then silently loses the example - the July batch
-    shrank from 36 reviewed frames to a 3+1 usable export exactly this way.
-    Delegates to pool_sync's reader so both eviction paths agree."""
-    try:
-        from app.pool_sync import _reviewed_frame_rels
-        return _reviewed_frame_rels(Path(snapshots_root))
-    except Exception:
-        return set()
-
-
 def enforce_cap(snapshots_root: str | Path = SNAPSHOTS_ROOT,
                 cap_files: int | None = None) -> tuple[int, int]:
     """Delete oldest (frame, metadata) pairs until file count <= cap.
-    Cap counts JPEGs, not JSON siblings. Reviewed frames are never
-    deleted - they are labeled training data, not cache."""
+    Cap counts JPEGs, not JSON siblings."""
     if cap_files is None:
         cap_files = REVIEW_FRAME_MAX_FILES
     root = _dir(snapshots_root)
@@ -232,13 +218,8 @@ def enforce_cap(snapshots_root: str | Path = SNAPSHOTS_ROOT,
     files = [p for p in root.rglob("*.jpg")]
     if len(files) <= cap_files:
         return 0, 0
-    protected = _reviewed_rels(snapshots_root)
-    if protected:
-        files = [p for p in files
-                 if f"review_frames/{p.relative_to(root).as_posix()}"
-                 not in protected]
     files.sort(key=lambda p: p.stat().st_mtime)
-    to_delete = files[: max(0, len(files) - cap_files)]
+    to_delete = files[: len(files) - cap_files]
     freed = 0; n = 0
     for p in to_delete:
         try:
@@ -274,33 +255,24 @@ def usage_stats(snapshots_root: str | Path = SNAPSHOTS_ROOT) -> dict:
 
 
 def clear_all(snapshots_root: str | Path = SNAPSHOTS_ROOT) -> dict:
-    """Wipe the UNREVIEWED pool. Reviewed frames survive the button: their
-    images are the dataset behind data/reviews.json verdicts, and deleting
-    them is how a 36-frame labeling effort once shrank to a 3-image export."""
     root = _dir(snapshots_root)
     if not root.is_dir():
-        return {"deleted": 0, "bytes_freed": 0, "protected": 0}
-    protected = _reviewed_rels(snapshots_root)
-    freed = 0; n = 0; kept = 0
+        return {"deleted": 0, "bytes_freed": 0}
+    freed = 0; n = 0
     for p in list(root.rglob("*")):
-        if not p.is_file():
-            continue
-        rel = f"review_frames/{p.relative_to(root).as_posix()}"
-        if rel in protected:
-            kept += 1
-            continue
-        try:
-            freed += p.stat().st_size
-            p.unlink()
-            if p.suffix == ".jpg":
-                n += 1
-        except OSError:
-            continue
+        if p.is_file():
+            try:
+                freed += p.stat().st_size
+                p.unlink()
+                if p.suffix == ".jpg":
+                    n += 1
+            except OSError:
+                continue
     for d in sorted(root.rglob("*"), reverse=True):
         if d.is_dir():
             try: d.rmdir()
             except OSError: pass
-    return {"deleted": n, "bytes_freed": freed, "protected": kept}
+    return {"deleted": n, "bytes_freed": freed}
 
 
 def list_all_frames(snapshots_root: str | Path = SNAPSHOTS_ROOT) -> list[str]:

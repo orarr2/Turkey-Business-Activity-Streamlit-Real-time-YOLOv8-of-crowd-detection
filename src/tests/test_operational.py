@@ -114,44 +114,6 @@ def test_vehicle_crossing_counted_in_vehicle_bucket():
     assert res["vehicles_in"] == 1 and res["person_in"] == 0
 
 
-def test_line_crossing_counts_each_flip_not_just_the_last():
-    # A track that walked in, then back out, then in again must register
-    # ALL THREE crossings - the old overwrite pattern (`crossed = "in"` /
-    # `crossed = "out"`) kept only the last direction, so a back-and-forth
-    # track was counted once and busy pedestrians were undercounted.
-    line = [[0.0, 0.5], [1.0, 0.5]]
-    frames = [
-        [person(90, 10, 110, 40)],   # above (side < 0)
-        [person(90, 30, 110, 70)],   # below (side > 0)   -> in
-        [person(90, 10, 110, 40)],   # above              -> out
-        [person(90, 30, 110, 70)],   # below              -> in
-    ]
-    res = count_line_crossings(track_burst(frames, FRAME_SHAPE),
-                               FRAME_SHAPE, line)
-    assert res["in"] == 2 and res["out"] == 1
-    assert res["person_in"] == 2 and res["person_out"] == 1
-
-
-def test_line_crossing_ignores_touching_exactly():
-    # A foot point that lands EXACTLY on the counting line (side == 0)
-    # is ambiguous; the previous convention counted 0 as "positive side"
-    # and turned a neg -> 0 -> neg jitter into one false crossing. Now
-    # touching frames are neither counted nor allowed to reset the last
-    # known side.
-    line = [[0.0, 0.5], [1.0, 0.5]]           # normalized y = 0.5
-    # FRAME_SHAPE is (H, W); pick a foot that lands exactly on 0.5*H.
-    H = FRAME_SHAPE[0]
-    on = int(0.5 * H)
-    frames = [
-        [person(90, on - 30, 110, on - 10)],  # foot above (neg)
-        [person(90, on - 20, 110, on)],       # foot exactly on line
-        [person(90, on - 30, 110, on - 10)],  # foot above again (neg)
-    ]
-    res = count_line_crossings(track_burst(frames, FRAME_SHAPE),
-                               FRAME_SHAPE, line)
-    assert res["in"] == 0 and res["out"] == 0
-
-
 # ---- loitering ----------------------------------------------------------------
 
 BOX = {"x1": 50, "y1": 30, "x2": 90, "y2": 90}

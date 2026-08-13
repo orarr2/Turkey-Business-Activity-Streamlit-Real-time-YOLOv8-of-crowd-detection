@@ -40,25 +40,3 @@ def teardown_module(_m):
     import os
     os.environ.pop("YT_POT_SCRIPT", None)
     importlib.reload(detect_core)
-
-
-def test_cookies_attach_only_when_file_exists(monkeypatch, tmp_path):
-    """YT_COOKIES_FILE (2026-07-30): a real file attaches cookiefile to the
-    yt-dlp options; a dangling path or unset env leaves the options
-    byte-identical to the cookie-less shape."""
-    ck = tmp_path / "yt_cookies.txt"
-    ck.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
-    monkeypatch.delenv("YT_POT_SCRIPT", raising=False)
-    monkeypatch.setenv("YT_COOKIES_FILE", str(ck))
-    importlib.reload(detect_core)
-    opts = detect_core._yt_opts("web")
-    assert opts["cookiefile"] == str(ck)
-    assert opts["extractor_args"] == {"youtube": {"player_client": ["web"]}}
-
-    monkeypatch.setenv("YT_COOKIES_FILE", str(tmp_path / "missing.txt"))
-    importlib.reload(detect_core)
-    assert "cookiefile" not in detect_core._yt_opts("web")
-
-    monkeypatch.delenv("YT_COOKIES_FILE", raising=False)
-    importlib.reload(detect_core)
-    assert "cookiefile" not in detect_core._yt_opts("android")

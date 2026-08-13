@@ -51,31 +51,7 @@ MIN_REVIEWS_FOR_PER_CLASS = 5
 _DEMO_CROP_PREFIX = "live_samples/_demo/"
 
 
-# Path prefixes where the SECOND path component is the cam_id, used by the
-# cam_ids filter below. All producers under app/ that write review-eligible
-# crops or frames obey these conventions:
-#   review_frames/<cam_id>/<ts>.jpg + .json
-#   review_crops/<cam_id>/<ts>.jpg    (auto-extracted from review_frames)
-#   live_samples/<cam_id>/<ts>.jpg    (see app/live_samples.py)
-#   anomalies_crops/<cam_id>/<ts>.jpg (see app/anomaly_crops.py)
-_CAM_ID_TREES = (
-    "review_frames", "review_crops", "live_samples", "anomalies_crops",
-)
-
-
-def _cam_id_from_path(path: str) -> str | None:
-    """Extract the cam_id from a crop/frame path, or None when the path
-    doesn't encode it. Used by the ``cam_ids`` filter below so the main
-    dashboard's metrics reflect only the operator's picked cameras."""
-    if not path:
-        return None
-    parts = path.split("/")
-    if len(parts) >= 3 and parts[0] in _CAM_ID_TREES:
-        return parts[1]
-    return None
-
-
-def compute(review_store, cam_ids: list[str] | set[str] | None = None) -> dict:
+def compute(review_store) -> dict:
     """Aggregate crop-level AND frame-level verdicts into a scoreboard.
 
     Two verdict streams feed the numbers:
@@ -90,12 +66,6 @@ def compute(review_store, cam_ids: list[str] | set[str] | None = None) -> dict:
       recall signal even when only 3 boxes got a verdict;
     * bootstrap ``_demo`` crops are excluded outright.
     """
-    # cam_ids filter (generalization 2026-08-13): main dashboard passes the
-    # operator's picked cams so the numbers reflect HIS work, not the 25+
-    # Turkey cams the shared review store accumulated from the VM. When
-    # None or empty, no filter (twin + tools keep the aggregate view).
-    allowed = set(cam_ids) if cam_ids else None
-
     # --- crop verdicts (precision-only stream) -----------------------
     correct = 0
     wrong = 0
@@ -105,10 +75,6 @@ def compute(review_store, cam_ids: list[str] | set[str] | None = None) -> dict:
         if (r.crop_path or "").startswith(_DEMO_CROP_PREFIX):
             demo_excluded += 1
             continue
-        if allowed is not None:
-            cam_of = _cam_id_from_path(r.crop_path or "")
-            if cam_of not in allowed:
-                continue
         cls = r.original_cls or "?"
         rec = per_cls.setdefault(cls, {"tp": 0, "fp": 0, "fn": 0})
         if r.verdict == "correct":
@@ -119,12 +85,7 @@ def compute(review_store, cam_ids: list[str] | set[str] | None = None) -> dict:
             rec["fp"] += 1
 
     # --- frame verdicts (adds FN → recall / F1) ----------------------
-    frame_reviews_all = getattr(review_store, "_frames_by_path", {}).values()
-    if allowed is not None:
-        frame_reviews = [fr for fr in frame_reviews_all
-                         if (fr.cam_id or "?") in allowed]
-    else:
-        frame_reviews = list(frame_reviews_all)
+    frame_reviews = getattr(review_store, "_frames_by_path", {}).values()
     for fr in frame_reviews:
         meta_boxes_by_id = {}
         try:
@@ -197,8 +158,7 @@ def compute(review_store, cam_ids: list[str] | set[str] | None = None) -> dict:
     }
 
 
-def learning_curve(review_store, batch_size: int = 5,
-                   cam_ids: list[str] | set[str] | None = None) -> list[dict]:
+def learning_curve(review_store, batch_size: int = 5) -> list[dict]:
     """Model mistake-rate per tagging batch, chronological - the operator's
     "is it actually getting better?" chart.
 
@@ -213,11 +173,8 @@ def learning_curve(review_store, batch_size: int = 5,
     the sampled frames are; the uncertainty-first queue deliberately
     serves hard ones, so a plateau is not failure - a sustained rise is.
     """
-    allowed = set(cam_ids) if cam_ids else None
-    frs_all = getattr(review_store, "_frames_by_path", {}).values()
-    if allowed is not None:
-        frs_all = [fr for fr in frs_all if (fr.cam_id or "?") in allowed]
-    frs = sorted(frs_all, key=lambda fr: fr.reviewed_at or "")
+    frs = sorted(getattr(review_store, "_frames_by_path", {}).values(),
+                 key=lambda fr: fr.reviewed_at or "")
     points: list[dict] = []
     batch = {"frames": 0, "signals": 0, "mistakes": 0, "last": ""}
 

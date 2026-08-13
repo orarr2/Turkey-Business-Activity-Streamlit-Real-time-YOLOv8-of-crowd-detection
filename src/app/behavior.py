@@ -48,13 +48,13 @@ from pathlib import Path
 
 from app.cameras import CAMERAS
 from app.detect_core import (
+    BURST_FPS_ASSUMED,
     DEFAULT_PER_CLASS_CONF,
     VEHICLE_LENGTH_M,
     detect_with_boxes,
     draw_boxes,
     filter_boxes_roi,
     grab_burst,
-    last_stream_fps,
     resolve_stream,
 )
 from app.heatmap import GRID_H, GRID_W
@@ -78,11 +78,6 @@ STATIONARY_NET_FRAC = 0.02
 
 _DIRECTIONS = ("right", "down-right", "down", "down-left",
                "left", "up-left", "up", "up-right")
-
-# Layer rendering lives in app/live_analysis.py since fix 2 (the live
-# per-tile engine); fix 3 removed this module's one-shot layers branch -
-# it had no UI caller left. This API's scope is the per-individual
-# window profile + the annotated trails view below.
 
 
 def _foot(b: dict) -> tuple[float, float]:
@@ -232,29 +227,19 @@ def render_window(frames, tracks: list[Track], stats: list[dict] | None = None,
     return out
 
 
-def _draw_label_chips(out, last_boxes: list[dict], stats: list[dict],
-                      text_of=None) -> None:
+def _draw_label_chips(out, last_boxes: list[dict], stats: list[dict]) -> None:
     """Behavior verdict under each surviving individual's box - the demo
-    convention (a colored chip with the label), red when alerting.
-    `text_of(stats_row) -> str | None` overrides the chip text (the
-    gestures layer shows only gestures, the body layer only the label)."""
+    convention (a colored chip with the label), red when alerting."""
     import cv2
 
-    def _default_text(s):
-        txt = s.get("label") or ""
-        if s.get("gestures"):
-            txt += " +" + "+".join(s["gestures"])
-        return txt or None
-
-    text_of = text_of or _default_text
     by_id = {s.get("id"): s for s in stats}
     for b in last_boxes:
         s = by_id.get(b.get("track_id"))
-        if not s:
+        if not s or not s.get("label"):
             continue
-        txt = text_of(s)
-        if not txt:
-            continue
+        txt = s["label"]
+        if s.get("gestures"):
+            txt += " +" + "+".join(s["gestures"])
         color = (0, 0, 220) if s.get("alert") else (90, 90, 90)
         x1, y2 = int(b["x1"]), int(b["y2"])
         (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
@@ -384,18 +369,13 @@ def analyze_window(cam_id: str, model,
     # track's box history carries its skeletons for free.
     pose_persons = 0
     if pose:
-        # Top-down (per-crop) pose: the full-frame pass at window imgsz saw
-        # ~15px of person on wide street shots and attached nothing - the
-        # crop variant is what makes gestures/fall/crouch actually fire at
-        # street-cam distance.
-        from app.pose import attach_keypoints_crops, load_pose_model
+        from app.pose import attach_keypoints, load_pose_model
         pose_model = load_pose_model()
         for fr, b in zip(frames, per_boxes):
-            pose_persons += attach_keypoints_crops(pose_model, fr, b)
+            pose_persons += attach_keypoints(pose_model, fr, b,
+                                             imgsz=imgsz or DEFAULT_IMGSZ)
 
-    # Real container fps of the stream just grabbed (falls back to the
-    # 25fps assumption for direct-frame calls in tests/replays).
-    dt = stride / last_stream_fps()
+    dt = stride / BURST_FPS_ASSUMED
     tracks = assign_burst_ids(per_boxes, frames[0].shape, dt=dt)
     stats = []
     for tr in tracks:
@@ -458,8 +438,7 @@ def analyze_window(cam_id: str, model,
         stem = (f"{cam_id}_"
                 f"{time.strftime('%Y%m%d_%H%M%S', time.gmtime())}")
         annotated = render_window(frames, tracks, stats=stats,
-                                  lock=lock_info,
-                                  faces=faces_list or None)
+                                  lock=lock_info, faces=faces_list or None)
         okj, buf = cv2.imencode(".jpg", annotated,
                                 [cv2.IMWRITE_JPEG_QUALITY, 85])
         if okj:

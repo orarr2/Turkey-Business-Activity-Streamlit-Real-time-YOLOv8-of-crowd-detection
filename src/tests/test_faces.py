@@ -17,15 +17,11 @@ def _fresh():
     return faces
 
 
-def test_unset_env_falls_back_to_bundled_model(monkeypatch):
-    # The YuNet ONNX ships in data/ since 2026-08-08; with FACE_MODEL unset
-    # the module must pick it up (before that, no machine had the file and
-    # every face feature was silently dead). On a checkout without the
-    # model the module still degrades to unavailable, never raises.
+def test_unconfigured_is_unavailable(monkeypatch):
     m = _fresh()
     monkeypatch.delenv(m.FACE_MODEL_ENV, raising=False)
-    assert m.available() is m.FACE_MODEL_DEFAULT.is_file()
-    assert m.detect_faces(object()) == []      # junk input never raises
+    assert m.available() is False
+    assert m.detect_faces(object()) == []
 
 
 def test_missing_file_is_unavailable(monkeypatch, tmp_path):

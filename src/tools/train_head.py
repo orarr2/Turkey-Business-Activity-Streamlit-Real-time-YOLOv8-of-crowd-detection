@@ -30,14 +30,13 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--data", default=str(_SRC_ROOT / "data" / "labels_export"
                                           / "dataset.yaml"))
-    ap.add_argument("--base", default="yolov8s.pt",
+    ap.add_argument("--base", default="yolov8n.pt",
                     help="MUST match the weights the consumer runs "
-                         "(the VM collector is pinned to yolov8s.pt in "
-                         "deploy/gcp-vm/collector.service since 2026-08-05) "
-                         "- a head trained on one base cannot overlay onto "
-                         "another")
+                         "(the VM collector is pinned to yolov8n.pt in "
+                         "deploy/gcp-vm/collector.service) - a head trained "
+                         "on one base cannot overlay onto another")
     ap.add_argument("--epochs", type=int, default=MAX_EPOCHS)
-    ap.add_argument("--imgsz", type=int, default=640,
+    ap.add_argument("--imgsz", type=int, default=512,
                     help="matches the collector's production inference size")
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--device", default="cpu")

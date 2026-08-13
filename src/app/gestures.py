@@ -38,14 +38,9 @@ RAISE_MIN_FRAMES = 3
 RAISE_MIN_VALID = 2
 # A wave is at least this many side-of-elbow changes while raised.
 WAVE_MIN_SWINGS = 2
-# Deadband floor: the wrist must clear the elbow x by at least this many
-# px for a side to count. The EFFECTIVE deadband scales with the skeleton
-# (WAVE_DEADBAND_SHOULDER_FRAC of the shoulder width, floored here) - a
-# fixed 3px was simultaneously too twitchy for a close 300px person
-# (8px of honest jitter read as swings) and near the noise floor for a
-# distant 40px one.
-WAVE_DEADBAND_PX = 2.0
-WAVE_DEADBAND_SHOULDER_FRAC = 0.08
+# The wrist must clear the elbow x by this many px for a side to count -
+# keypoint jitter oscillates by a pixel or two without any real motion.
+WAVE_DEADBAND_PX = 3.0
 
 _SIDES = ((L_WRIST, L_ELBOW, L_SHOULDER), (R_WRIST, R_ELBOW, R_SHOULDER))
 
@@ -56,10 +51,8 @@ def _pt(kps, idx):
 
 
 def _side_frames(kps_seq, wrist_i, elbow_i, shoulder_i):
-    """Per pose-frame (raised?, wrist_x - elbow_x, deadband_px) for one
-    arm; None for frames where any needed joint is missing or below
-    confidence. The deadband is sized from THAT frame's shoulder width so
-    the same rule works on a 40px person and a 300px one."""
+    """Per pose-frame (raised?, wrist_x - elbow_x) for one arm; None for
+    frames where any needed joint is missing or below confidence."""
     out = []
     for kps in kps_seq:
         if not kps:
@@ -72,11 +65,7 @@ def _side_frames(kps_seq, wrist_i, elbow_i, shoulder_i):
             continue
         raised = wrist[1] < shoulder[1]          # screen y grows downward
         dx = (wrist[0] - elbow[0]) if elbow is not None else None
-        l_sh, r_sh = _pt(kps, L_SHOULDER), _pt(kps, R_SHOULDER)
-        sh_w = (abs(r_sh[0] - l_sh[0])
-                if l_sh is not None and r_sh is not None else 0.0)
-        dead = max(WAVE_DEADBAND_PX, WAVE_DEADBAND_SHOULDER_FRAC * sh_w)
-        out.append((raised, dx, dead))
+        out.append((raised, dx))
     return out
 
 
@@ -126,8 +115,8 @@ def detect_gestures(kps_seq: list) -> list[str]:
         for f in frames:
             if not f or not f[0] or f[1] is None:
                 continue
-            raised, dx, dead = f
-            if abs(dx) < dead:
+            dx = f[1]
+            if abs(dx) < WAVE_DEADBAND_PX:
                 continue
             sign = 1 if dx > 0 else -1
             if prev_sign and sign != prev_sign:

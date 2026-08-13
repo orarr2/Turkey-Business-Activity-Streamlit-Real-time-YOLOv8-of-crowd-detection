@@ -107,11 +107,9 @@ systemctl enable --now collector.service
 sleep 2
 systemctl --no-pager --lines=20 status collector.service || true
 
-# Situation-report units. Since 2026-08-09 the scheduled sends feed ONLY
-# the project archive mailbox (DIGEST_TO in ${CFG_DIR}/digest.env); the
-# operator-facing delivery is the dashboards' "Send Report From VM"
-# buttons (public dashboard -> the send-report GitHub workflow, private
-# dashboard -> its local endpoint).
+# Situation-report timer (email digest twice a day). Installed always,
+# ENABLED only once /etc/turkey-footfall/digest.env exists with the Gmail
+# app-password - see README "Phone reports".
 for unit in digest.service digest.timer; do
   sed -e "s|__STORAGE_BUCKET__|${STORAGE_BUCKET}|g" \
       -e "s|__INSTALL_DIR__|${INSTALL_DIR}|g" \
@@ -123,7 +121,7 @@ done
 systemctl daemon-reload
 if [[ -f "${CFG_DIR}/digest.env" ]]; then
   systemctl enable --now digest.timer
-  echo "digest.timer enabled (12:00 + 20:00 Israel -> project archive)"
+  echo "digest.timer enabled (12:00 + 20:00 Israel time)"
 else
   echo "digest.timer installed but NOT enabled - create ${CFG_DIR}/digest.env first"
 fi

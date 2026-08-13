@@ -16,6 +16,6 @@ export const firebaseConfig = {
 
   // Optional — App Check (reCAPTCHA v3) site key. When set, app.js initializes
   // App Check so only your real web app can read Firestore, protecting the read
-  // quota from scrapers. Leave "" to skip. See docs/PROJECT_GUIDE.md ch. 11 step 7.
+  // quota from scrapers. Leave "" to skip. See docs/firebase_setup.md §6.
   recaptchaSiteKey: "",
 };

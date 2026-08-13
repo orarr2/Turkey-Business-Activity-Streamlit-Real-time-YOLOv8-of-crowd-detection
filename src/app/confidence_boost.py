@@ -150,15 +150,11 @@ def load_boosts(path: str | Path | None = None) -> dict[str, dict[str, float]]:
     return out
 
 
-def summary(path: str | Path | None = None,
-            cam_ids: list[str] | set[str] | None = None) -> dict:
+def summary(path: str | Path | None = None) -> dict:
     """Small aggregate view used by the review-stats endpoint."""
     p = Path(path if path is not None else DEFAULT_STORE_PATH)
     store = _load(p)
     cams = store.get("cams") or {}
-    if cam_ids:
-        allowed = set(cam_ids)
-        cams = {cid: cmap for cid, cmap in cams.items() if cid in allowed}
     total_appr = total_rej = adjusted = 0
     for cam_map in cams.values():
         for rec in cam_map.values():
@@ -175,8 +171,7 @@ def summary(path: str | Path | None = None,
 
 
 def details(path: str | Path | None = None,
-            baseline: dict[str, float] | None = None,
-            cam_ids: list[str] | set[str] | None = None) -> dict:
+            baseline: dict[str, float] | None = None) -> dict:
     """Per-(cam, cls) baseline vs. current confidence with review counts.
 
     Powers the dashboard's "Learning proof" panel so the user can watch
@@ -197,14 +192,6 @@ def details(path: str | Path | None = None,
     p = Path(path if path is not None else DEFAULT_STORE_PATH)
     store = _load(p)
     cams = store.get("cams") or {}
-    # cam_ids filter (generalization 2026-08-13): main dashboard passes the
-    # operator's picked cam_ids so Learning proof shows rows only for HIS
-    # cameras, not the 25+ Turkey cams the shared store accumulated from
-    # the collector. When None (or []), no filter applied - twin + tools
-    # keep seeing the full store.
-    if cam_ids:
-        allowed = set(cam_ids)
-        cams = {cid: cmap for cid, cmap in cams.items() if cid in allowed}
     if baseline is None:
         try:
             from app.detect_core import DEFAULT_PER_CLASS_CONF

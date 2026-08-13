@@ -60,18 +60,6 @@ def _open_cap(url_or_path: str) -> "cv2.VideoCapture":
                 cap.set(prop, ms)
             except cv2.error:
                 pass
-    # Record the container's real frame rate for the speed/track dt. Every
-    # km/h in the pipeline used to divide by an ASSUMED 25 fps - a 12.5 fps
-    # stream then reported doubled speeds systematically. The collector and
-    # the deep window both run grab -> analyze serially, so "fps of the last
-    # opened capture" is the fps of the frames being analyzed.
-    try:
-        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
-        if 4.0 <= fps <= 65.0:
-            global _LAST_STREAM_FPS
-            _LAST_STREAM_FPS = fps
-    except cv2.error:
-        pass
     return cap
 
 # COCO class ids we care about for *business activity* (footfall + vehicles
@@ -147,32 +135,12 @@ _YT_PLAYER_CLIENTS = (os.environ.get("YT_PLAYER_CLIENTS") or "android,ios,tv").s
 # deploy/gcp-vm/setup_pot_provider.sh).
 _YT_POT_SCRIPT = (os.environ.get("YT_POT_SCRIPT") or "").strip()
 
-# Authenticated-session cookies (YT_COOKIES_FILE, 2026-07-30): the last
-# free lever against the datacenter starvation, and the one YouTube's own
-# bot-check message points at ("Use --cookies-from-browser or --cookies").
-# A Netscape-format cookies.txt exported from a logged-in browser session;
-# the operator uploads it to the VM and points this env var at it. When
-# the var is unset or the file is missing, resolution behaves exactly as
-# before - every deployment without cookies keeps working unchanged.
-_YT_COOKIES_FILE = (os.environ.get("YT_COOKIES_FILE") or "").strip()
-
 
 def _yt_extractor_args(client: str) -> dict:
     args = {"youtube": {"player_client": [client.strip()]}}
     if _YT_POT_SCRIPT:
         args["youtubepot-bgutilscript"] = {"script_path": [_YT_POT_SCRIPT]}
     return args
-
-
-def _yt_opts(client: str) -> dict:
-    """yt-dlp options for one resolution attempt. Split out so tests pin
-    the exact shape (cookies attach only when the file really exists)."""
-    opts = {"quiet": True, "no_warnings": True,
-            "format": "best[protocol^=m3u8]/best",
-            "extractor_args": _yt_extractor_args(client)}
-    if _YT_COOKIES_FILE and os.path.isfile(_YT_COOKIES_FILE):
-        opts["cookiefile"] = _YT_COOKIES_FILE
-    return opts
 
 
 def resolve_youtube(url: str) -> str:
@@ -185,7 +153,9 @@ def resolve_youtube(url: str) -> str:
         url = f"https://www.youtube.com/watch?v={url}"
     last = None
     for client in _YT_PLAYER_CLIENTS:
-        opts = _yt_opts(client)
+        opts = {"quiet": True, "no_warnings": True,
+                "format": "best[protocol^=m3u8]/best",
+                "extractor_args": _yt_extractor_args(client)}
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -303,14 +273,6 @@ def resolve_stream(cam: dict, now: float | None = None) -> str:
     if cam_id:
         _RESOLVE_CACHE[cam_id] = (resolved, _expiry_of(resolved, now))
     return resolved
-
-
-def invalidate_stream(cam_id: str) -> None:
-    """Drop the cached resolve for one camera. The live-analysis loop
-    calls this after repeated grab failures so the next resolve_stream()
-    re-runs yt-dlp/page-scraping instead of re-knocking an expired
-    manifest until its natural expiry."""
-    _RESOLVE_CACHE.pop(cam_id, None)
 
 
 _SSL_CTX = ssl._create_unverified_context()
@@ -847,19 +809,8 @@ VEHICLE_LENGTH_M = {
     "motorcycle": 2.2, "bicycle": 1.8, "train": 22.0,
 }
 # Typical HLS street cam frame rate; grab_burst spaces frames `stride` frames
-# apart, so dt between burst frames = stride / fps. Fallback only - _open_cap
-# records each stream's REAL container fps into _LAST_STREAM_FPS and
-# last_stream_fps() serves it to the speed/track dt computations.
+# apart, so dt between burst frames = stride / fps.
 BURST_FPS_ASSUMED = 25.0
-_LAST_STREAM_FPS: float | None = None
-
-
-def last_stream_fps(default: float = BURST_FPS_ASSUMED) -> float:
-    """Frame rate of the most recently opened stream (sanity-clamped at
-    open time), or `default` when nothing was measured yet. Valid because
-    both callers (collector round, deep window) grab and analyze one
-    camera at a time."""
-    return _LAST_STREAM_FPS if _LAST_STREAM_FPS else default
 # Sanity band, km/h: below = parked/jitter (reported as 0), above = a track
 # mismatch (two different vehicles fused), discarded outright.
 SPEED_MIN_KMH = 3.0
@@ -899,13 +850,6 @@ def estimate_speeds(frames_boxes: list[list[dict]], frame_shape,
         # a size flicker between frames doesn't swing the scale).
         exts = [max(_box_wh(b)) for b in track if max(_box_wh(b)) > 0]
         if not exts:
-            return None
-        # Mismatch gate: a real vehicle's pixel extent barely changes over
-        # ~1s; a far car fused with a near one (the pairing error behind
-        # Beyazit's phantom "40 km/h typical" on a pedestrian plaza) shows
-        # up as a large size jump. Kill the pair instead of averaging two
-        # different rulers.
-        if max(exts) > 1.8 * min(exts):
             return None
         m_per_px = real_len / (sum(exts) / len(exts))
         (x0, y0), (x1, y1) = _centroid(track[0]), _centroid(track[-1])
@@ -997,15 +941,10 @@ def _line_side(px: float, py: float, line: list) -> float:
 
 def count_line_crossings(tracks: list[list[dict]], frame_shape,
                          line: list) -> dict:
-    """Count crossings of the normalized line by the FOOT POINT during the
+    """Count tracks whose FOOT POINT crossed the normalized line during the
     burst. Returns {"in": n, "out": n, "person_in": ..., "vehicles_in": ...}.
     "in" is a crossing from the negative to the positive side of A->B (pick
     the line's point order so that "in" means into your area of interest).
-    Every strict sign flip is a separate event: a track that walked in and
-    then back out registers both. A foot point that lands exactly on the
-    line (side == 0) is ambiguous and is neither counted nor allowed to
-    reset the previous side - the same convention live_analysis.update_crossings
-    uses so the two counters stay comparable.
     """
     H, W = frame_shape[:2]
     res = {"in": 0, "out": 0,
@@ -1014,21 +953,21 @@ def count_line_crossings(tracks: list[list[dict]], frame_shape,
     for t in tracks:
         if len(t) < 2:
             continue
-        metric = "person" if t[0].get("cls") == "person" else "vehicles"
-        prev = None
+        sides = []
         for b in t:
             fx, fy = _foot_point(b)
-            side = _line_side(fx / W, fy / H, line)
-            if side == 0:
-                continue
-            if prev is not None:
-                if prev < 0 and side > 0:
-                    res["in"] += 1
-                    res[f"{metric}_in"] += 1
-                elif prev > 0 and side < 0:
-                    res["out"] += 1
-                    res[f"{metric}_out"] += 1
-            prev = side
+            sides.append(_line_side(fx / W, fy / H, line))
+        crossed = None
+        for s0, s1 in zip(sides, sides[1:]):
+            if s0 < 0 <= s1:
+                crossed = "in"
+            elif s0 >= 0 > s1:
+                crossed = "out"
+        if crossed is None:
+            continue
+        res[crossed] += 1
+        metric = "person" if t[0].get("cls") == "person" else "vehicles"
+        res[f"{metric}_{crossed}"] += 1
     return res
 
 
@@ -1467,8 +1406,7 @@ def detect_burst(model, frames: list[np.ndarray], conf: float = 0.35,
     # shows the speed without a second model pass.
     if len(per) >= 2:
         speeds = estimate_speeds([b for _, b, _ in per], per[0][2].shape,
-                                 stride=burst_stride,
-                                 fps=last_stream_fps())
+                                 stride=burst_stride)
         summary = summarize_speeds(speeds)
         if summary:
             debug["speeds"] = summary
@@ -1495,27 +1433,9 @@ def detect_burst(model, frames: list[np.ndarray], conf: float = 0.35,
             from app.tracker import assign_burst_ids
             tracks = assign_burst_ids([b for _, b, _ in per],
                                       per[0][2].shape,
-                                      dt=burst_stride / last_stream_fps())
+                                      dt=burst_stride / BURST_FPS_ASSUMED)
             if tracks:
                 debug["individuals"] = len(tracks)
-                # fix1-A12 input: how many PERSONS moved at running pace
-                # within this burst (EMA track velocity as a fraction of
-                # the frame diagonal per second; 0.12/s is the same
-                # running bar the deep window uses). Many simultaneous
-                # runners = the crowd-rush scene signal - computed from
-                # tracks that already exist, zero extra inference.
-                H_, W_ = per[0][2].shape[:2]
-                diag = (H_ * H_ + W_ * W_) ** 0.5 or 1.0
-                n_p = fast = 0
-                for tr in tracks:
-                    if tr.cls != "person" or len(tr.times) < 2:
-                        continue
-                    n_p += 1
-                    if ((tr.vx ** 2 + tr.vy ** 2) ** 0.5 / diag) >= 0.12:
-                        fast += 1
-                if n_p:
-                    debug["rush"] = {"tracked_persons": n_p,
-                                     "fast_persons": fast}
         except Exception as e:
             print(f"detect_burst: tracker skipped ({type(e).__name__}: {e})")
     return counts, best[1], best[2], debug

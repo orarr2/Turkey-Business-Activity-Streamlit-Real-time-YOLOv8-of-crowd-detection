@@ -27,7 +27,7 @@ Live frames from the four grid cameras, annotated by the exact pipeline the
 collector runs (`yolov8n`, `imgsz 512` on the shipped systemd unit,
 `conf 0.30`): green boxes are people, orange are
 vehicles, magenta is a train, each with its confidence. The dashboard shows
-this view live under every tile ("Model view"), refreshed with every sample -
+this view live under every tile ("Model view"), refreshed with every sample —
 including night scenes like these, where detection is hardest.
 
 | Konya - Hükümet Meydanı | Konya - Otogar Kavşağı |
@@ -64,15 +64,15 @@ including night scenes like these, where detection is hardest.
 The two halves are decoupled. The collector runs 24/7 on a GCP `e2-micro`
 on the Always Free tier ($0/month); the deploy README documents its
 measured memory sizing. The
-dashboard is plain HTML/JS - anyone can serve `web/` and
+dashboard is plain HTML/JS — anyone can serve `web/` and
 subscribe to the live data. Because the state lives in Firestore, every visitor
 sees the accumulated history, and Firestore's TTL policy prunes the last 24h to
 keep the DB small. Anomaly / returning-visitor snapshots go to Firebase Storage
 (also 24h lifecycle).
 
 The grid is **country-generic**. It always runs **4 cameras from ONE country**
-and rotates through a country priority ladder - **Turkey → Thailand → Japan →
-USA** - falling through to the next country only when the active one goes fully
+and rotates through a country priority ladder — **Turkey → Thailand → Japan →
+USA** — falling through to the next country only when the active one goes fully
 dark. Turkey is the project's subject (Istanbul IBB first, then Konya); since
 IBB is geo-blocked from Google Cloud, from the VM the grid usually falls
 through to the foreign benches (YouTube-Live-backed street/traffic cameras that
@@ -85,9 +85,9 @@ runs the first 4 healthy cameras (always distinct), a camera that misses 3
 samples in a row rests 15 min and the grid backfills from deeper in the SAME
 country's bench, and `tvkur` (Konya) cameras are low-risk fast-fail probes that
 rest after a single miss. A `HostBreaker` rests a whole host for 20 min after 4
-consecutive access refusals (HTTP 403/429) and reopens it with a single probe -
+consecutive access refusals (HTTP 403/429) and reopens it with a single probe —
 so a blocking CDN is knocked ~3 times an hour, not ~120. Each assignment change
-updates `config/grid` (with the active `country`) - the dashboard re-renders
+updates `config/grid` (with the active `country`) — the dashboard re-renders
 that tile with the new active cam.
 
 Report fields follow the live country and camera: the day/night gate uses
@@ -98,7 +98,7 @@ Eastern, Central and Pacific).
 
 ## Quick start
 
-The project ships zero-config for **viewers** - the Firebase Web SDK identifier
+The project ships zero-config for **viewers** — the Firebase Web SDK identifier
 is committed, Firestore Rules make the four public collections read-only, the
 cloud collector is running, and the dashboard just lights up.
 
@@ -112,32 +112,14 @@ cd src && python serve.py                    # opens http://localhost:8000 with 
 ```
 
 Cloud deployment (for the maintainer only, requires a Firebase Admin
-service-account key), disaster recovery, VM commands, health-check battery,
-Firebase setup, the Cloudflare Worker for IBB, and the GCP billing
-kill-switch all live in one consolidated guide:
-
-- English: [`src/docs/PROJECT_GUIDE.md`](src/docs/PROJECT_GUIDE.md)
-- Hebrew (verbose, RTL): [`src/docs/PROJECT_GUIDE_HE.md`](src/docs/PROJECT_GUIDE_HE.md)
-
-**Connecting to the collector VM** (`turkey-collector`, zone `us-east1-c`,
-project `turkey-footfall`) - Console → Compute Engine → the **SSH** button,
-or from your own machine:
-
-```bash
-gcloud compute ssh turkey-collector --zone=us-east1-c
-```
-
-The guide's [health-check battery](src/docs/PROJECT_GUIDE.md#45-health-check-battery--is-the-vm-really-feeding-the-report)
-(service status, live sampling, memory, and an end-to-end "grab a real
-Turkey frame now" test) is the fastest way to confirm the collector
-before trusting any report. The VM is disposable by design; the
-[rebuild-from-zero](src/docs/PROJECT_GUIDE.md#48-full-rebuild-from-zero)
-recipe covers both a GCP-identical machine and any other Linux provider,
-including the re-mint path for every secret.
+service-account key) lives in [`src/deploy/gcp-vm/`](src/deploy/gcp-vm/README.md).
 
 `serve.py` is a small no-cache static server that binds `web/` on port 8000 (override
 with `--port`, suppress the browser pop with `--no-browser`, auto-falls-back to the
 next free port if 8000 is busy).
+
+Firebase project/service-account setup and security rules:
+see [`docs/firebase_setup.md`](src/docs/firebase_setup.md).
 
 ---
 
@@ -276,11 +258,8 @@ hidden logic beyond this section. Values are the shipped defaults - the CLI
 flags / `cameras.py` keys named in each table override them.
 
 **Stage 0 - what a "sample" is.** Every round (`--interval`, 40 s shipped) and
-per camera: resolve the stream → grab a burst of frames (`--burst 2` shipped,
-~0.5 s apart at the stream's measured fps) → YOLOv8s
-at `imgsz 640` (systemd unit) or `960` (notebook / larger hosts) - a camera
-entry may override with its own `"imgsz"` key (the far wide-angle Sarachane
-cam runs at 960 on the VM while the rest stay at 640), confidence
+per camera: resolve the stream → grab a burst of 3 frames ~1 s apart → YOLOv8s
+at `imgsz 640` (systemd unit) or `960` (notebook / larger hosts), confidence
 ≥ 0.30 with `person`/`car`/`bus`/`train`/`truck` re-tightened to 0.35 and
 the person-shape gate active (see aspect gates above), COCO classes
 person/bicycle/car/motorcycle/bus/train/truck → optional ROI + per-class
@@ -315,25 +294,16 @@ removed on 2026-07-18; their verdicts had been muted by design.)
 **Layer 2 - (removed).** Kept here as a numbered placeholder so older notes
 referencing "Layer 3/4" still line up.
 
-**Layer 3 - returning visitor (came back to the scene).** Person-only since
-2026-08-08: a city bus on a fixed route "returns" every few minutes and
-Istanbul's look-alike white taxis re-match each other constantly - 39 of that
-day's 40 return events were vehicles, which is a timetable, not an anomaly.
-Vehicles keep their re-ID identities (counting, gallery, regulars stats);
-only the saved EVENT is scoped to people. For every re-ID match, a saved
-return event requires ALL of, in order: class `person` with box height ≥
-64 px (embeddings of smaller crops are upscaling noise) → not a new entity →
-has a previous sighting → absence ≥ **5 min** (`--returning-gap-min`) →
-match similarity ≥ 0.92 (OSNet person floor; 0.96 histogram) → ≥ 2 prior
-sightings → the camera was actually SAMPLED during ≥ 50% of the absence (an
-outage/fallback blind spot is not a departure; observation log seeded from
-Firestore history on restart) → the entity re-appeared AWAY from its
-previous position (IoU < 0.35 - a parked object re-matching in place never
-"returned") → ≥ 30 min since this entity's last saved return. Passing all ⇒
-crop + full-frame snapshot, an `events` doc, and an alert push. Each
-(camera, kind) is capped at 10 events/day; the counters persist to disk AND
-are rebuilt from Firestore's own `events` on startup, so a restart can no
-longer hand a flooding camera a fresh budget (the 08.08 midday report's x20).
+**Layer 3 - returning visitor (came back to the scene).** For every re-ID
+match, a saved return event requires ALL of, in order: not a new entity → has
+a previous sighting → absence ≥ **5 min** (`--returning-gap-min`) → match
+similarity ≥ 0.96 → ≥ 2 prior sightings → the camera was actually SAMPLED
+during ≥ 50% of the absence (an outage/fallback blind spot is not a
+departure; observation log seeded from Firestore history on restart) → the
+entity re-appeared AWAY from its previous position (IoU < 0.5 - a parked car
+re-matching in place never "returned") → ≥ 30 min since this entity's last
+saved return. Passing all ⇒ crop + full-frame snapshot, an `events` doc, and
+an alert push.
 
 **Layer 4 - prolonged presence / loitering.** A stay = consecutive re-ID
 matches of the same entity whose boxes overlap (IoU ≥ 0.3) with no gap longer
@@ -412,11 +382,8 @@ EMA-drifts the stored embedding toward the fresh look; otherwise a new entity
 is inserted. Two detections in one frame can never match the same entity.
 
 **Returning-visitor events** (the saved snapshot pairs under
-`snapshots/returning/`) are person-only (2026-08-08) and require ALL of:
-class `person` at box height ≥ 64 px, absence ≥ 5 min (`--returning-gap-min`),
-similarity ≥ 0.92 (OSNet person floor; 0.96 histogram), ≥ 2 prior sightings,
-a 30-min per-entity cooldown, a 10/day per-camera budget that survives
-restarts (disk snapshot + rebuild from Firestore `events`), **and two
+`snapshots/returning/`) require ALL of: absence ≥ 5 min (`--returning-gap-min`),
+similarity ≥ 0.96, ≥ 2 prior sightings, a 30-min per-entity cooldown, **and two
 authenticity guards**: the camera must have actually been sampled during most
 of the absence (an outage or fallback episode is a blind spot, not a
 departure), and the entity must re-appear away from its previous position (a
@@ -470,13 +437,6 @@ Chart.js 4. Opens with [`python serve.py`](src/serve.py) and renders:
   an anomaly badge showing the collector's latest verdict (▲ spike / ▼ drop,
   which metric, observed vs expected), and a per-tile mini chart of the last
   30 samples with anomalous points enlarged in red on the series that fired.
-- **Heat depth on the model strip** - each strip cell's 🔥 toggle swaps to
-  the camera's dwell heatmap; on the private dashboard two selectors pick
-  the **layer (people / vehicles / other) x daypart (all day / night /
-  morning / afternoon / evening)** combination, rendered on demand by
-  `/api/heatmap` from the grid state the collector publishes next to its
-  overlay (`snapshots/heatmaps/<cam>.json`). The public copy keeps the
-  single published person overlay.
 - **Combined 24 h chart** stacking all four cameras' people series.
 - **Anomaly events table** - every flagged sample of the last 24 h across all
   slots: when, where, spike or drop, people or vehicles, observed vs expected
@@ -548,38 +508,6 @@ behaviors without needing YOLO.
 
 ---
 
-## Live analysis - one layer per camera, on the tile itself
-
-The private dashboard's 🔬 button (visible only where the local server
-answers `/api/ping`) runs a **continuous live analysis on the exact
-camera whose tile was clicked**: the tile morphs in place into a stream
-of analyzed frames (client polls `GET /api/analysis/frame` at ~1 fps)
-while the other tiles keep playing normal video and the cloud VM runs
-untouched. Engine: `app/live_analysis.py`; endpoints:
-`POST /api/analysis/start?cam&layer`, `GET /api/analysis/frame?cam`,
-`POST /api/analysis/stop?cam`.
-
-Semantics: **one layer per camera, up to four live analyses across the
-grid** (duplicates fine). Layers - `paths` (trails + id boxes + km/h),
-`pose` (skeletons ONLY, on people close enough - never detection boxes),
-`gestures` (skeleton + chip only for detected gestures), `body`
-(fall-detection-style view: status HUD with persons-in-view/flagged
-tallies, red box + skeleton + verdict chip on flagged people, and an
-ALERT banner while a fall/erratic flag is live), `faces` (YuNet
-rectangles), `heat` (full heat-vision: the whole frame re-rendered as a
-thermal-style colormap with the SESSION'S own dwell burning hotter -
-stylized from brightness + dwell, not a thermal sensor), `line`
-(counting line + live in/out). Every layer states an empty result
-honestly ("no gestures detected right now"). Switching layers mutates
-the running session - stream, tracker, heat grid, line counters and
-gesture history all survive, so heat -> gestures -> heat resumes the
-accumulated map.
-
-Compute honesty: sessions share ONE YOLO (`yolov8s`) behind a lock; on
-an operator CPU a single session runs ~1-2 fps, four concurrent
-~0.3-0.5 fps each, frames trail the live edge by a few seconds. A
-session with no poller for 60 s shuts itself down.
-
 ## Window analysis - pose, behavior labels, gestures, faces, target lock
 
 The dashboard's "Window analysis" panel (`POST /api/deep-analyze`, CLI:
@@ -599,28 +527,20 @@ three opt-in layers (checkboxes in the panel / query params on the API):
   the table - deliberately a short list, the anomaly layer already taught
   us a chatty badge gets ignored.
 - **Pose** (`pose=1`, `app/pose.py`) - a second pass with `yolov8n-pose`
-  (auto-downloaded; `POSE_WEIGHTS` overrides), run **top-down since
-  2026-08-08**: each detector `person` box is cropped (25% padding, boxes
-  ≥ 40 px tall only) and the pose model sees the crop at its own
-  resolution. The previous full-frame pass handed the model ~15 px of
-  person on wide street shots and attached ZERO skeletons; the crop pass
-  finds 9/10 on the same live Taksim frame. The detector stays the source
-  of truth for WHO exists - the best pose-person inside each crop claims
-  that box, so counts can never change because pose ran. Matched boxes
-  gain COCO-17 keypoints (drawn on the annotated frame), which unlocks
-  the posture labels - `crouching`, `fall_suspect` (torso past 60° from
-  vertical with ≥ 8 px of torso, ≥ 2 frames) - and the gesture pass:
+  (auto-downloaded; `POSE_WEIGHTS` overrides) whose skeletons are matched
+  onto the detector's `person` boxes by IoU - a pose-person with no
+  matching detection is discarded, so counts can never change because
+  pose ran. Matched boxes gain COCO-17 keypoints (drawn on the annotated
+  frame), which unlocks the posture labels - `crouching`, `fall_suspect`
+  (torso past 60° from vertical, ≥ 2 frames) - and the gesture pass:
   **`hand_raised`, `both_hands_up`, `wave`** (`app/gestures.py`, a raised
-  wrist swinging across its elbow ≥ 2 times, deadband scaled to shoulder
-  width). Arm-level only, honestly:
+  wrist swinging across its elbow ≥ 2 times). Arm-level only, honestly:
   at street-cam distance a hand is a few pixels, finger-level vocabulary
   needs a close-range camera (mediapipe experiment noted in
   requirements.txt, notebook-only).
 - **Faces** (`faces=1`, `app/faces.py`) - face **detection** boxes on the
-  final frame via OpenCV's bundled YuNet. Drop the ~230 KB
-  `face_detection_yunet_2023mar.onnx` from the opencv_zoo repo at
-  `data/face_detection_yunet_2023mar.onnx` (picked up automatically), or
-  point `FACE_MODEL` anywhere else; silently off without a model. This
+  final frame via OpenCV's bundled YuNet (point `FACE_MODEL` at the
+  ~230 KB `.onnx` from the opencv_zoo repo; silently off otherwise). This
   is rectangles only - no embeddings, no face database, no identification;
   "have I seen this person before?" stays answered by body-appearance
   re-ID, which is the honest tool at these camera distances.
@@ -826,7 +746,7 @@ python -m app.detect_core --resolve konya_hukumet,otogar_kavsagi
 | Path | Purpose |
 |------|---------|
 | [`serve.py`](src/serve.py) | One-shot launcher for the dashboard (no-cache static server). |
-| [`turkey_business_activity.ipynb`](turkey_business_activity.ipynb) | Offline analytics notebook (lives at the repo root, not under `src/`). |
+| [`turkey_business_activity.ipynb`](src/turkey_business_activity.ipynb) | Offline analytics notebook. |
 | [`app/collector.py`](src/app/collector.py) | 24/7 sampler that writes to Firestore. |
 | [`app/detect_core.py`](src/app/detect_core.py) | YOLO loading, stream resolution, detection, ROI filter, burst tracking + line crossings. |
 | [`app/reid.py`](src/app/reid.py) | Appearance-based re-identification registry (SQLite). |
@@ -839,4 +759,4 @@ python -m app.detect_core --resolve konya_hukumet,otogar_kavsagi
 | [`tools/roi_grid.py`](src/tools/roi_grid.py) | Capture a frame with a coordinate grid to configure ROI/line polygons. |
 | [`tools/search_by_image.py`](src/tools/search_by_image.py) | CLI for search-by-example (+ demo index seeding from still images). |
 | [`web/`](src/web/) | Static HTML/JS dashboard. |
-| [`docs/PROJECT_GUIDE.md`](src/docs/PROJECT_GUIDE.md) / [`PROJECT_GUIDE_HE.md`](src/docs/PROJECT_GUIDE_HE.md) | Single consolidated project guide (English + verbose Hebrew): architecture, VM setup + commands + rebuild, live analysis layers, notebook, Firebase, Cloudflare proxy, billing kill-switch. |
+| [`docs/firebase_setup.md`](src/docs/firebase_setup.md) | Firebase project + security rules walkthrough. |

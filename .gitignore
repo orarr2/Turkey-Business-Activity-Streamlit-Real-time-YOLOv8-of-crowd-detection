@@ -21,12 +21,10 @@ data/
 # The README's annotated example frames are the one committed JPEG exception.
 !src/docs/images/*.jpg
 
-# Dashboard runtime snapshots (anomalies + returning visitors + operator's
-# manual "📸 Snapshot grid" PNGs). Keep the directory structure (via
-# .gitkeep), drop the images and manifests.
+# Dashboard runtime snapshots (anomalies + returning visitors). Keep the
+# directory structure (via .gitkeep), drop the images and manifests.
 # `**/` prefix so the rule still matches after the move to src/web/snapshots/.
 **/web/snapshots/**/*.jpg
-**/web/snapshots/**/*.png
 **/web/snapshots/**/*.json
 !**/web/snapshots/**/.gitkeep
 
@@ -52,11 +50,8 @@ admin.ipynb
 src/data/labels_export/
 src/web/snapshots/
 
-# local-only VM rebuild kit (secrets + one-command builder; never commit)
-/local_only/
+# local-only yolov8n twin of the notebook (mirrors the VM model; not shared)
+turkey_business_activity_yolov8n.ipynb
 
 # per-user local dashboard grid (the cameras picked in the notebook)
 src/web/local_grid.json
-
-# local editor / assistant tooling config - never commit
-.claude/

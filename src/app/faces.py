@@ -27,15 +27,8 @@ sample.
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 FACE_MODEL_ENV = "FACE_MODEL"
-# Default drop path for the YuNet ONNX (see tools/setup_reid.sh precedent):
-# used when FACE_MODEL is unset. Committing the ~230 KB model makes face
-# DETECTION actually runnable - until 2026-08-08 no machine had the file,
-# so every face feature was silently dead.
-FACE_MODEL_DEFAULT = (Path(__file__).resolve().parent.parent / "data"
-                      / "face_detection_yunet_2023mar.onnx")
 # YuNet score threshold - below this a candidate is background texture.
 FACE_SCORE = 0.60
 FACE_NMS = 0.30
@@ -53,11 +46,7 @@ _failed = False
 
 def _model_path() -> str | None:
     p = os.environ.get(FACE_MODEL_ENV, "").strip()
-    if p and os.path.isfile(p):
-        return p
-    if not p and FACE_MODEL_DEFAULT.is_file():
-        return str(FACE_MODEL_DEFAULT)
-    return None
+    return p if p and os.path.isfile(p) else None
 
 
 def _get_detector():
@@ -73,17 +62,8 @@ def _get_detector():
         return None
     try:
         import cv2
-        try:
-            _detector = cv2.FaceDetectorYN.create(path, "", (320, 320),
-                                                  FACE_SCORE, FACE_NMS, 5000)
-        except cv2.error:
-            # OpenCV's C++ loader cannot open non-ASCII ABSOLUTE paths on
-            # Windows (the operator's repo lives under a Hebrew-named
-            # folder). The path relative to the working directory (src/)
-            # is plain ASCII - retry with it before giving up.
-            _detector = cv2.FaceDetectorYN.create(
-                os.path.relpath(path), "", (320, 320),
-                FACE_SCORE, FACE_NMS, 5000)
+        _detector = cv2.FaceDetectorYN.create(path, "", (320, 320),
+                                              FACE_SCORE, FACE_NMS, 5000)
     except Exception:
         _failed = True
         return None

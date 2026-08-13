@@ -326,10 +326,6 @@ def _event_caption(e: dict, kind_labels: dict[str, str]) -> str:
     return " · ".join(parts)
 
 
-# A slot thumbnail older than this is stale scenery, not a live preview.
-THUMB_MAX_AGE_S = 3 * 3600.0
-
-
 def fetch_grid_thumbnails(grid: dict | None, latest: list[dict],
                           bucket_name: str | None,
                           downloader=None) -> list[dict]:
@@ -349,26 +345,9 @@ def fetch_grid_thumbnails(grid: dict | None, latest: list[dict],
     out: list[dict] = []
     for s in (grid or {}).get("slots") or []:
         slot_id = str(s.get("slot_id") or "")
-        # Staleness gate (2026-07-31): slot_N.jpg is only overwritten on a
-        # SUCCESSFUL sample, so when a slot's latest doc is a miss (or old)
-        # the stored image is whatever camera last succeeded there - the
-        # Japan midday report attached Taksim/Beyazit frames under Japanese
-        # camera names after an all-miss night. No fresh success = no
-        # thumbnail; an honest gap beats a wrong picture.
-        d = latest_by_slot.get(slot_id) or {}
-        fresh = False
-        if d.get("ok") == 1 and d.get("ts"):
-            try:
-                age = (dt.datetime.now(dt.timezone.utc)
-                       - dt.datetime.fromisoformat(str(d["ts"]))).total_seconds()
-                fresh = 0 <= age <= THUMB_MAX_AGE_S
-            except ValueError:
-                fresh = False
-        if not fresh:
-            continue
         # The live-view URL when the collector wrote one; otherwise fall
         # back to the fixed Storage path each slot's live tile writes to.
-        live_url = (d.get("live_url")
+        live_url = ((latest_by_slot.get(slot_id) or {}).get("live_url")
                     or f"https://storage.googleapis.com/{bucket_name}/"
                        f"snapshots/live/{slot_id}.jpg")
         data = downloader(live_url)
@@ -403,11 +382,9 @@ def fetch_snapshots_for_groups(groups: list[dict],
 
         ff = e.get("fullframe_url")
         cr = e.get("snapshot_url")
-        bf = e.get("before_url")
         ff_bytes = downloader(ff) if ff else None
         cr_bytes = downloader(cr) if cr else None
-        bf_bytes = downloader(bf) if bf else None
-        if not ff_bytes and not cr_bytes and not bf_bytes:
+        if not ff_bytes and not cr_bytes:
             continue
         # If we have only the crop, promote it to fullframe slot so the
         # card layout still fills its primary image row.
@@ -427,17 +404,8 @@ def fetch_snapshots_for_groups(groups: list[dict],
                 int(e.get("frame_h") or 0),
                 cls=e.get("cls"))
 
-        # fix1-A6: the settle-time SCENE (the object still standing, in
-        # context) - boxed like the fullframe so the card can lead with it.
-        if bf_bytes:
-            bf_bytes = _draw_box_on_frame(
-                bf_bytes, e.get("box"),
-                int(e.get("frame_w") or 0), int(e.get("frame_h") or 0),
-                cls=e.get("cls"))
-
         entry["fullframe_jpeg"] = _shrink_jpeg(ff_bytes) if shrink and ff_bytes else ff_bytes
         entry["crop_jpeg"] = _shrink_jpeg(cr_bytes) if shrink and cr_bytes else cr_bytes
-        entry["before_jpeg"] = _shrink_jpeg(bf_bytes) if shrink and bf_bytes else bf_bytes
 
         # First-sighting lookup for returning AND loitering visitors:
         # both are "this same entity" claims that read as unfounded without
@@ -486,8 +454,6 @@ def _evidence_card(group: dict, kind_labels: dict[str, str]) -> Table:
     header = Paragraph(" · ".join(header_bits), header_style)
 
     extras = []
-    if e.get("fall_suspect"):
-        extras.append("possible FALL - torso read horizontal")
     dur = e.get("duration_sec")
     if isinstance(dur, (int, float)) and dur > 0:
         extras.append(f"duration {int(dur)} sec")
@@ -501,58 +467,26 @@ def _evidence_card(group: dict, kind_labels: dict[str, str]) -> Table:
 
     rows: list[list] = [[header], [sub]]
 
-    # A static-departed card's big scene is the AFTER frame - the object is
-    # gone and the red box floats over whatever now occupies the spot.
-    # Without a caption the box reads as a live (mis)detection of the
-    # pedestrians standing there (operator complaint, 09.08: the vendor
-    # cart's departure card looked like "the model calls these people a
-    # car"). Say what each image IS.
-    is_static = group.get("kind") == "static_departed"
-    is_unattended = group.get("kind") == "unattended_object"
-    before_bytes = group.get("before_jpeg")
     ff = group.get("fullframe_jpeg")
-
-    if before_bytes:
-        # fix1-A6 layout: lead with the settle-time scene - the object
-        # STANDING there, boxed in context (the operator's "what happened
-        # before"); the current frame joins the small pair row below.
-        rows.append([Paragraph(
-            "The scene while the object stood there - the red box marks it:",
-            small_style)])
-        rows.append([Image(BytesIO(before_bytes), width=15*cm,
-                           height=8.5*cm, kind="proportional")])
-    elif ff:
-        if is_static:
-            rows.append([Paragraph(
-                "The scene AFTER departure - the red box marks the spot "
-                "where the object had been standing:", small_style)])
+    if ff:
         rows.append([Image(BytesIO(ff), width=15*cm, height=8.5*cm,
                            kind="proportional")])
 
-    # Small pair row: for static/unattended with a before-scene, the pair
-    # is NOW-scene + object crop; for returning/loiter it stays first
-    # sighting + current crop.
+    # Crop + first sighting row: side-by-side when both present.
     crop_bytes = group.get("crop_jpeg")
     first_bytes = group.get("first_jpeg")
-    pair_left = None
-    if before_bytes and ff:
-        pair_left = (("The spot NOW - the object is gone:" if is_static
-                      else "The scene NOW - the object is still there:"), ff)
-    elif first_bytes:
-        pair_left = ("First seen previously:", first_bytes)
-    if crop_bytes or pair_left:
+    if crop_bytes or first_bytes:
         image_cells: list[list] = [[], []]
-        if pair_left:
-            image_cells[0].append(Paragraph(pair_left[0], small_style))
-            image_cells[0].append(Image(BytesIO(pair_left[1]),
+        if first_bytes:
+            image_cells[0].append(Paragraph("First seen previously:",
+                                            small_style))
+            image_cells[0].append(Image(BytesIO(first_bytes),
                                         width=6*cm, height=4.5*cm,
                                         kind="proportional"))
         else:
             image_cells[0].append(Paragraph("", small_style))
         if crop_bytes:
             label = ("Same object now:" if first_bytes
-                     else "The object, up close:"
-                     if (is_static or is_unattended)
                      else "Specific object flagged:")
             image_cells[1].append(Paragraph(label, small_style))
             image_cells[1].append(Image(BytesIO(crop_bytes),
@@ -819,36 +753,19 @@ def compose_pdf(out_path: str | Path, *,
 
     def _peaks_table(rows, title):
         story.append(Paragraph(title, styles["h"]))
-        header = ["Camera", "Peak People", "Peak Vehicles",
-                  "Typical Traffic", "Crossings in/out"]
+        header = ["Camera", "Peak People", "Peak Vehicles", "Typical Traffic"]
         body = [header]
         for c in rows:
             people = str(c["peak_person"])
             if c["peak_person_ts"]:
                 people += f" at {_fmt_ts(c['peak_person_ts'])}"
             spd = f"~{c['typ_kmh']:.0f} km/h" if c["typ_kmh"] > 0 else "-"
-            cross = (f"{c.get('cross_in', 0)} / {c.get('cross_out', 0)}"
-                     if c.get("has_line") else "-")
             body.append([Paragraph(c["cam"], cell_style),
-                         people, str(c["peak_vehicles"]), spd, cross])
-        tbl = Table(body, colWidths=[5.6*cm, 3.2*cm, 2.3*cm, 2.7*cm, 2.8*cm],
+                         people, str(c["peak_vehicles"]), spd])
+        tbl = Table(body, colWidths=[7*cm, 3.6*cm, 2.5*cm, 3.5*cm],
                     repeatRows=1)
         tbl.setStyle(_table_style())
         story.append(tbl)
-        # fix1-A5: EXTRA_CLASSES peaks (birds, bags, umbrellas...) - counted
-        # by the collector but absent from the person/vehicle columns; one
-        # compact line keeps them visible without widening the table.
-        parts = []
-        for c in rows:
-            ep = c.get("extra_peaks") or {}
-            if ep:
-                inner = ", ".join(f"{cls} {n}" for cls, n in
-                                  sorted(ep.items(), key=lambda kv: -kv[1]))
-                parts.append(f"{c['cam']}: {inner}")
-        if parts:
-            story.append(Paragraph(
-                "Other objects (window peaks) - " + "; ".join(parts),
-                styles["cap"]))
 
     if _dom_rows:
         _peaks_table(_dom_rows,
