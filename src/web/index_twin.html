@@ -92,9 +92,16 @@
     .adv-header h3 { margin: 0; }
     .adv-viewport { position: relative; background: #000; border-radius: 8px;
                 overflow: hidden; aspect-ratio: 16/9; }
-    .adv-viewport img { width: 100%; height: 100%; object-fit: contain; display: block; }
+    .adv-viewport .adv-video-wrap { position: absolute; inset: 0;
+                display: flex; align-items: center; justify-content: center; }
+    .adv-viewport .adv-video-wrap iframe { width: 100%; height: 100%; border: 0;
+                display: block; }
+    .adv-viewport .adv-video-wrap video { width: 100%; height: 100%;
+                object-fit: contain; display: block; background: #000; }
+    .adv-viewport .adv-video-wrap .adv-fallback-poster { width: 100%; height: 100%;
+                object-fit: contain; }
     .adv-viewport canvas { position: absolute; inset: 0; width: 100%; height: 100%;
-                pointer-events: none; }
+                pointer-events: none; z-index: 2; }
     .adv-status { color: #94a3b8; font-size: 12px; margin-top: 10px;
                 font-family: monospace; min-height: 18px; }
     .adv-status.err { color: #fca5a5; }
@@ -1025,7 +1032,7 @@
           <button class="adv-stop" data-adv-stop>&#9632; stop &amp; back</button>
         </div>
         <div class="adv-viewport">
-          <img id="adv-frame" alt="live analyzed frame" />
+          <div id="adv-video-wrap" class="adv-video-wrap"></div>
           <canvas id="adv-canvas"></canvas>
         </div>
         <div class="adv-status" id="adv-status"></div>
@@ -1039,7 +1046,7 @@
        so the browser doesn't serve a stale ES-module from disk cache. -->
   <script type="module" src="./firebase-config.js?v=44"></script>
   <script type="module" src="./cameras.js?v=44"></script>
-  <script type="module" src="./app.js?v=55"></script>
+  <script type="module" src="./app.js?v=57"></script>
 
   <!-- Search UI. INLINE and NON-MODULE on purpose: it wires POST /api/search
        on this same server, has no Firebase dependency, and must keep working

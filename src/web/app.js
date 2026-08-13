@@ -936,12 +936,72 @@ function refreshHeatView(s) {
 
 // LOCAL_MODE local model-view poll (2026-08-13): main mode reads
 // /snapshots/model_view/<slot_id>.json + .jpg produced by the notebook's
-// app.local_producers.ModelViewProducer, then feeds updateStrip so the
-// Model view - live section shows the operator's PICKED cameras instead
-// of the empty "waiting for first sample" cells that used to sit there
-// (they never filled because the VM's Firestore keys are Turkey slots,
-// not the picked local_* ones). Twin mode is unchanged - twin mirrors
-// the VM directly via Firestore.
+// app.local_producers.ModelViewProducer, then feeds:
+//   (a) updateStrip - the Model view - live side strip;
+//   (b) the tile's Activity Index badge + anomaly badge - the DEFAULT
+//       readout on the main grid (fix 2026-08-13 pm: previously these
+//       stayed hidden in local mode because setLatest gated them behind
+//       a "cloud numbers only for matched cams" check, so a Bangkok pick
+//       sat with an empty header while the producer WAS writing counts).
+// Twin mode is unchanged - twin mirrors the VM directly via Firestore.
+//
+// Rolling window per slot (last 6 producer rounds = ~2.5 min) drives
+// computeActivity so a single glitchy sample can't swing the badge.
+const _LOCAL_ACTIVITY_WINDOW = 6;
+const _LOCAL_HISTORY = Object.create(null);   // slot_id -> [{person, vehicles, ts}, ...]
+
+function _updateLocalTileBadges(slotId, j) {
+  const st = tileState[slotId];
+  if (!st) return;
+  const person   = Number(j?.counts?.person   ?? 0);
+  const vehicles = Number(j?.counts?.vehicles ?? 0);
+  const ts       = j?.at ? j.at * 1000 : Date.now();
+  const hist = _LOCAL_HISTORY[slotId] || (_LOCAL_HISTORY[slotId] = []);
+  hist.push({ person, vehicles, ts, counts: j?.counts || null });
+  if (hist.length > _LOCAL_ACTIVITY_WINDOW) hist.shift();
+
+  const act = computeActivity(hist);
+  st.activityBadge.style.display = "";     // was display:none until data arrived
+  setActivityBadge(st, act);
+
+  // Basic anomaly signal driven by absolute count bands the collector
+  // uses server-side (app/collector.py: EXTREME_VEH_LOAD = 38.0 + 50-person
+  // extreme crowding threshold). Kept simple + honest: no cross-collection
+  // Firestore data needed. Extended anomaly types (blocked / dark) require
+  // per-frame gates and stay a VM-side concern.
+  const load = act?.load ?? 0;
+  const now  = act?.now  ?? 0;
+  let mood = "unk", msg = "no data yet";
+  if (hist.length >= 2) {
+    if (now >= 50 || load >= 38) {
+      mood = "spike"; msg = `extreme load - ${now} people + ${load} veh-load units`;
+    } else if (act && act.idx >= 8) {
+      mood = "spike"; msg = `busy - activity ${act.idx}/10 · ${act.label}`;
+    } else {
+      mood = "ok"; msg = act ? `activity ${act.idx}/10 · ${act.label}` : "ok";
+    }
+  }
+  st.anomalyBadge.style.display = "";
+  st.anomalyBadge.className = `anomaly-badge ${mood}`;
+  const text = st.anomalyBadge.querySelector("[data-anomaly-text]");
+  if (text) text.textContent = mood === "spike" ? "!"
+                             : mood === "unk"   ? "-"
+                             : "ok";
+  st.anomalyBadge.title = msg;
+
+  // Refresh in-tile KPIs (People / Vehicles overlay) so numbers match the
+  // badge - previously stayed "-" in local mode.
+  if (!st.analysis) st.overlay.style.display = "";
+  const setK = (k, v) => {
+    const el = [...st.latestVals].find((x) => x.dataset.k === k);
+    if (el) el.textContent = v != null ? v : "-";
+  };
+  setK("person", person);
+  setK("vehicles", vehicles);
+  st.lastSampleMs = ts;
+  renderSampleAge(st);
+}
+
 if (LOCAL_MODE && stripEl) {
   const _pollLocalModelView = async () => {
     for (const slot of GRID_SLOTS) {
@@ -960,6 +1020,10 @@ if (LOCAL_MODE && stripEl) {
           live_annotated_url:  jpg_url,
           ts:                  j.at,
         });
+        // fix 2 (2026-08-13 pm): also drive the tile's default readouts
+        // (Activity Index + anomaly badge + KPI numbers), so the operator
+        // sees analysis at a glance without opening Advanced Analysis.
+        _updateLocalTileBadges(slot.slot_id, j);
       } catch (_) { /* file not written yet - keep placeholder */ }
     }
   };
@@ -2845,14 +2909,16 @@ setInterval(async () => {
   });
 })();
 
-// ---------- Advanced Analysis tab (2026-08-13) --------------------------------
+// ---------- Advanced Analysis tab (2026-08-13, v2 live-video refactor) --------
 // Three-step flow inside a dedicated tab: pick camera -> pick layer -> run.
-// Only ONE session across the grid (MAX_SESSIONS=1 in live_analysis.py). The
-// four grid tiles are unaffected; they keep showing the ModelViewProducer's
-// annotated frames + Activity Index badges. Reuses the existing
-// /api/analysis/start | /frame | /stop endpoints and shows the analyzed JPEG
-// (which already has boxes/skeleton/heat drawn server-side) plus the
-// per-tick object count parsed from the X-Analysis-Meta header.
+// v2 (2026-08-13 pm): the run panel now embeds the SAME YouTube / HLS player
+// the grid tile uses, so the operator sees smooth 30-fps video (not a 1-fps
+// JPEG slideshow). Analysis meta rides X-Analysis-Meta and is painted on a
+// canvas layered above the video, refreshing ~1/s while the video plays
+// underneath at native frame rate. Only ONE session across the grid
+// (MAX_SESSIONS=1 in live_analysis.py). The four grid tiles are unaffected;
+// they keep showing the ModelViewProducer's annotated frames + Activity
+// Index badges.
 (function initAdvancedAnalysis() {
   const section = document.querySelector('[data-tab="advanced"]');
   if (!section) return;
@@ -2860,18 +2926,19 @@ setInterval(async () => {
   const pickedHost = section.querySelector("#adv-picked-cam");
   const runTitle = section.querySelector("#adv-run-title");
   const statusEl = section.querySelector("#adv-status");
-  const frameImg = section.querySelector("#adv-frame");
+  const videoWrap = section.querySelector("#adv-video-wrap");
   const canvas = section.querySelector("#adv-canvas");
   const ctx = canvas ? canvas.getContext("2d") : null;
 
   const state = {
-    picked: null,     // slot dict {slot_id, placeholder_name, display_area}
-    layer: null,      // string
+    picked: null,     // slot dict {slot_id, placeholder_name, display_area,
+                      //            placeholder_embed, placeholder_hls, placeholder_page}
+    layer: null,
     timer: null,
     inflight: false,
     failures: 0,
     lastRestart: 0,
-    lastBlobUrl: null,
+    hls: null,        // hls.js instance we own, destroyed on stop
   };
   const overlayState = { canvas, ctx };  // shape drawAnalysisOverlay expects
 
@@ -2923,6 +2990,101 @@ setInterval(async () => {
 
   section.querySelector("[data-adv-stop]")?.addEventListener("click", stopAndBack);
 
+  // Build the live-video player for a slot. YouTube slots get an <iframe>
+  // (autoplay + mute so the browser lets it start without a user gesture),
+  // tvkur/HLS slots get a <video> driven by hls.js (already loaded for the
+  // grid tiles). Any slot without either falls back to the analyzed-JPEG
+  // path so we still show something.
+  function buildVideoInto(slot) {
+    if (!videoWrap) return false;
+    if (state.hls) { try { state.hls.destroy(); } catch (_) {} state.hls = null; }
+    videoWrap.innerHTML = "";
+    if (slot.placeholder_embed) {
+      // Add the `origin` param so YouTube's IFrame API accepts our
+      // postMessage playVideo below (drops silent auth failures that
+      // manifest as "black video after autoplay=1" in Chrome).
+      let embed = slot.placeholder_embed;
+      if (!/[?&]origin=/.test(embed)) {
+        embed += (embed.includes("?") ? "&" : "?") +
+                 "origin=" + encodeURIComponent(window.location.origin);
+      }
+      const yt = document.createElement("iframe");
+      yt.src = embed;
+      yt.title = slot.placeholder_name || slot.slot_id;
+      yt.allow = "autoplay; encrypted-media; picture-in-picture";
+      yt.allowFullscreen = true;
+      yt.referrerPolicy = "no-referrer-when-downgrade";
+      videoWrap.appendChild(yt);
+      // Click-to-play overlay: Chrome blocks iframe autoplay in a lot of
+      // situations even when autoplay=1 + mute=1. One tap on this
+      // overlay counts as the user gesture, triggers playVideo via YT
+      // JS API + removes itself. The video then keeps playing as long
+      // as the tab is visible.
+      const playBtn = document.createElement("button");
+      playBtn.type = "button";
+      playBtn.className = "adv-play-overlay";
+      playBtn.style.cssText =
+        "position:absolute;inset:0;z-index:3;background:rgba(0,0,0,0.55);" +
+        "color:#e2e8f0;border:0;font-size:15px;cursor:pointer;display:flex;" +
+        "flex-direction:column;align-items:center;justify-content:center;gap:8px";
+      playBtn.innerHTML =
+        '<div style="font-size:44px;line-height:1">&#9654;</div>' +
+        '<div>tap to start live video</div>';
+      const _startPlayback = () => {
+        try {
+          yt.contentWindow.postMessage(
+            JSON.stringify({event: "command", func: "playVideo", args: []}),
+            "https://www.youtube.com");
+        } catch (_) {}
+        playBtn.remove();
+      };
+      playBtn.addEventListener("click", _startPlayback);
+      videoWrap.appendChild(playBtn);
+      // Also auto-attempt playVideo after the iframe finishes loading, in
+      // case the browser policy allows it silently - user then never sees
+      // the overlay flicker.
+      yt.addEventListener("load", () => {
+        setTimeout(() => {
+          try {
+            yt.contentWindow.postMessage(
+              JSON.stringify({event: "command", func: "playVideo", args: []}),
+              "https://www.youtube.com");
+          } catch (_) {}
+        }, 300);
+      });
+      return true;
+    }
+    if (slot.placeholder_hls) {
+      const v = document.createElement("video");
+      v.autoplay = true; v.muted = true; v.playsInline = true; v.controls = false;
+      videoWrap.appendChild(v);
+      try {
+        if (window.Hls && window.Hls.isSupported()) {
+          const hls = new window.Hls({ liveSyncDurationCount: 2 });
+          hls.loadSource(slot.placeholder_hls); hls.attachMedia(v);
+          state.hls = hls;
+        } else if (v.canPlayType("application/vnd.apple.mpegurl")) {
+          v.src = slot.placeholder_hls;   // Safari native
+        }
+      } catch (_) { /* fall through; server-side JPEG is the visible fallback */ }
+      return true;
+    }
+    if (slot.placeholder_page) {
+      const a = document.createElement("a");
+      a.href = slot.placeholder_page; a.target = "_blank"; a.rel = "noopener";
+      a.style.cssText = "color:#94a3b8;font-size:13px;text-align:center;padding:20px";
+      a.textContent = "no embeddable stream - open the source page";
+      videoWrap.appendChild(a);
+      return false;
+    }
+    return false;
+  }
+
+  function tearDownVideo() {
+    if (state.hls) { try { state.hls.destroy(); } catch (_) {} state.hls = null; }
+    if (videoWrap) videoWrap.innerHTML = "";
+  }
+
   function resetRun() {
     if (state.timer) { clearInterval(state.timer); state.timer = null; }
     state.picked = null;
@@ -2930,8 +3092,7 @@ setInterval(async () => {
     state.failures = 0;
     state.inflight = false;
     if (ctx && canvas) ctx.clearRect(0, 0, canvas.width, canvas.height);
-    if (state.lastBlobUrl) { URL.revokeObjectURL(state.lastBlobUrl); state.lastBlobUrl = null; }
-    if (frameImg) frameImg.removeAttribute("src");
+    tearDownVideo();
     pickedHost.textContent = "";
     statusEl.className = "adv-status";
     statusEl.textContent = "";
@@ -2950,9 +3111,6 @@ setInterval(async () => {
 
   async function startRun(layer) {
     if (!state.picked) return;
-    // Kill any prior session first (MAX_SESSIONS=1 - backend will 409
-    // otherwise). Fire-and-forget: even if it fails there was nothing
-    // to kill, and /start will take the slot.
     fetch(`/api/analysis/stop?cam=${encodeURIComponent(state.picked.slot_id)}`,
           { method: "POST" }).catch(() => {});
     state.layer = layer;
@@ -2961,6 +3119,9 @@ setInterval(async () => {
     runTitle.textContent = camLabel + "  ·  " + layer;
     statusEl.className = "adv-status";
     statusEl.textContent = "starting session on " + camLabel + " ...";
+    // Bring up the live video RIGHT AWAY so operator sees motion even
+    // before the server produces its first analyzed frame + meta.
+    buildVideoInto(state.picked);
     try {
       const r = await fetch(
         `/api/analysis/start?cam=${encodeURIComponent(state.picked.slot_id)}` +
@@ -2984,6 +3145,10 @@ setInterval(async () => {
     state.inflight = true;
     try {
       const cam = state.picked.slot_id;
+      // HEAD-style meta only: the JPEG is 100-500 KB per tick and we do
+      // not need it (video plays natively). Server always ships the JPEG
+      // in the response BODY, but we ignore it - r.blob() below drains
+      // the body so the connection is reusable.
       const r = await fetch(
         `/api/analysis/frame?cam=${encodeURIComponent(cam)}&_=${Date.now()}`,
         { cache: "no-store" });
@@ -2998,13 +3163,10 @@ setInterval(async () => {
             meta = JSON.parse(new TextDecoder("utf-8").decode(bytes));
           } catch (_) {}
         }
-        const blob = await r.blob();
-        if (frameImg) {
-          const url = URL.createObjectURL(blob);
-          if (state.lastBlobUrl) URL.revokeObjectURL(state.lastBlobUrl);
-          state.lastBlobUrl = url;
-          frameImg.src = url;
-        }
+        // Drain the body without holding it (avoids leaking blob-URL
+        // handles the way the earlier <img> path did).
+        r.blob().catch(() => {});
+        if (meta && ctx) drawAnalysisOverlay(overlayState, meta);
         state.failures = 0;
         const seq = r.headers.get("X-Seq") || "?";
         const layer = r.headers.get("X-Layer") || state.layer || "?";
@@ -3012,7 +3174,8 @@ setInterval(async () => {
         statusEl.className = "adv-status";
         statusEl.textContent =
           "tick #" + seq + "  ·  layer " + layer +
-          "  ·  " + nBoxes + " object" + (nBoxes === 1 ? "" : "s") + " detected";
+          "  ·  " + nBoxes + " object" + (nBoxes === 1 ? "" : "s") + " detected " +
+          "(overlay updates ~1/s; video plays at native rate)";
       } else if (r.status === 202) {
         statusEl.className = "adv-status";
         statusEl.textContent = "session starting, first frame not ready yet...";
@@ -3042,13 +3205,10 @@ setInterval(async () => {
     }
   }
 
-  // Repopulate whenever the user opens the Advanced Analysis tab so
-  // stale slot dropdowns (from an earlier picker run) refresh.
   document.getElementById("tabbar")?.addEventListener("click", (ev) => {
     const b = ev.target?.closest?.("[data-tab-btn]");
     if (b && b.dataset.tabBtn === "advanced") populateCameras();
   });
 
-  // First paint if tileState is already populated at DOMContentLoaded.
   populateCameras();
 })();
