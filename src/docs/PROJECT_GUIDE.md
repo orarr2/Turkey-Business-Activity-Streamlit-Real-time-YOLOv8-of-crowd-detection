@@ -1,11 +1,11 @@
-# Project Guide — Business Activity / Live Footfall
+# Project Guide - Business Activity / Live Footfall
 
 Single consolidated operational reference for the whole project. Merges what
 used to live in six separate documents (`deploy/gcp-vm/README.md`,
 `deploy/REBUILD.md`, `deploy/cloudflare-proxy/README.md`,
 `deploy/gcp-billing-killswitch/README.md`, `docs/firebase_setup.md`, and the
 pre-existing Hebrew `MODEL_GUIDE_HE.md`). The Hebrew twin of this document is
-[`PROJECT_GUIDE_HE.md`](PROJECT_GUIDE_HE.md) — same chapter numbering, so
+[`PROJECT_GUIDE_HE.md`](PROJECT_GUIDE_HE.md) - same chapter numbering, so
 cross-references work in both directions.
 
 ---
@@ -13,12 +13,12 @@ cross-references work in both directions.
 ## Quick navigation
 
 1. [What the project does](#1-what-the-project-does)
-2. [Architecture — where each piece runs](#2-architecture--where-each-piece-runs)
-3. [The VM — deep dive](#3-the-vm--deep-dive)
+2. [Architecture - where each piece runs](#2-architecture--where-each-piece-runs)
+3. [The VM - deep dive](#3-the-vm--deep-dive)
 4. [VM commands cheatsheet](#4-vm-commands-cheatsheet)
 5. [The 7 live analysis layers](#5-the-7-live-analysis-layers)
 6. [The deep-window analysis (`behavior.analyze_window`)](#6-the-deep-window-analysis-behavioranalyze_window)
-7. [The notebook — offline analytics](#7-the-notebook--offline-analytics)
+7. [The notebook - offline analytics](#7-the-notebook--offline-analytics)
 8. [Model choice + parameters](#8-model-choice--parameters)
 9. [Anomalies + reporting](#9-anomalies--reporting)
 10. [Active-learning loop](#10-active-learning-loop)
@@ -41,7 +41,7 @@ Every sampling round (40 s in the shipped cloud deployment; `--interval` sets
 it), the collector grabs a burst from each active camera, runs YOLO on each
 frame, computes gated counts + appearance signatures + anomaly gates, then
 writes the result to Firestore. The web dashboard subscribes with `onSnapshot`
-— no polling, no refresh; every collector write appears immediately.
+- no polling, no refresh; every collector write appears immediately.
 
 The grid is **country-generic**: it always runs 4 cameras from ONE country and
 rotates through a priority ladder (**Turkey → Thailand → Japan → USA**),
@@ -52,13 +52,13 @@ until a Cloudflare Worker on a non-Google ASN restores IBB (see chapter 12).
 
 Outputs:
 
-- **Footfall** — how many people / vehicles per camera per round.
-- **Re-identification** — same-person / same-vehicle recognition over time
+- **Footfall** - how many people / vehicles per camera per round.
+- **Re-identification** - same-person / same-vehicle recognition over time
   (OSNet embeddings when the ONNX file is present, HSV histogram otherwise).
-- **Anomalies** — extreme load, camera obstruction, blackouts, loitering,
+- **Anomalies** - extreme load, camera obstruction, blackouts, loitering,
   returning visitor, unattended object, fall suspect.
 - **Typical vehicle speed** in km/h (published only when the camera has real
-  statistical mass: ≥ 5 samples and ≥ 10 % of rounds carrying one — plazas
+  statistical mass: ≥ 5 samples and ≥ 10 % of rounds carrying one - plazas
   without real traffic show "-" rather than a fabricated number).
 - **PDF report** by e-mail on demand (dashboard "Send Report" button); a
   scheduled twice-a-day digest goes to the project archive mailbox only.
@@ -74,8 +74,8 @@ Free ($0/month), GitHub Actions on a public repo, Firebase Spark plan.
 | Detector | `yolov8s.pt` @ `imgsz 640` (memory-fallback: `yolov8n.pt` @ 768) | `yolo26m.pt` @ `imgsz 960` |
 | Purpose | Runs forever, feeds the dashboard + reports | Deep analysis; also the ground-truth reference for calibration |
 | Data flow | Firestore + Firebase Storage | Local CSV cache pulled from Firestore |
-| Notebook file | — | `turkey_business_activity.ipynb` (git-tracked, `MODEL_WEIGHTS = 'yolo26m.pt'`) |
-| Twin notebook | — | `turkey_business_activity_yolov8n.ipynb` (local-only, `.gitignore`d; mirrors the VM model to compare apples-to-apples on the same camera) |
+| Notebook file | - | `turkey_business_activity.ipynb` (git-tracked, `MODEL_WEIGHTS = 'yolo26m.pt'`) |
+| Twin notebook | - | `turkey_business_activity_yolov8s.ipynb` (mirrors the VM model to compare apples-to-apples on the same camera) |
 
 The twin notebook is intentionally not in git; it is a hand copy of the main
 notebook with `MODEL_WEIGHTS = 'yolov8s.pt'` (or `yolov8n.pt`) so the operator
@@ -89,11 +89,11 @@ The collector never locks onto a fixed set of cameras. A class called
 - **Country ladder (priority)**: Turkey → Thailand → Japan → USA. The grid
   runs 4 cameras from ONE country; it moves to the next country only when the
   active one cannot deliver a single live camera. A dead single camera does
-  not shift the grid — a bench camera from the SAME country backfills.
+  not shift the grid - a bench camera from the SAME country backfills.
 - **Camera ladder (per country)**: `CameraPool` walks that country's list and
   keeps the first 4 live cameras assigned each round; a camera that misses 3
   consecutive samples rests 15 min; `tvkur` (Konya) cameras are a fast-fail
-  path — one miss is enough to rest them.
+  path - one miss is enough to rest them.
 - **Host-level breaker** (`HostBreaker`): 4 consecutive 403/429 → 20-min rest
   for every camera on that host, then a single probe re-opens. This means a
   blocking CDN gets ~3 requests/hour instead of ~120.
@@ -106,7 +106,7 @@ alone spans Eastern / Central / Pacific).
 
 ---
 
-## 2. Architecture — where each piece runs
+## 2. Architecture - where each piece runs
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -139,23 +139,23 @@ alone spans Eastern / Central / Pacific).
 
 Terms:
 
-- **VM** — Virtual Machine on GCP. The project uses `e2-micro`, the smallest
+- **VM** - Virtual Machine on GCP. The project uses `e2-micro`, the smallest
   GCP box (2 shared vCPUs, 1 GB RAM), which is Always Free.
-- **Firestore** — Google's managed NoSQL doc store. The dashboard subscribes
+- **Firestore** - Google's managed NoSQL doc store. The dashboard subscribes
   with `onSnapshot`, so writes appear in the browser without polling.
-- **Firebase Storage** — object bucket for JPEG snapshots + JSON heatmap
+- **Firebase Storage** - object bucket for JPEG snapshots + JSON heatmap
   exports. Has a 24 h lifecycle rule on `snapshots/`.
-- **GitHub Actions** — the free CI runner is where the head fine-tune runs on
+- **GitHub Actions** - the free CI runner is where the head fine-tune runs on
   public-repo minutes; the promoted Detect head lands in Storage and the
   collector hot-swaps it in-place.
 
 Key principle: **the dashboard is a pure consumer**. Anyone who clones the
-repo can serve `web/` and see the same live grid — because all state lives in
+repo can serve `web/` and see the same live grid - because all state lives in
 Firestore, and Firestore's TTL prunes each history collection to 24 h.
 
 ---
 
-## 3. The VM — deep dive
+## 3. The VM - deep dive
 
 ### 3.1 The machine
 
@@ -170,7 +170,7 @@ Zone        : us-east1-c (Virginia)
 Public IP   : ephemeral (rotates on stop/start; static costs money)
 Instance ID : turkey-collector
 Project     : turkey-footfall
-Cost        : $0/month (Always Free — one e2-micro per account, us-central1 /
+Cost        : $0/month (Always Free - one e2-micro per account, us-central1 /
               us-east1 / us-west1 only)
 ```
 
@@ -178,13 +178,13 @@ Cost        : $0/month (Always Free — one e2-micro per account, us-central1 /
 
 - **"0.25 vCPU guaranteed"** means the base allocation is a quarter of a core;
   bursts to ~1 vCPU when the host has headroom. Rounds occasionally take ~25 %
-  longer at random — that is the shared-tenant tax, not a bug.
+  longer at random - that is the shared-tenant tax, not a bug.
 - **1 GB RAM is tight** for an 11 M-parameter model + 4 HLS decoders + OSNet.
   A 2 GB `/swapfile` is added by hand (not by `install.sh`) as insurance;
   observed peak use ≈ 273 MB.
-- **`us-east1-c`, not close to Turkey** — Always Free is restricted to
+- **`us-east1-c`, not close to Turkey** - Always Free is restricted to
   us-central1 / us-east1 / us-west1. RTT to Istanbul is ~150 ms which is
-  irrelevant here — sampling is every 40 s, latency has no effect.
+  irrelevant here - sampling is every 40 s, latency has no effect.
 
 ### 3.2 Folder layout on disk
 
@@ -235,7 +235,7 @@ Notes:
   (mode 0400 root:root). Nothing else on the VM needs elevated privileges.
 - `.venv/` is dominated by `torch` (~1.2 GB) + `ultralytics` (~200 MB). Do
   not try to trim it; both are load-bearing.
-- Everything under `web/snapshots/` is regenerated within a round — safe to
+- Everything under `web/snapshots/` is regenerated within a round - safe to
   delete for a clean-slate restart.
 
 ### 3.3 Installation
@@ -271,7 +271,7 @@ curl -sSL https://raw.githubusercontent.com/orarr2/Turkey-Business-Activity-Stre
   | sudo bash
 ```
 
-The script is idempotent — re-running it is the standard way to refresh code.
+The script is idempotent - re-running it is the standard way to refresh code.
 Its six steps:
 
 1. `apt-get install` system packages: `git`, `python3-venv`, `ffmpeg`, the
@@ -291,7 +291,7 @@ Its six steps:
 **Post-install one-time steps `install.sh` does NOT cover:**
 
 ```bash
-# 2 GB swap — the 1 GB VM needs it (observed peak: 273 MB used)
+# 2 GB swap - the 1 GB VM needs it (observed peak: 273 MB used)
 sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
 sudo mkswap /swapfile && sudo swapon /swapfile
 echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
@@ -316,7 +316,7 @@ sudo systemctl restart collector
 sudo bash /opt/turkey-footfall/src/tools/setup_reid.sh
 ```
 
-### 3.4 `collector.service` — the systemd unit
+### 3.4 `collector.service` - the systemd unit
 
 The template lives in `src/deploy/gcp-vm/collector.service`; `install.sh`
 renders it with `sed -e 's|__INSTALL_DIR__|/opt/turkey-footfall|g' ...`
@@ -361,7 +361,7 @@ MemoryMax=900M
 ```
 
 **IMPORTANT for code updates**: `git pull` + `systemctl restart` alone
-suffices — the installed unit carries **machine-local `Environment=` lines**
+suffices - the installed unit carries **machine-local `Environment=` lines**
 (`FIREBASE_CREDENTIALS`, `FIREBASE_STORAGE_BUCKET`, `REID_MODEL`) that are
 deliberately NOT in the repo template. Overwriting the installed unit from
 the template DROPS those lines and the collector then crash-loops with
@@ -381,7 +381,7 @@ that used to run twice a day now writes to the project archive mailbox only.
 Enabling it needs `/etc/turkey-footfall/digest.env` with `GMAIL_USER` and
 `GMAIL_APP_PASSWORD`.
 
-### 3.6 The main loop — sample flow
+### 3.6 The main loop - sample flow
 
 Simplified from `app/collector.py`:
 
@@ -458,7 +458,7 @@ training/
 ### 3.10 Hot-swap of the Detect head
 
 Every 30 rounds the collector polls `data/adapters/current.json` and, if the
-pointer changed, calls `adapters.overlay_head(model, head_state_dict)` — this
+pointer changed, calls `adapters.overlay_head(model, head_state_dict)` - this
 walks the Detect module and copies the head tensors in-place. No restart, no
 memory spike, no interruption to sampling. Fallback: if `current.json` is
 missing or unreadable the base model runs untouched (byte-identical).
@@ -506,7 +506,7 @@ sudo journalctl -u collector --since "15 min ago" \
 ### 4.4 Deploy new code
 
 ```bash
-# The standard path — safe with force-pushed history rewrites
+# The standard path - safe with force-pushed history rewrites
 sudo git -C /opt/turkey-footfall fetch origin main && \
   sudo git -C /opt/turkey-footfall reset --hard origin/main && \
   sudo systemctl restart collector
@@ -516,10 +516,10 @@ sudo /opt/turkey-footfall/src/deploy/gcp-vm/install.sh
 ```
 
 Never `sed ... | tee /etc/systemd/system/collector.service` from the repo
-template — the installed unit carries machine-local `Environment=` lines
+template - the installed unit carries machine-local `Environment=` lines
 (see 3.4).
 
-### 4.5 Health-check battery — is the VM really feeding the report?
+### 4.5 Health-check battery - is the VM really feeding the report?
 
 Run this before trusting any report:
 
@@ -527,7 +527,7 @@ Run this before trusting any report:
 # 1. service alive
 sudo systemctl status collector --no-pager | head -12
 
-# 2. live sampling — want slot_1..4 with real counts scrolling every ~40 s
+# 2. live sampling - want slot_1..4 with real counts scrolling every ~40 s
 sudo journalctl -u collector -f --no-hostname | grep --line-buffered -E "slot_|MISS|country"
 
 # 3. success/miss ratio, last 15 min
@@ -543,7 +543,7 @@ sudo journalctl -u collector --since "6h" | grep -iE "oom-kill|Killed process|ou
 # 6. IBB proxy env is wired (values redacted; want 2)
 sudo grep -c -E "IBB_PROXY_URL|IBB_PROXY_SECRET" /etc/turkey-footfall/proxy.env
 
-# 7. DECISIVE end-to-end — grab a real Turkey frame right now
+# 7. DECISIVE end-to-end - grab a real Turkey frame right now
 sudo bash -c 'set -a; . /etc/turkey-footfall/proxy.env; set +a; \
   cd /opt/turkey-footfall/src && timeout 90 .venv/bin/python - <<PY
 from app.cameras import CAMERAS
@@ -639,7 +639,7 @@ sudo systemctl enable --now collector.service
 
 Then apply Path A's swap + env files + timer steps unchanged. Istanbul
 cameras work from any ASN Cloudflare can reach; residential ASNs may not
-even need the relay — test with `python -m tools.probe_country --country turkey`.
+even need the relay - test with `python -m tools.probe_country --country turkey`.
 
 ### 4.9 Uninstall
 
@@ -660,7 +660,7 @@ Since fix 2 (2026-08), any dashboard tile can morph in place into a live
 stream of analyzed frames on the exact camera it is playing. Click 🔬, pick
 a layer, the server spins up a `LiveSession` and pushes analyzed JPEGs at
 ~1/s; the client renders them inside the tile. Up to 4 sessions in the grid
-(one per tile). Switching a layer on a running tile MUTATES the session —
+(one per tile). Switching a layer on a running tile MUTATES the session -
 the stream, the tracker, and every accumulator (heat, counters, gesture
 tallies) survive the switch. The VM is not involved; everything runs in
 `app/live_analysis.py` on the operator machine.
@@ -682,16 +682,16 @@ self._publish(img)                                # (g) JPEG for the client
 
 `INFER_LOCK` serializes every model call in this process (Ultralytics
 `predict` is not thread-safe on a shared model). On CPU: one active session
-runs at 1-2 fps, four concurrent at 0.3-0.5 fps each — degrading gracefully
+runs at 1-2 fps, four concurrent at 0.3-0.5 fps each - degrading gracefully
 instead of thrashing.
 
 **Camera resolution for the picked tile:** `resolve_cam` first looks up
 `cam_id` in the registry (`app/cameras.py`); if that misses, it reads
 `web/local_grid.json` (written by notebook cell 33) and maps the slot to a
 `kind ∈ {youtube, hls, webcamera24, skyline}` dict. The exact camera the
-operator is watching is the exact one that gets analyzed — no cross-wiring.
+operator is watching is the exact one that gets analyzed - no cross-wiring.
 
-### 5.1 Paths & speeds — `draw_paths_layer`
+### 5.1 Paths & speeds - `draw_paths_layer`
 
 Trails + per-track id boxes + km/h chips. This is the only layer that draws
 detection boxes for every class. Per-track history is capped at
@@ -712,9 +712,9 @@ Honest error band ±30-50 % (vehicle not always parallel to the image plane).
 The report shows this only when the camera has enough statistical mass
 (≥ 5 samples AND ≥ 10 % of rounds carrying one).
 
-### 5.2 Pose & skeleton — `draw_pose_layer`
+### 5.2 Pose & skeleton - `draw_pose_layer`
 
-Skeletons ONLY, on people close enough for the per-crop pose pass — no
+Skeletons ONLY, on people close enough for the per-crop pose pass - no
 detection boxes, no vehicles. Because a street-cam pedestrian is 30-120 px
 tall and a full-frame pose pass at 640 hands the model ~15 px of person and
 finds nothing, this layer runs **top-down pose**: for each detector `person`
@@ -747,27 +747,27 @@ Output: 17 COCO keypoints (nose, eyes, ears, shoulders, elbows, wrists,
 hips, knees, ankles) drawn on each close-enough person. What is too far is
 labeled honestly: "skeletons on 3 of 12 people, rest too far".
 
-### 5.3 Hand gestures — `draw_gestures_layer` + `app/gestures.py`
+### 5.3 Hand gestures - `draw_gestures_layer` + `app/gestures.py`
 
 Three arm-level gestures on the same skeletons: `hand_raised` (one wrist
 above its shoulder for ≥ 3 pose frames), `both_hands_up` (both wrists above
 both shoulders), `wave` (raised wrist crosses the elbow ≥ 2 times). The
 session keeps a running total (`self.gesture_counts`) so the caption reads
 "session: hand_raised x3, wave x1" once anyone has done anything. An empty
-scene reads "no gestures detected right now" — that is honest, not a bug.
+scene reads "no gestures detected right now" - that is honest, not a bug.
 
-### 5.4 Body anomalies — `draw_body_layer`
+### 5.4 Body anomalies - `draw_body_layer`
 
 Fall-detection-style live view. `label_track` (`app/behavior_labels.py`)
 runs three tiers per track and returns exactly one label:
 
 1. **Pose flags from the skeleton** (`pose_flags_of`): the shoulder-mid ↔
-   hip-mid line — its angle from vertical; > `FALL_TORSO_DEG = 60°` for ≥
+   hip-mid line - its angle from vertical; > `FALL_TORSO_DEG = 60°` for ≥
    `POSE_FLAG_MIN_FRAMES = 2` frames → `fall_suspect`.
 2. **Course reversals** (`heading_turns`): how many > 90 ° reversals across
    the trajectory; ≥ 3 → `erratic`.
 3. **Pure kinematics**: mean speed, moving fraction, net displacement over
-   path — yields `running` / `walking` / `standing` / `dwelling` / `driving`
+   path - yields `running` / `walking` / `standing` / `dwelling` / `driving`
    / `parked` / `normal`.
 
 The layer draws ONLY the alert-grade labels
@@ -776,17 +776,17 @@ orange box + skeleton overlay + a verdict chip on flagged people, a HUD
 tally in the top-left (`persons in view: N, flagged: M`), and a red ALERT
 banner while a `fall`/`erratic` flag is live.
 
-### 5.5 Face detection — `draw_faces_layer_img` + `app/faces.py`
+### 5.5 Face detection - `draw_faces_layer_img` + `app/faces.py`
 
 Face rectangles only (no embeddings, no database). The detector is
 **YuNet** (OpenCV Zoo, ~230 KB ONNX), CPU-only, ~15 ms on a 960 × 540 frame.
-At street-cam distance faces are often below the detector's resolution — the
+At street-cam distance faces are often below the detector's resolution - the
 caption "no faces at this distance/resolution" is honest.
 
-### 5.6 Heat vision — `draw_heat_layer`
+### 5.6 Heat vision - `draw_heat_layer`
 
 The whole picture changes when you pick this layer (fix 3 requirement).
-Not a thermal sensor — a stylized colormap driven by brightness plus the
+Not a thermal sensor - a stylized colormap driven by brightness plus the
 session's dwell accumulation:
 
 ```python
@@ -804,12 +804,12 @@ out = cv2.applyColorMap((signal*255).astype(np.uint8), cv2.COLORMAP_INFERNO)
 `grid` is a `GRID_H × GRID_W` (27 × 48) matrix of dwelt seconds per cell;
 `bump_heat` banks each detected foot point (bottom-centre of the box)
 weighted by the interval since the previous tick. Switching layers away and
-back keeps the accumulation — the map keeps growing.
+back keeps the accumulation - the map keeps growing.
 
-### 5.7 Line crossing — `draw_line_layer` + `update_crossings`
+### 5.7 Line crossing - `draw_line_layer` + `update_crossings`
 
 A crossing line (defined per-camera in `app/cameras.py`, or the default
-horizontal `DEFAULT_LINE = [[0.10, 0.62], [0.90, 0.62]]` — the sidewalk
+horizontal `DEFAULT_LINE = [[0.10, 0.62], [0.90, 0.62]]` - the sidewalk
 band). Every strict sign flip of a track's foot point across the line is a
 crossing event; direction (in/out) follows the A→B point order (negative →
 positive side = "in"):
@@ -830,7 +830,7 @@ def update_crossings(side_state, tracks, frame_shape, line, cross):
         elif prev > 0 and side < 0: cross["out"] += 1
 ```
 
-`side == 0` (landing exactly on the line) is deliberately skipped — it is
+`side == 0` (landing exactly on the line) is deliberately skipped - it is
 ambiguous and would double-count jitter around the boundary. The caption
 shows "IN x / OUT y (session total)".
 
@@ -843,28 +843,28 @@ stride 12 ≈ 0.5 s apart) from one camera, runs the same gated detection per
 frame, threads them into per-individual tracks with `BurstTracker`, and
 returns a per-individual profile:
 
-- `path` — foot-point trajectory (normalized, JSON-safe)
-- `distance / speed` — path length, net displacement, mean/max px/s, and a
+- `path` - foot-point trajectory (normalized, JSON-safe)
+- `distance / speed` - path length, net displacement, mean/max px/s, and a
   km/h estimate for vehicles (same ±30-50 % band as the live layer)
-- `moving_frac` — fraction of steps that actually moved (stood still 80 %
+- `moving_frac` - fraction of steps that actually moved (stood still 80 %
   of the window)
-- `direction` — dominant screen direction of the net displacement
-- `zones` — heatmap cells visited (ties the trajectory to the long-horizon
+- `direction` - dominant screen direction of the net displacement
+- `zones` - heatmap cells visited (ties the trajectory to the long-horizon
   dwell map)
-- `nn_min / mean_px` — closest same-class neighbour over the window
+- `nn_min / mean_px` - closest same-class neighbour over the window
   (crowding / pairing signal)
-- `label` — one readable behavior verdict per individual (from
+- `label` - one readable behavior verdict per individual (from
   `label_track`) with its evidence in `label_reasons`
-- `gestures` — arm-level gestures over the window, pose mode only
+- `gestures` - arm-level gestures over the window, pose mode only
 
 Optional layers per request:
 
-- `pose=1` — runs the top-down pose pass, enriches `label` and populates
+- `pose=1` - runs the top-down pose pass, enriches `label` and populates
   `gestures`.
-- `want_faces=1` — face detection on the last frame.
-- `lock=auto` or `lock=<track_id>` — draws a crosshair target lock on that
+- `want_faces=1` - face detection on the last frame.
+- `lock=auto` or `lock=<track_id>` - draws a crosshair target lock on that
   individual and returns the normalized offset from frame center (`dx, dy` ∈
-  `[-0.5, 0.5]` — the exact signal a pan/tilt controller would consume if
+  `[-0.5, 0.5]` - the exact signal a pan/tilt controller would consume if
   local hardware existed).
 
 CLI form:
@@ -879,7 +879,7 @@ Output: annotated JPEG + JSON profile under `web/snapshots/behavior/`, LRU
 
 ---
 
-## 7. The notebook — offline analytics
+## 7. The notebook - offline analytics
 
 The main notebook is `turkey_business_activity.ipynb` (at the repo root; the
 imports find `src/app/` automatically). It uses the same `detect_core` and
@@ -903,24 +903,24 @@ imports find `src/app/` automatically). It uses the same `detect_core` and
 
 ### 7.1 The local twin notebook
 
-`turkey_business_activity_yolov8n.ipynb` (git-ignored — never in the repo)
+`turkey_business_activity_yolov8s.ipynb`
 is a hand copy of the main notebook with `MODEL_WEIGHTS = 'yolov8s.pt'`
 (or `yolov8n.pt`) so the operator can see the VM's view on the same frames.
 Documented in `.gitignore` line 54.
 
-### 7.2 Section 11 forecasting — how it decides
+### 7.2 Section 11 forecasting - how it decides
 
 Every fancy model must beat "the same time yesterday" (seasonal-naive) on
 MAE over the last 25 % of the cache (never touched during fitting). The
 ladder:
 
-- **persistence** — `y_{t+h} = y_t`
-- **seasnaive24** — `y_{t+h} = y_{t+h - 24h}` (the honesty baseline)
-- **profile** — median count per local (hour-of-day) slot, or (hour-of-week)
+- **persistence** - `y_{t+h} = y_t`
+- **seasnaive24** - `y_{t+h} = y_{t+h - 24h}` (the honesty baseline)
+- **profile** - median count per local (hour-of-day) slot, or (hour-of-week)
   once the cache carries ≥ 7 days
-- **ridge** — closed-form numpy ridge on lags (1, 2, 3, 4, 96), rolling
+- **ridge** - closed-form numpy ridge on lags (1, 2, 3, 4, 96), rolling
   means (4, 12), sin/cos of the target hour-of-day, per-camera one-hots
-- **gru** — small GRU (hidden 32, ~15 k params) reading the last 24 h to
+- **gru** - small GRU (hidden 32, ~15 k params) reading the last 24 h to
   emit the next 12 h; trains on CPU in well under a minute; joins the
   ladder once the cache holds enough windows
 
@@ -969,7 +969,7 @@ Model size ladder (COCO):
 
 `tools/calibrate_conf.py` reads the operator's verdict history, computes a
 per-`(camera, class)` confusion matrix, and picks the lowest threshold that
-achieves **precision ≥ 0.90** with **≥ 30 verdicts** — writes it to
+achieves **precision ≥ 0.90** with **≥ 30 verdicts** - writes it to
 `data/per_camera_conf.json`. `cameras._merge_per_camera_conf()` runs AFTER
 `_merge_confidence_boost` and overrides it per pair. A calibrated pair is
 tagged `source=calibration` in the Learning-proof panel.
@@ -1007,7 +1007,7 @@ also lands in `events/` in Firestore (also 24 h TTL) so the dashboard's
   dispatch). Same PDF composer (`tools/report_pdf.py`), different sender.
 
 The report is honest about statistical mass: km/h fields only publish when
-there are ≥ 5 speed samples AND ≥ 10 % of rounds carrying one — otherwise
+there are ≥ 5 speed samples AND ≥ 10 % of rounds carrying one - otherwise
 `-`.
 
 ---
@@ -1027,10 +1027,10 @@ Every stored box carries `uncertainty ∈ [0,1]` from `app/uncertainty.py`:
 uncertainty = 0.6 * margin + 0.4 * flip_delta
 ```
 
-- `margin(conf, gate, span=0.25)` — 1.0 at the class gate, falling linearly
+- `margin(conf, gate, span=0.25)` - 1.0 at the class gate, falling linearly
   to 0 at `gate ± span`. Cheap: every box already has `conf` and the
   effective gate the burst ran with.
-- `flip_delta` (optional, sampled bursts only) — one extra pass on the
+- `flip_delta` (optional, sampled bursts only) - one extra pass on the
   horizontally-flipped frame; per-box IoU-matched conf delta. Costs one
   inference on ~1-in-5 bursts on ONE camera when `UNCERTAINTY_FLIP=1`.
 
@@ -1042,7 +1042,7 @@ fallback. The naive random frame sampler no longer exists.
 ### 10.2 BADGE crop sampler
 
 `app/badge.py`: hand-rolled k-means++ init picks a diverse batch weighted by
-uncertainty — OSNet embeddings as direction, uncertainty as magnitude. Env
+uncertainty - OSNet embeddings as direction, uncertainty as magnitude. Env
 switch `REVIEW_SAMPLER=badge|naive` (default `naive`); per-request override
 `?strategy=` on `/api/review-sample`. Review rows record `sampler` +
 `uncertainty_at_selection` so the naive-vs-BADGE efficiency replay can run
@@ -1052,14 +1052,14 @@ offline.
 
 `tools/train_head.py` wraps `yolo detect train` with the backbone frozen
 (`freeze=<all-but-head>`), mosaic/mixup off, HSV + flip on, ≤ 10 epochs
-early-stop. Emits `data/adapters/<cam>/head_<ts>.pt` — Detect-head tensors
+early-stop. Emits `data/adapters/<cam>/head_<ts>.pt` - Detect-head tensors
 only (~4-6 MB).
 
 `tools/promote_adapter.py` runs `val` on the exporter's chronological
 90/10 split for both the baseline and the candidate; gate:
 
 - `ΔmAP50 ≥ +0.5` percentage points, AND
-- No class drops > 2 pp (person / car: 0 pp — the counts that drive every
+- No class drops > 2 pp (person / car: 0 pp - the counts that drive every
   report).
 
 Pass → atomic `current` pointer update + `history.jsonl` append.
@@ -1086,11 +1086,11 @@ greyed, baseline dashed. The chart fills in after a week of nightly runs.
 
 ## 11. Firebase project setup
 
-The dashboard is `onSnapshot`-live — every collector write reaches the
+The dashboard is `onSnapshot`-live - every collector write reaches the
 browser instantly, no polling. The setup, once per project:
 
 **1. Create the project.** `console.firebase.google.com` → Add project →
-enable Firestore in test mode (locked before the public deploy — see step 5).
+enable Firestore in test mode (locked before the public deploy - see step 5).
 
 **2. Backend credentials for the collector.**
 
@@ -1123,7 +1123,7 @@ cd src/web && python -m http.server 8000     # http://localhost:8000
 The page subscribes with `onSnapshot` and every collector write appears
 immediately.
 
-**5. Security rules — this is what protects the DB.** Test mode lets
+**5. Security rules - this is what protects the DB.** Test mode lets
 anyone on the internet read AND WRITE. The public web-SDK config
 (`apiKey`, `projectId`) ships in every visitor's browser and is not a
 secret; the security rules are.
@@ -1154,13 +1154,13 @@ reCAPTCHA v3 provider. Copy the site key into `web/firebase-config.js` as
 `recaptchaSiteKey`; `web/app.js` initialises App Check automatically when
 it is set. When confident, App Check → Firestore → Enforce.
 
-Enable enforcement ONLY after the site key is live on the page —
+Enable enforcement ONLY after the site key is live on the page -
 otherwise enforced reads are rejected and the dashboard goes blank.
 
 **8. Rate limit + cost cap.** Firestore Spark tier ≈ 20 k writes/day. The
 collector prints the projected daily write count on startup and clamps
 `--interval` to a 5 s floor. Set a budget alert in Google Cloud → Billing;
-on Blaze, also set an App Engine daily spending limit — that is the real
+on Blaze, also set an App Engine daily spending limit - that is the real
 hard cap. Firestore has no per-user request-rate limit of its own.
 
 ---
@@ -1170,7 +1170,7 @@ hard cap. Firestore has no per-user request-rate limit of its own.
 `kamerayayin.ibb.istanbul` refuses every Google Cloud IP range (HTTP 403)
 but answers normally from any other address. A Cloudflare Worker on the
 free plan (100 k requests/day, our load ~26 k/day) proxies the IBB
-requests through Cloudflare's edge — a different ASN — restoring
+requests through Cloudflare's edge - a different ASN - restoring
 `taksim_yeni`, `sultanahmet_1_yeni`, `eyup_sultan_yeni`,
 `beyazit_meydan_yeni`.
 
@@ -1226,7 +1226,7 @@ curl -s -H "X-Proxy-Secret: <your secret>" \
 - No proxying of other hosts (only `kamerayayin.ibb.istanbul`; everything
   else returns 403).
 - No proxying of `tvkur.com` (Konya, Otogar and other Turkish webcamera24
-  streams — tvkur restricts even residential ASNs, and a Cloudflare edge
+  streams - tvkur restricts even residential ASNs, and a Cloudflare edge
   faces the same 403; those need a Turkish-IP proxy specifically, out of
   the free-tier budget).
 
@@ -1326,14 +1326,14 @@ gcloud functions logs read billing-killswitch --gen2 --region=us-east1 --limit=2
 project to a billing account.
 
 **What it does NOT do:** does not delete resources (the VM, Firestore data,
-Storage bucket, and the function itself all remain — they simply stop
+Storage bucket, and the function itself all remain - they simply stop
 generating billable events until the billing account is re-linked); does
 not touch free-tier services (the e2-micro keeps running); does not care
-which threshold crossed (Google publishes at every configured threshold —
+which threshold crossed (Google publishes at every configured threshold -
 50/90/100/120 %; the function only unlinks when `costAmount ≥
 budgetAmount`).
 
-Cost of the kill-switch itself: zero — one Pub/Sub message per threshold
+Cost of the kill-switch itself: zero - one Pub/Sub message per threshold
 cross, one Cloud Function invocation (2 M/month free), Cloud Storage for
 the function source (Always Free).
 
@@ -1347,7 +1347,7 @@ battery (§4.5); if memory is fine but CPU is saturated, drop to
 `--weights yolov8n.pt --imgsz 768` in the ExecStart line (§3.4).
 
 **"Live analysis on a picked skyline camera 404s."** Fixed in the audit
-pass — `_cam_from_slot` now handles `kind="skyline"` slots from
+pass - `_cam_from_slot` now handles `kind="skyline"` slots from
 `web/local_grid.json`. Old pre-fix versions failed with
 `ValueError("no analyzable stream")`.
 
@@ -1365,10 +1365,10 @@ falls through to Thailand / Japan / USA until IBB unblocks. `tools/probe_country
 `cam_id`, fill in the `kind` (`hls | youtube | webcamera24 | skyline`), the
 URL and page, the display name, and any `roi` / `roi_exclude` / `line`
 overrides. `python -m tools.probe_country --country <c>` verifies it. No
-VM change needed — a `git pull + systemctl restart` picks it up.
+VM change needed - a `git pull + systemctl restart` picks it up.
 
 **"How do I take the VM offline for a week?"**
-`gcloud compute instances stop turkey-collector --zone=us-east1-c` —
+`gcloud compute instances stop turkey-collector --zone=us-east1-c` -
 Firestore keeps the last 24 h (TTL), dashboard shows the last known state.
 `gcloud compute instances start ...` when back.
 
@@ -1378,8 +1378,8 @@ Firebase Storage stays under the 5 GB free limit (~50 MB active with 24 h
 TTL); egress from GCP to Firebase (same region) is free. The kill-switch
 guards against surprise overages (§13).
 
-**"Twin notebook is missing after clone."** By design — see `.gitignore:54`.
-The twin (`turkey_business_activity_yolov8n.ipynb`) is local-only: copy the
+**"Twin notebook is missing after clone."** No longer true - the twin is now part of the repo.
+The twin (`turkey_business_activity_yolov8s.ipynb`) is a tracked companion: copy the
 main notebook and change `MODEL_WEIGHTS = 'yolov8s.pt'`.
 
 ---
@@ -1391,50 +1391,50 @@ Learning SPEC against what the codebase and production environment
 actually needed. Each verdict says what survived, what was replaced, and
 why. Kept here for the reader who wants the WHY behind the current shape.
 
-**D1 — MC-Dropout uncertainty**: REJECTED. YOLOv8 detection has zero
-`nn.Dropout` modules — a T=10 stochastic-pass variance would be exactly 0.
+**D1 - MC-Dropout uncertainty**: REJECTED. YOLOv8 detection has zero
+`nn.Dropout` modules - a T=10 stochastic-pass variance would be exactly 0.
 Replacement (WS1, shipped): margin against the effective per-class gate
 (0.6) + one-pass flip delta on sampled bursts (0.4). Same downstream
 contract, near-zero cost.
 
-**D2 — LoRA-via-peft**: REPLACED. peft-wrapping Ultralytics' Detect
+**D2 - LoRA-via-peft**: REPLACED. peft-wrapping Ultralytics' Detect
 breaks attribute access (`stride`, `nc`, `reg_max`), EMA deep-copies, and
 checkpoint pickling. Native `yolo detect train freeze=<all-but-head>`
 delivers the same "small artifact, frozen backbone" outcome without exotic
 deps. The head-only `.pt` (~4-6 MB) is the "adapter".
 
-**D3 — COCO export**: SUPERSEDED. `tools/export_labels.py` already emits a
+**D3 - COCO export**: SUPERSEDED. `tools/export_labels.py` already emits a
 YOLO-format dataset (chronological 90/10 split, verdict mapping incl.
 relabel + operator-added misses). Ultralytics trains from this natively; a
 COCO converter can be added later if any external tool needs it.
 
-**D4 — BADGE embeddings**: UPGRADED input. OSNet ONNX now ships in-repo
+**D4 - BADGE embeddings**: UPGRADED input. OSNet ONNX now ships in-repo
 and is the default embedder everywhere (auto-detected). BADGE gets 512-d
 identity-grade vectors on day one; k-means++ init is hand-rolled (~30
-lines) — sklearn stays off the VM.
+lines) - sklearn stays off the VM.
 
-**D5 — Architecture option B (split VM / external trainer)**: CONFIRMED.
+**D5 - Architecture option B (split VM / external trainer)**: CONFIRMED.
 `app/pool_sync.py` already moves artefacts VM↔Storage↔operator with
 manifests, batching, and public URLs; the training round-trip reuses it
 under prefix `training/`.
 
-**D6 — Bit-identical fallback**: TRIVIALLY SATISFIED. Head-overlay
-loading means "no adapter file" = base model untouched — byte-identical.
+**D6 - Bit-identical fallback**: TRIVIALLY SATISFIED. Head-overlay
+loading means "no adapter file" = base model untouched - byte-identical.
 No identity-LoRA gymnastics.
 
-**D7 — VM resource envelope**: TIGHTENED after live oom-kill incidents.
+**D7 - VM resource envelope**: TIGHTENED after live oom-kill incidents.
 Standing envelope for every VM-side addition: `MALLOC_ARENA_MAX=2`,
 `OMP_NUM_THREADS=2`, 2 GB `/swapfile` present, any new per-round compute
 keeps the measured round under ~30 s, any new upload path batches (≤ 40
 objects/pass), Firestore stays under 20 k writes/day.
 
-**D8 — mAP wording**: ADJUSTED. mAP targets measured with Ultralytics
+**D8 - mAP wording**: ADJUSTED. mAP targets measured with Ultralytics
 `val` on the exporter's chronological val split. The "40 %-fewer-labels"
 headline is measured naive-vs-BADGE on label-count-matched checkpoints as
 a chronological comparison; a two-camera A/B is optional stretch, not a
 gate.
 
-**D9 — Trainer host + adapter retention**: operator-decided at kickoff.
+**D9 - Trainer host + adapter retention**: operator-decided at kickoff.
 Current defaults: GitHub Actions for training (public-repo runners, free);
 adapter retention = full history in `history.jsonl`.
 

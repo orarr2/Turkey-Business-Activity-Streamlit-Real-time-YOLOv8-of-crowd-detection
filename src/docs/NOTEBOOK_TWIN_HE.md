@@ -236,7 +236,7 @@ US bench alone spans Eastern, Central and Pacific time.
 
 **מה עושה:** מציג טבלת השוואה בין המחברת המקומית (החזקה) לקולקטור ה-VM (החלש) עם ארבעה עמודים: מטרה, מודל, גודל קלט, חומרה, עלות. הקטע העיקרי שהתאומה חולקת עליו: הראשית מתוארת כרצה `yolo26m` ב-`imgsz=960`, וה-VM כרץ `yolov8s` ב-`imgsz=640` (עד 2026-08-05 היה `yolov8n`). **התא נשאר כפי שהוא גם בתאומה** ולא הוחלף - הוא נשאר טקסט הסבר על הפער בין המקומי לענן, למרות שהתאומה עצמה כבר לא "המקומית החזקה" אלא בעצם המצב של ה-VM.
 
-מספרים מדודים ב-2026-08-05 על אותם פריימים חיים: `yolov8n@512` מצא 0 אנשים בטקסים ו-0 כלי רכב בסראחנה; `yolov8s@960` מצא 5 ו-7; `yolo26m@960` מצא 6 אנשים ו-16 כלי רכב + אוטובוס. ההערה בסוף מפנה למחברת התאומה (הזאת): `turkey_business_activity_yolov8n.ipynb` (השם ההיסטורי, טרם עודכן ל-`yolov8s`) - הרץ אותה כדי לראות בדיוק מה ה-VM רואה.
+מספרים מדודים ב-2026-08-05 על אותם פריימים חיים: `yolov8n@512` מצא 0 אנשים בטקסים ו-0 כלי רכב בסראחנה; `yolov8s@960` מצא 5 ו-7; `yolo26m@960` מצא 6 אנשים ו-16 כלי רכב + אוטובוס. ההערה בסוף מפנה למחברת התאומה (הזאת): `turkey_business_activity_yolov8s.ipynb` (השם ההיסטורי, טרם עודכן ל-`yolov8s`) - הרץ אותה כדי לראות בדיוק מה ה-VM רואה.
 
 **למה:** לתאר את פער-הדיוק הצפוי. מי שמסתכל על המספרים בענן ומצפה למספרים שלמים ומדויקים צריך לדעת שהמודל שמייצר אותם מגיב חלש למצלמות רחוב רחבות; המחברת הראשית + הקליברציה נמדדים את הפער.
 
@@ -276,7 +276,7 @@ the cheap, always-on estimator. The calibration section quantifies the gap.
 
 > There are two notebooks. **This one** (`turkey_business_activity.ipynb`, on
 > GitHub) is the YOLO26-m reference. A local-only twin
-> (`turkey_business_activity_yolov8n.ipynb`) is identical except it loads
+> (`turkey_business_activity_yolov8s.ipynb`) is identical except it loads
 > `yolov8n` - run it to see EXACTLY what the VM sees.
 ```
 
@@ -1621,7 +1621,7 @@ business_score(df, dwell)
 ```markdown
 ## 7. Compare with the live cloud dashboard
 
-The rest of this notebook was your **local** analysis — a minute of sampling on
+The rest of this notebook was your **local** analysis - a minute of sampling on
 one camera. The cloud collector has been running non-stop on a GCP VM,
 accumulating 4 cameras × 24 hours into Firestore, and the HTML dashboard below
 subscribes to that. Comparing the two answers real questions:
@@ -1630,7 +1630,7 @@ subscribes to that. Comparing the two answers real questions:
 - Am I hitting a peak, a valley, or the average?
 - Did any anomaly fire in the last 24 hours that I missed by sampling now?
 
-Nothing here writes to Firestore — it's a plain HTML page that reads from it.
+Nothing here writes to Firestore - it's a plain HTML page that reads from it.
 ```
 
 <a id="cell-32"></a>
@@ -2735,12 +2735,12 @@ this dashboard shows).
 
 **Tabs (twin-mode)**:
 
-- **Analysis** — 2x2 grid + KPIs + anomaly + operational-events, exactly
+- **Analysis** - 2x2 grid + KPIs + anomaly + operational-events, exactly
   as in main. Since the twin mirrors the VM's Turkey grid, the tiles here
   are the VM's own cameras.
-- **Search** — image-similarity + class/time browse over the collector's
+- **Search** - image-similarity + class/time browse over the collector's
   review + live-samples pools.
-- **Reinforcement learning** *(twin only)* — the tagging workbench. Every
+- **Reinforcement learning** *(twin only)* - the tagging workbench. Every
   verdict you save hot-reloads the collector's per-camera confidence
   within ~7 minutes AND feeds the training exporter
   (`tools/export_labels.py`). Review is placed above Learning-proof so
@@ -2750,13 +2750,13 @@ this dashboard shows).
 + on-demand email are wired elsewhere, not from this button), per-tile
 Live Analysis 🔬 (the VM does not run these live layers), Window
 analysis, and the class/time dropdowns in the model-view strip. Also, no
-Snapshots tab — this is the review environment, not a screenshot
+Snapshots tab - this is the review environment, not a screenshot
 collector.
 
-**Port** — same free-port auto-scan (8000-8020). If 8000 is busy this
+**Port** - same free-port auto-scan (8000-8020). If 8000 is busy this
 notebook picks the next free one and prints the URL.
 
-**Restart** — reload the page (Ctrl+F5) after changing any
+**Restart** - reload the page (Ctrl+F5) after changing any
 `src/web/*.html` or `.js` file.
 ```
 

@@ -27,7 +27,7 @@ Live frames from the four grid cameras, annotated by the exact pipeline the
 collector runs (`yolov8n`, `imgsz 512` on the shipped systemd unit,
 `conf 0.30`): green boxes are people, orange are
 vehicles, magenta is a train, each with its confidence. The dashboard shows
-this view live under every tile ("Model view"), refreshed with every sample —
+this view live under every tile ("Model view"), refreshed with every sample -
 including night scenes like these, where detection is hardest.
 
 | Konya - Hükümet Meydanı | Konya - Otogar Kavşağı |
@@ -64,15 +64,15 @@ including night scenes like these, where detection is hardest.
 The two halves are decoupled. The collector runs 24/7 on a GCP `e2-micro`
 on the Always Free tier ($0/month); the deploy README documents its
 measured memory sizing. The
-dashboard is plain HTML/JS — anyone can serve `web/` and
+dashboard is plain HTML/JS - anyone can serve `web/` and
 subscribe to the live data. Because the state lives in Firestore, every visitor
 sees the accumulated history, and Firestore's TTL policy prunes the last 24h to
 keep the DB small. Anomaly / returning-visitor snapshots go to Firebase Storage
 (also 24h lifecycle).
 
 The grid is **country-generic**. It always runs **4 cameras from ONE country**
-and rotates through a country priority ladder — **Turkey → Thailand → Japan →
-USA** — falling through to the next country only when the active one goes fully
+and rotates through a country priority ladder - **Turkey → Thailand → Japan →
+USA** - falling through to the next country only when the active one goes fully
 dark. Turkey is the project's subject (Istanbul IBB first, then Konya); since
 IBB is geo-blocked from Google Cloud, from the VM the grid usually falls
 through to the foreign benches (YouTube-Live-backed street/traffic cameras that
@@ -85,9 +85,9 @@ runs the first 4 healthy cameras (always distinct), a camera that misses 3
 samples in a row rests 15 min and the grid backfills from deeper in the SAME
 country's bench, and `tvkur` (Konya) cameras are low-risk fast-fail probes that
 rest after a single miss. A `HostBreaker` rests a whole host for 20 min after 4
-consecutive access refusals (HTTP 403/429) and reopens it with a single probe —
+consecutive access refusals (HTTP 403/429) and reopens it with a single probe -
 so a blocking CDN is knocked ~3 times an hour, not ~120. Each assignment change
-updates `config/grid` (with the active `country`) — the dashboard re-renders
+updates `config/grid` (with the active `country`) - the dashboard re-renders
 that tile with the new active cam.
 
 Report fields follow the live country and camera: the day/night gate uses
@@ -98,7 +98,7 @@ Eastern, Central and Pacific).
 
 ## Quick start
 
-The project ships zero-config for **viewers** — the Firebase Web SDK identifier
+The project ships zero-config for **viewers** - the Firebase Web SDK identifier
 is committed, Firestore Rules make the four public collections read-only, the
 cloud collector is running, and the dashboard just lights up.
 

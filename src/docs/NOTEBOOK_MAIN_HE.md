@@ -231,7 +231,7 @@ US bench alone spans Eastern, Central and Pacific time.
 
 **מה עושה:** תא markdown שמציג בטבלה את שני זמני-הריצה של אותו pipeline זיהוי: המחברת הזאת (מקומית, מטרה: exploration, calibration, הוכחת דיוק) מול VM Collector בענן (24/7 aggregation ל-Firestore). המחברת רצה `yolo26m.pt` ב-`imgsz=960` על החומרה של המשתמש (ואפילו על GPU אם יש); ה-VM רץ `yolov8s.pt` ב-`imgsz=640` על `e2-micro` של 1GB. התא מסביר בגלוי למה ה-VM חלש יותר: 1GB RAM ו-2 vCPU shared לא מסוגלים לרוץ YOLO26-m ב-960 בלי לפוצץ תקציב זיכרון. הוא גם מציג את מדידת הפער (2026-08-05): `yolov8n@512` (עידן ישן) מצא 0 אנשים בטקסים ו-0 רכבים בסראצ'אנה; `yolov8s@960` מצא 5 ו-7; ‏`YOLO26-m@960` מצא 6 ו-16 פלוס אוטובוס. המסקנה: המחברת היא Reference, ה-VM הוא estimator זול תמידי.
 
-**למה:** המחברת קיימת כדי לענות על שאלה שאי אפשר לענות עליה עם ה-VM לבד: "עד כמה הספירות של ה-VM נכונות?". תא זה מסביר שהתאום שלה מקומי בלבד (`turkey_business_activity_yolov8n.ipynb`, ב-`.gitignore`) טוען את המשקולות של ה-VM כדי לראות בדיוק מה ה-VM היה רואה, כלי אמיתי להשוואת apples-to-apples.
+**למה:** המחברת קיימת כדי לענות על שאלה שאי אפשר לענות עליה עם ה-VM לבד: "עד כמה הספירות של ה-VM נכונות?". תא זה מסביר שהתאום שלה מקומי בלבד (`turkey_business_activity_yolov8s.ipynb`, ב-`.gitignore`) טוען את המשקולות של ה-VM כדי לראות בדיוק מה ה-VM היה רואה, כלי אמיתי להשוואת apples-to-apples.
 
 **אלטרנטיבות:** אפשר היה לנסות להריץ את YOLO26-m ב-VM עם swap וזיכרון וירטואלי, אבל ה-CPU הוא 0.25 vCPU מובטח, וזמן ריצה של דקות לפריים היה שובר את פרק ה-40 שניות של הסבב. הפתרון הנכון הוא לתת לענן להיות "cheap always-on" ולמחברת המקומית להיות "accurate reference on demand".
 
@@ -269,7 +269,7 @@ cheap, always-on estimator. The calibration section quantifies the gap.
 
 > There are two notebooks. **This one** (`turkey_business_activity.ipynb`, on
 > GitHub) is the YOLO26-m reference. A local-only twin
-> (`turkey_business_activity_yolov8n.ipynb` - the filename is historical) is
+> (`turkey_business_activity_yolov8s.ipynb` - the filename is historical) is
 > identical except it loads the VM's pinned weights (`yolov8s` @640 since
 > 2026-08-05) - run it to see EXACTLY what the VM sees.
 ```
@@ -406,7 +406,7 @@ from app.cameras import CAMERAS, active_cameras, GRID_CAMERAS
 # 1 GB e2-micro (see the "two runtimes" note near the top). YOLO26 is the 2026
 # generation (highest mAP, NMS-free); the 'm' (medium) size is the accuracy
 # sweet spot that still runs on a laptop CPU. First run downloads ~42 MB.
-# The local-only twin notebook (turkey_business_activity_yolov8n.ipynb) sets
+# The twin notebook (turkey_business_activity_yolov8s.ipynb) sets
 # this to 'yolov8s.pt' to mirror EXACTLY what the VM sees.
 MODEL_WEIGHTS = 'yolo26m.pt'
 DATA_DIR = _src_dir / 'data'; DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -1402,7 +1402,7 @@ business_score(df, dwell)
 ```markdown
 ## 7. Compare with the live cloud dashboard
 
-The rest of this notebook was your **local** analysis — a minute of sampling on
+The rest of this notebook was your **local** analysis - a minute of sampling on
 one camera. The cloud collector has been running non-stop on a GCP VM,
 accumulating 4 cameras × 24 hours into Firestore, and the HTML dashboard below
 subscribes to that. Comparing the two answers real questions:
@@ -1411,7 +1411,7 @@ subscribes to that. Comparing the two answers real questions:
 - Am I hitting a peak, a valley, or the average?
 - Did any anomaly fire in the last 24 hours that I missed by sampling now?
 
-Nothing here writes to Firestore — it's a plain HTML page that reads from it.
+Nothing here writes to Firestore - it's a plain HTML page that reads from it.
 ```
 
 <a id="cell-33"></a>
@@ -2760,15 +2760,15 @@ served by a tiny local HTTP server (`app.dashboard_server`). It renders
 `data/web/local_grid.json`, which the previous cell wrote from
 `SELECTED_CAMS`. Nothing here is uploaded anywhere.
 
-**Tabs (main-mode)** — the URL is `?mode=main`, which hides panels that
+**Tabs (main-mode)** - the URL is `?mode=main`, which hides panels that
 apply only to the VM-mirror twin notebook:
 
-- **Analysis** — the 2x2 live-video grid + KPIs, plus the anomaly /
+- **Analysis** - the 2x2 live-video grid + KPIs, plus the anomaly /
   operational-events / heatmap tables further down. The 24h numbers come
   from Firestore (the collector on the GCP VM writes there continuously).
-- **Search** — image-similarity + class/time browse over the collector's
+- **Search** - image-similarity + class/time browse over the collector's
   review + live-samples pools (backed by `POST /api/search`).
-- **Snapshots** *(main only)* — every time you hit the **📸 Snapshot
+- **Snapshots** *(main only)* - every time you hit the **📸 Snapshot
   grid** button in the header, this notebook composes a 2x2 PNG of the
   four Analysis tiles and saves it under
   `src/web/snapshots/user/YYYYMMDD_HHMMSS.png`. This tab lists every
@@ -2776,17 +2776,17 @@ apply only to the VM-mirror twin notebook:
   → wipe the folder).
 
 **Not visible in main mode**: Reinforcement-learning tab (needs
-persistent review data — main is ephemeral, each run is a fresh pick),
-Model view - live strip (hardcoded to the VM's Turkey cams — irrelevant
+persistent review data - main is ephemeral, each run is a fresh pick),
+Model view - live strip (hardcoded to the VM's Turkey cams - irrelevant
 when you pick a different country), and Window analysis (operator-only
 one-shot).
 
-**Port** — the launch cell auto-scans **8000-8020** and binds the first
+**Port** - the launch cell auto-scans **8000-8020** and binds the first
 free port, so opening the notebook a second time on the same machine
 doesn't override an existing dashboard. If everything is busy you'll get
 a clear error message.
 
-**Restart** — reload the page (Ctrl+F5) after changing any
+**Restart** - reload the page (Ctrl+F5) after changing any
 `src/web/*.html` or `.js` file. The cache-buster `?v=NN` in index.html
 is bumped whenever a file changes.
 ```
