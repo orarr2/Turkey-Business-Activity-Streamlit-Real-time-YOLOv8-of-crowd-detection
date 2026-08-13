@@ -34,45 +34,6 @@ try {
   firebaseConfig = (await import("./firebase-config.js" + _q)).firebaseConfig;
 } catch (_) { /* handled below */ }
 
-// Dual-mode dashboard. Each notebook's Section 7 launches this page with a
-// ?mode= URL param; app.js sets it as an attribute on <html> so the CSS at
-// the top of index.html can hide the panels that do not apply. Default:
-// main (opens as http://localhost:8000/?mode=main OR no param).
-//
-// Twin (yolov8n twin notebook, ?mode=twin): hides Send Report From VM,
-// per-tile Live Analysis 🔬, Window analysis, and the class/time dropdowns
-// in the model-view strip. KEEPS Model view - live (twin IS the VM's own
-// data) and the RL tab (twin IS the review tool). Reorders the RL tab so
-// the Review section sits above Learning proof.
-//
-// Main (turkey_business_activity.ipynb, ?mode=main or no param): hides
-// Model view - live (hardcoded Turkey cams the picked country may not
-// match), Window analysis, model-strip dropdowns, and the RL tab (no
-// persistent review data - each run is ephemeral). Shows a new Snapshots
-// tab in place of RL, and adds a "📸 Snapshot grid" header button.
-const MODE = new URLSearchParams(location.search).get("mode") === "twin"
-             ? "twin" : "main";
-const TWIN_MODE = MODE === "twin";
-const MAIN_MODE = MODE === "main";
-document.documentElement.setAttribute("data-mode", MODE);
-
-// Force the default tab to Analysis on every load. Without this, a stale
-// localStorage entry from an earlier session could re-open the dashboard
-// on RL / Search, which surprised the operator ("why did it open on RL?").
-try {
-  localStorage.removeItem("activeTab");
-  localStorage.removeItem("dashboardActiveTab");
-} catch (_) { /* private mode - fine */ }
-
-// The mode-specific hides are gone: each mode has its own HTML file
-// (index_main.html / index_twin.html) that physically lacks the panels
-// not applicable to it. dashboard_server.py routes / and /index.html to
-// the file matching ?mode=. The JS below still uses MODE for one thing
-// the tile TEMPLATE builds dynamically (the analyze-btn appended per
-// tile inside createTile) - see the ternary in that template further
-// down. Everything else that used to be belt-and-suspenders JS hide is
-// unnecessary now: the elements simply do not exist.
-
 const statusEl = document.getElementById("status");
 const tilesEl  = document.getElementById("tiles");
 
@@ -167,9 +128,6 @@ for (const slot of GRID_SLOTS) {
         <div class="city" data-cam-area>${escapeHtml(slot.display_area)}</div>
       </div>
       <div class="tile-head-right">
-        ${TWIN_MODE ? "" : `<button class="analyze-btn" data-analyze
-                title="Live analysis - pick one layer for this camera"
-                style="cursor:pointer;border:1px solid #334155;background:#1e293b;color:#e2e8f0;border-radius:6px;padding:2px 8px;font-size:13px">🔬</button>`}
         <span class="activity-badge act-unknown" data-activity>
           <span class="dot"></span><span data-activity-text>-/10</span>
         </span>
@@ -238,12 +196,7 @@ for (const slot of GRID_SLOTS) {
     { active_hls: slot.placeholder_hls, active_embed: slot.placeholder_embed,
       active_page: slot.placeholder_page },
     slot);
-  // The 🔬 Live Analysis button only exists in main mode (see the
-  // TWIN_MODE ternary in the template above). In twin mode the button
-  // is not rendered, so querySelector returns null - guard so we don't
-  // crash the for-loop and end up with a 1-tile grid instead of 2x2.
-  const _anBtn = tile.querySelector("[data-analyze]");
-  if (_anBtn) _anBtn.addEventListener("click", () =>
+  tile.querySelector("[data-analyze]").addEventListener("click", () =>
     openAnalysisPicker(tileState[slot.slot_id]));
 }
 
@@ -454,46 +407,34 @@ analysisPanel.querySelector("[data-an-run]").addEventListener("click",
 
 const _layerLabel = Object.fromEntries(ANALYSIS_LAYER_DEFS);
 
-// CANVAS OVERLAY approach (2026-08-12): live analysis no longer replaces
-// the tile's video with a 1-fps JPEG stream. Instead we KEEP the video
-// playing at native fps and paint the tick's annotations (boxes /
-// skeleton / heatmap / faces / paths / line) on a canvas layered above
-// it. Metadata rides the X-Analysis-Meta response header of the same
-// /api/analysis/frame endpoint (base64 JSON, produced per-tick by
-// live_analysis.Session._build_meta). Operator sees smooth 30 fps video
-// PLUS refreshing analysis overlays - no more 'video is frozen' feel.
 function beginTileAnalysis(st, cam, layer) {
   if (st.analysis) {
-    // Same tile, new layer: server switched in-place (stream + accumulators
-    // survive); just relabel the tag, the poller runs on.
+    // Same tile, new layer: the session already switched server-side
+    // (stream + accumulators kept) - just relabel; the poller runs on.
     st.analysis.layer = layer;
-    if (st.analysis.tag)
-      st.analysis.tag.firstChild.textContent =
-        `🔬 ${_layerLabel[layer] || layer}`;
+    const tag = st.videoWrap.querySelector(".analysis-live-tag");
+    if (tag) tag.textContent = `LIVE ANALYSIS · ${_layerLabel[layer] || layer}`;
     return;
   }
-  // Video stays. Add canvas overlay + a stop tag, both positioned
-  // absolutely inside videoWrap so the tile geometry never shifts.
-  const canvas = document.createElement("canvas");
-  canvas.className = "analysis-overlay on";
-  canvas.width = 640; canvas.height = 360;   // resized to img_w/img_h on 1st meta
-  st.videoWrap.appendChild(canvas);
-
-  const tag = document.createElement("span");
-  tag.className = "analysis-live-tag on";
-  tag.title = "click to stop live analysis and clear the overlay";
-  const lbl = document.createElement("span");
-  lbl.textContent = `🔬 ${_layerLabel[layer] || layer}`;
-  const x = document.createElement("span");
-  x.textContent = " ✕";
-  x.style.marginLeft = "6px";
-  tag.appendChild(lbl); tag.appendChild(x);
-  st.videoWrap.appendChild(tag);
-  tag.addEventListener("click", () => stopTileAnalysis(st));
-
+  stopTileVideo(st);
+  st._overlayWasHidden = st.overlay.style.display === "none";
+  st.overlay.style.display = "none";
+  const wrap = document.createElement("div");
+  wrap.className = "analysis-wrap";
+  wrap.innerHTML = `
+    <img alt="live analysis" draggable="false" style="display:none">
+    <div class="analysis-status">starting live analysis...</div>
+    <span class="analysis-live-tag">LIVE ANALYSIS ·
+      ${escapeHtml(_layerLabel[layer] || layer)}</span>
+    <button class="analysis-stop">■ Stop - back to video</button>`;
+  st.videoWrap.insertBefore(wrap, st.overlay);
+  wrap.querySelector(".analysis-stop").addEventListener("click",
+    () => stopTileAnalysis(st));
   st.analysis = {
-    cam, layer, canvas, ctx: canvas.getContext("2d"), tag,
-    failures: 0, lastRestart: 0, inflight: false,
+    cam, layer,
+    img: wrap.querySelector("img"),
+    status: wrap.querySelector(".analysis-status"),
+    lastUrl: null, failures: 0, lastRestart: 0, inflight: false,
     timer: setInterval(() => pollAnalysisFrame(st), ANALYSIS_POLL_MS),
   };
   pollAnalysisFrame(st);
@@ -507,31 +448,28 @@ async function pollAnalysisFrame(st) {
     const r = await fetch(
       `/api/analysis/frame?cam=${encodeURIComponent(a.cam)}&_=${Date.now()}`,
       { cache: "no-store" });
-    if (r.status === 200) {
-      const metaB64 = r.headers.get("X-Analysis-Meta");
-      if (metaB64) {
-        try {
-          // atob->UTF-8 dance for non-ASCII (class names etc.).
-          const bin = atob(metaB64);
-          const bytes = new Uint8Array(bin.length);
-          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-          const meta = JSON.parse(new TextDecoder("utf-8").decode(bytes));
-          drawAnalysisOverlay(a, meta);
-          if (a.tag && a.tag.firstChild)
-            a.tag.firstChild.textContent =
-              `🔬 ${_layerLabel[meta.layer] || meta.layer}`;
-          a.failures = 0;
-        } catch (e) { console.warn("meta parse failed:", e); }
-      }
+    if (r.status === 200
+        && (r.headers.get("Content-Type") || "").includes("image")) {
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      a.img.src = url;
+      a.img.style.display = "";
+      if (a.lastUrl) URL.revokeObjectURL(a.lastUrl);
+      a.lastUrl = url;
+      a.status.style.display = "none";
+      a.failures = 0;
     } else if (r.status === 202) {
-      if (a.tag && a.tag.firstChild)
-        a.tag.firstChild.textContent = "🔬 starting...";
-    } else if (r.status === 404 || r.status === 410) {
+      const j = await r.json();
+      a.status.style.display = "";
+      a.status.textContent = j.note || "starting...";
+    } else if (r.status === 404) {
+      // Session ended server-side (idle stop / server restart): restart
+      // it, at most once per 5s so a dead backend isn't hammered.
       a.failures += 1;
       if (Date.now() - a.lastRestart > 5000) {
         a.lastRestart = Date.now();
-        if (a.tag && a.tag.firstChild)
-          a.tag.firstChild.textContent = "🔬 reconnecting...";
+        a.status.style.display = "";
+        a.status.textContent = "analysis session ended - restarting...";
         fetch(`/api/analysis/start?cam=${encodeURIComponent(a.cam)}`
               + `&layer=${encodeURIComponent(a.layer)}`,
               { method: "POST" }).catch(() => {});
@@ -544,174 +482,31 @@ async function pollAnalysisFrame(st) {
   } finally {
     a.inflight = false;
   }
-  if (a.failures > 8 && a.tag && a.tag.firstChild)
-    a.tag.firstChild.textContent = "🔬 unreachable";
+  if (a.failures > 8) {
+    a.status.style.display = "";
+    a.status.textContent =
+      "analysis unreachable - press Stop to return to video";
+  }
 }
 
 function stopTileAnalysis(st) {
   const a = st.analysis;
   if (!a) return;
   clearInterval(a.timer);
+  if (a.lastUrl) URL.revokeObjectURL(a.lastUrl);
   st.analysis = null;
   fetch(`/api/analysis/stop?cam=${encodeURIComponent(a.cam)}`,
         { method: "POST" }).catch(() => {});
-  if (a.canvas) a.canvas.remove();
-  if (a.tag) a.tag.remove();
-  // Video was never replaced, nothing to rebuild. Tear down the
-  // Line-layer history strip if one was showing on this tile.
+  const wrap = st.videoWrap.querySelector(".analysis-wrap");
+  if (wrap) wrap.remove();
+  // Tear down the Line-layer history strip if one was showing on this tile.
   const strip = st.tile && st.tile.querySelector(".crossings-strip");
   if (strip) strip.remove();
-}
-
-// ---- Canvas overlay painters ---------------------------------------------
-// All coordinates in meta are ORIGINAL frame pixel space (meta.img_w x
-// meta.img_h). Canvas backing store is sized to that; CSS scales it to
-// fit the displayed video via `.analysis-overlay { inset: 0 }`, so
-// coordinates line up 1:1 with the underlying video regardless of the
-// tile's actual pixel size.
-function drawAnalysisOverlay(a, meta) {
-  const canvas = a.canvas, ctx = a.ctx;
-  if (canvas.width !== meta.img_w || canvas.height !== meta.img_h) {
-    canvas.width = meta.img_w || 640;
-    canvas.height = meta.img_h || 360;
-  }
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  const layer = meta.layer;
-  if (layer === "heat")      drawHeatOverlay(ctx, meta);
-  if (layer !== "heat")      drawBoxesOverlay(ctx, meta.boxes || []);
-  if (layer === "pose")      drawSkeletonOverlay(ctx, meta.skeleton || []);
-  if (layer === "faces")     drawFacesOverlay(ctx, meta.faces || [], meta);
-  if (layer === "line")      drawLineOverlay(ctx, meta);
-  if (layer === "paths" || layer === "gestures" || layer === "body")
-    drawTracksOverlay(ctx, meta.tracks || []);
-}
-
-function drawBoxesOverlay(ctx, boxes) {
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = "rgba(79,140,255,0.75)";
-  ctx.font = "12px sans-serif";
-  ctx.fillStyle = "rgba(79,140,255,0.95)";
-  for (const b of boxes) {
-    ctx.strokeRect(b.x1, b.y1, b.x2 - b.x1, b.y2 - b.y1);
-    if (b.cls) {
-      const label = `${b.cls} ${Math.round((b.conf || 0) * 100)}%`;
-      const w = ctx.measureText(label).width + 6;
-      ctx.fillStyle = "rgba(15,23,42,0.85)";
-      ctx.fillRect(b.x1, b.y1 - 14, w, 14);
-      ctx.fillStyle = "rgba(255,255,255,0.95)";
-      ctx.fillText(label, b.x1 + 3, b.y1 - 3);
-    }
-  }
-}
-
-function drawHeatOverlay(ctx, meta) {
-  const grid = meta.heat, gw = meta.heat_w, gh = meta.heat_h;
-  if (!grid || !gw || !gh) return;
-  const cw = ctx.canvas.width / gw, ch = ctx.canvas.height / gh;
-  let mx = 0;
-  for (const row of grid) for (const v of row) if (v > mx) mx = v;
-  if (mx <= 0) return;
-  for (let y = 0; y < gh; y++) {
-    const row = grid[y];
-    for (let x = 0; x < gw; x++) {
-      const v = row[x] / mx;
-      if (v <= 0.05) continue;
-      const a = Math.min(0.65, v * 0.75);
-      // Blue -> yellow -> red gradient
-      const r = Math.round(255 * Math.min(1, v * 1.5));
-      const g = Math.round(255 * Math.max(0, 1 - Math.abs(v - 0.5) * 2));
-      const b = Math.round(255 * Math.max(0, 1 - v * 1.5));
-      ctx.fillStyle = `rgba(${r},${g},${b},${a})`;
-      ctx.fillRect(x * cw, y * ch, cw + 1, ch + 1);
-    }
-  }
-}
-
-const _COCO_POSE_LINKS = [
-  [5,6],[5,7],[7,9],[6,8],[8,10],[5,11],[6,12],[11,12],
-  [11,13],[13,15],[12,14],[14,16],
-];
-function drawSkeletonOverlay(ctx, skeletons) {
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = "rgba(255,204,0,0.9)";
-  ctx.fillStyle = "rgba(255,204,0,0.95)";
-  for (const p of skeletons) {
-    const kps = p.kps || [];
-    for (const [a, b] of _COCO_POSE_LINKS) {
-      const ka = kps[a], kb = kps[b];
-      if (!ka || !kb || (ka[2] || 0) < 0.3 || (kb[2] || 0) < 0.3) continue;
-      ctx.beginPath();
-      ctx.moveTo(ka[0], ka[1]); ctx.lineTo(kb[0], kb[1]);
-      ctx.stroke();
-    }
-    for (const k of kps) {
-      if (k && (k[2] || 0) > 0.3) {
-        ctx.beginPath();
-        ctx.arc(k[0], k[1], 3, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    }
-  }
-}
-
-function drawFacesOverlay(ctx, faces, meta) {
-  if (meta && meta.faces_available === false) {
-    ctx.fillStyle = "rgba(15,23,42,0.85)";
-    ctx.fillRect(6, 6, 280, 22);
-    ctx.fillStyle = "#f0a35e"; ctx.font = "12px sans-serif";
-    ctx.fillText("faces: FACE_MODEL not configured", 12, 21);
-    return;
-  }
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = "rgba(236,72,153,0.9)";
-  ctx.fillStyle = "rgba(236,72,153,0.95)";
-  ctx.font = "11px sans-serif";
-  for (const f of faces) {
-    const [x1, y1, x2, y2] = f.box;
-    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
-    if (f.conf) ctx.fillText(`face ${Math.round(f.conf * 100)}%`, x1 + 2, y1 - 3);
-  }
-}
-
-function drawLineOverlay(ctx, meta) {
-  const W = ctx.canvas.width, H = ctx.canvas.height;
-  const line = meta.line;
-  if (line && line.length === 2 && line[0].length === 2) {
-    const [[x1, y1], [x2, y2]] = line;
-    ctx.strokeStyle = "rgba(0,255,136,0.9)";
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.moveTo(x1 * W, y1 * H); ctx.lineTo(x2 * W, y2 * H);
-    ctx.stroke();
-  }
-  ctx.fillStyle = "rgba(15,23,42,0.85)";
-  ctx.fillRect(6, 6, 240, 26);
-  ctx.fillStyle = "#e2e8f0"; ctx.font = "14px sans-serif";
-  ctx.fillText(`IN ${meta.cross_in || 0} · OUT ${meta.cross_out || 0}`, 12, 25);
-}
-
-function drawTracksOverlay(ctx, tracks) {
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = "rgba(56,189,248,0.85)";
-  ctx.fillStyle = "rgba(56,189,248,0.95)";
-  ctx.font = "11px sans-serif";
-  for (const t of tracks) {
-    const p = t.path || [];
-    if (p.length < 2) continue;
-    ctx.beginPath();
-    ctx.moveTo(p[0][0], p[0][1]);
-    for (let i = 1; i < p.length; i++) ctx.lineTo(p[i][0], p[i][1]);
-    ctx.stroke();
-    const last = p[p.length - 1];
-    ctx.beginPath();
-    ctx.arc(last[0], last[1], 4, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = "rgba(15,23,42,0.85)";
-    ctx.fillRect(last[0] + 5, last[1] - 14, 30, 14);
-    ctx.fillStyle = "rgba(255,255,255,0.95)";
-    ctx.fillText(`#${t.tid}`, last[0] + 8, last[1] - 3);
-    ctx.fillStyle = "rgba(56,189,248,0.95)";
-  }
+  if (!st._overlayWasHidden) st.overlay.style.display = "";
+  // Rebuild the live video from the remembered inputs (kept current by
+  // applyGridConfig even while the tile was analyzing).
+  if (st.lastVideoBuild)
+    buildVideoInto(st, st.lastVideoBuild.cfg, st.lastVideoBuild.slot);
 }
 
 // Tear down whatever player the tile currently runs (hls.js / YT API /
@@ -767,10 +562,24 @@ if (stripEl) {
                        border-radius:4px;color:inherit;cursor:pointer;
                        font-size:11px;padding:0 5px">🔥</button>
       </div>
-      <!-- R5 (2026-08-12): tile-footer heat-layer/daypart dropdowns
-           physically removed per operator - they were an operator-only
-           debug control that cluttered the strip. The heatmap toggle
-           button (🔥 above) still works with the default layer+part. -->
+      <!-- fix 3: the stored heat depth, finally selectable. Only shown in
+           heat mode on the PRIVATE dashboard (the API renders any combo
+           from the VM-published grids; the public copy keeps the single
+           published overlay). -->
+      <div class="heat-controls" data-heat-controls hidden>
+        <select data-heat-layer title="which detections feed the map">
+          <option value="person">people</option>
+          <option value="vehicles">vehicles</option>
+          <option value="other">other</option>
+        </select>
+        <select data-heat-part title="local-time daypart">
+          <option value="">all day</option>
+          <option value="night">night</option>
+          <option value="morning">morning</option>
+          <option value="afternoon">afternoon</option>
+          <option value="evening">evening</option>
+        </select>
+      </div>
       <div class="age" data-age></div>`;
     stripEl.appendChild(cell);
     const s = {
@@ -2581,145 +2390,3 @@ setInterval(async () => {
     } catch (_e) { /* transient - retry next tick */ }
   }
 }, 4000);
-
-
-// -----------------------------------------------------------------------------
-// Snapshots (main-mode only): "📸 Snapshot grid" header button saves the four
-// Analysis tiles as ONE 2x2 PNG under data/snapshots/<timestamp>.png. The
-// Snapshots tab lists every saved PNG as a thumbnail card - click to open in
-// a new tab / download, 🗑 deletes one, "Clear all" nukes the folder.
-// Twin mode: nothing wires (button and tab are hidden by CSS/JS above).
-// -----------------------------------------------------------------------------
-
-(function initSnapshots() {
-  if (!MAIN_MODE) return;
-
-  const captureBtn = document.getElementById("snap-capture-btn");
-  const refreshBtn = document.getElementById("snap-refresh");
-  const clearBtn   = document.getElementById("snap-clear-all");
-  const gridEl     = () => document.getElementById("snap-grid");
-  const statusEl   = () => document.getElementById("snap-status");
-
-  function _status(msg, kind = "ok") {
-    const el = statusEl(); if (!el) return;
-    el.textContent = msg;
-    el.style.color = kind === "err" ? "#ef4444"
-                   : kind === "ok"  ? "#4ade80"
-                                    : "#94a3b8";
-    if (msg) setTimeout(() => { el.textContent = ""; }, 3500);
-  }
-
-  async function captureGrid() {
-    // tileState is a module-level object keyed by slot_id - each entry has
-    // a `tile` DOM node (see the createTile block above). Drill down for
-    // each tile's <video>, drawImage into a 2x2 canvas, POST as PNG.
-    const st = (typeof tileState === "object" && tileState) ? tileState : {};
-    const tiles = Object.values(st).slice(0, 4);
-    if (!tiles.length) { _status("No tiles yet - wait a few seconds.", "err"); return; }
-    const videos = tiles.map(t =>
-      (t.tile || t.videoWrap || document).querySelector("video"));
-    const usable = videos.map((v, i) => ({v, i}))
-                         .filter(o => o.v && o.v.videoWidth > 0 && o.v.videoHeight > 0);
-    if (!usable.length) {
-      _status("No decoded video frames yet - reload if the tiles never fill in.", "err");
-      return;
-    }
-    const cw = Math.max(...usable.map(o => o.v.videoWidth));
-    const ch = Math.max(...usable.map(o => o.v.videoHeight));
-    const canvas = document.createElement("canvas");
-    canvas.width  = cw * 2;
-    canvas.height = ch * 2;
-    const ctx = canvas.getContext("2d");
-    ctx.fillStyle = "#0f1115";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    // Cell labels overlay (top-left of each cell) - name from the tile head.
-    ctx.font = "18px system-ui, -apple-system, Segoe UI, sans-serif";
-    for (let i = 0; i < Math.min(videos.length, 4); i++) {
-      const v = videos[i];
-      const col = i % 2, row = Math.floor(i / 2);
-      const x = col * cw, y = row * ch;
-      if (v && v.videoWidth) {
-        try { ctx.drawImage(v, x, y, cw, ch); }
-        catch (e) { console.warn("snap drawImage failed", i, e); }
-      }
-      const name = (tiles[i]?.tile?.querySelector?.("h2")?.textContent
-                 || tiles[i]?.slot?.placeholder_name
-                 || `slot ${i + 1}`).slice(0, 60);
-      // Semi-transparent label strip
-      ctx.fillStyle = "rgba(0,0,0,0.55)";
-      ctx.fillRect(x, y, cw, 32);
-      ctx.fillStyle = "#e7e9ee";
-      ctx.fillText(name, x + 10, y + 22);
-    }
-    _status("capturing...", "info");
-    const blob = await new Promise(res => canvas.toBlob(res, "image/png"));
-    if (!blob) { _status("canvas toBlob failed - browser refused.", "err"); return; }
-    const fd = new FormData();
-    fd.append("png", blob, "grid.png");
-    try {
-      const r = await fetch("/api/snapshot", { method: "POST", body: fd });
-      if (!r.ok) {
-        const t = await r.text();
-        _status(`save failed: HTTP ${r.status} - ${t.slice(0, 120)}`, "err");
-        return;
-      }
-      const d = await r.json();
-      _status(`saved ${d.name} (${(d.bytes / 1024).toFixed(0)} KB)`, "ok");
-      const active = document.querySelector("main")?.dataset?.activeTab;
-      if (active === "snapshots") loadSnaps();
-    } catch (e) {
-      _status("network error: " + e.message, "err");
-    }
-  }
-
-  async function loadSnaps() {
-    const g = gridEl(); if (!g) return;
-    g.innerHTML = '<div class="snap-empty">loading...</div>';
-    try {
-      const r = await fetch("/api/snapshots-list");
-      if (!r.ok) { g.innerHTML = `<div class="snap-empty">list failed: HTTP ${r.status}</div>`; return; }
-      const d = await r.json();
-      if (!d.items || !d.items.length) {
-        g.innerHTML = '<div class="snap-empty">No snapshots yet. Hit "📸 Snapshot grid" in the header.</div>';
-        return;
-      }
-      g.innerHTML = "";
-      for (const it of d.items) {
-        const card = document.createElement("div");
-        card.className = "snap-card";
-        const safe = escapeHtml(it.name);
-        card.innerHTML = `
-          <a href="${it.url}" target="_blank" rel="noopener" title="Open / download">
-            <img src="${it.url}" loading="lazy" alt="${safe}"></a>
-          <div class="snap-card-body">
-            <span class="snap-card-ts">${safe}</span>
-            <button class="snap-card-del" title="Delete this snapshot">🗑</button>
-          </div>`;
-        card.querySelector(".snap-card-del").addEventListener("click", async () => {
-          if (!confirm(`Delete ${it.name}?`)) return;
-          const dr = await fetch("/api/snapshot?path=" + encodeURIComponent(it.path),
-                                 { method: "DELETE" });
-          if (dr.ok) loadSnaps(); else alert("delete failed: HTTP " + dr.status);
-        });
-        g.appendChild(card);
-      }
-    } catch (e) {
-      g.innerHTML = `<div class="snap-empty">network error: ${escapeHtml(e.message)}</div>`;
-    }
-  }
-
-  if (captureBtn) captureBtn.addEventListener("click", () =>
-    captureGrid().catch(e => _status("capture failed: " + e.message, "err")));
-  if (refreshBtn) refreshBtn.addEventListener("click", loadSnaps);
-  if (clearBtn) clearBtn.addEventListener("click", async () => {
-    if (!confirm("Delete ALL saved snapshots on disk? This cannot be undone.")) return;
-    const r = await fetch("/api/snapshot?path=*", { method: "DELETE" });
-    if (r.ok) loadSnaps(); else alert("clear-all failed: HTTP " + r.status);
-  });
-
-  // Whenever the user clicks the Snapshots tab button, refresh the grid.
-  document.getElementById("tabbar")?.addEventListener("click", (ev) => {
-    const b = ev.target?.closest?.("[data-tab-btn]");
-    if (b && b.dataset.tabBtn === "snapshots") loadSnaps();
-  });
-})();

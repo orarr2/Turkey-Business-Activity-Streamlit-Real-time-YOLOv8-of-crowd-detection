@@ -21,12 +21,10 @@ data/
 # The README's annotated example frames are the one committed JPEG exception.
 !src/docs/images/*.jpg
 
-# Dashboard runtime snapshots (anomalies + returning visitors + operator's
-# manual "📸 Snapshot grid" PNGs). Keep the directory structure (via
-# .gitkeep), drop the images and manifests.
+# Dashboard runtime snapshots (anomalies + returning visitors). Keep the
+# directory structure (via .gitkeep), drop the images and manifests.
 # `**/` prefix so the rule still matches after the move to src/web/snapshots/.
 **/web/snapshots/**/*.jpg
-**/web/snapshots/**/*.png
 **/web/snapshots/**/*.json
 !**/web/snapshots/**/.gitkeep
 

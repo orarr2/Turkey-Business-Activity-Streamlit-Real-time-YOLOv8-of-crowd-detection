@@ -41,23 +41,6 @@ from pathlib import Path
 
 from app.heatmap import GRID_H, GRID_W
 
-
-def _json_default(o):
-    """Best-effort JSON encoder for numpy scalars/arrays the meta builder
-    may pull in (ultralytics returns numpy). Falls back to str so a
-    surprise type never crashes a live tick."""
-    try:
-        import numpy as _np
-        if isinstance(o, (_np.integer,)):
-            return int(o)
-        if isinstance(o, (_np.floating,)):
-            return float(o)
-        if isinstance(o, _np.ndarray):
-            return o.tolist()
-    except Exception:
-        pass
-    return str(o)
-
 _SRC_ROOT = Path(__file__).resolve().parent.parent
 
 # The seven analysis layers an operator can run live. "line" is the
@@ -649,16 +632,8 @@ class LiveSession(threading.Thread):
         self.created = time.time()
         self.last_poll = time.time()  # touched by every /frame poll
         self.stop_event = threading.Event()
-        self.lock = threading.Lock()  # guards latest/seq/note/meta
+        self.lock = threading.Lock()  # guards latest/seq/note
         self.latest: bytes | None = None
-        # Per-tick structured metadata for the CANVAS OVERLAY renderer -
-        # kept as a JSON-encoded bytes blob so the dashboard_server can
-        # base64 it into a response header without re-serializing. The
-        # SAME lock (self.lock) covers both `latest` and `meta_json` so a
-        # poll can never see the JPEG from tick N with meta from tick N+1.
-        # See _build_meta() below for the schema; the frontend expects
-        # {layer, img_w, img_h, boxes, ...layer-specific fields}.
-        self.meta_json: bytes = b"{}"
         self.seq = 0
         self.note = "starting stream..."
         self.err: str | None = None
@@ -672,12 +647,8 @@ class LiveSession(threading.Thread):
         # effect within LINE_RELOAD_POLL_S seconds without restart.
         from app.cameras import resolve_line as _resolve_line
         from app.cameras import resolve_line_classes as _resolve_classes
-        # NB: use self.cam_id (assigned at __init__), NOT `cam_id` - there is
-        # no `cam_id` in this scope, and referencing it threw NameError from
-        # every /api/analysis/start call ("Failed to start: NameError: name
-        # 'cam_id' is not defined" surfaced by dashboard_server.py:836).
-        self.line = _resolve_line(self.cam_id) or cam.get("line") or DEFAULT_LINE
-        self.line_classes = _resolve_classes(self.cam_id)
+        self.line = _resolve_line(cam_id) or cam.get("line") or DEFAULT_LINE
+        self.line_classes = _resolve_classes(cam_id)
         self._line_mtime = self._line_json_mtime()
         self._next_line_check = time.time() + LINE_RELOAD_POLL_S
         self.cross = {"in": 0, "out": 0}
@@ -717,8 +688,7 @@ class LiveSession(threading.Thread):
                     faces_list = self._faces_pass(frame)
                 self._accumulate(frame, boxes, now)
                 img = self._render(frame, faces_list, layer)
-                meta = self._build_meta(frame, boxes, faces_list, layer)
-                self._publish(img, meta)
+                self._publish(img)
                 dt = time.time() - t0
                 wait = max(0.0, TICK_TARGET_S - dt)
                 if wait and self.stop_event.wait(wait):
@@ -903,7 +873,7 @@ class LiveSession(threading.Thread):
             return draw_line_layer(img, self.line, self.cross)
         return img
 
-    def _publish(self, img, meta: dict | None = None) -> None:
+    def _publish(self, img) -> None:
         import cv2
         H, W = img.shape[:2]
         if W > JPEG_MAX_W:
@@ -912,99 +882,10 @@ class LiveSession(threading.Thread):
         ok, buf = cv2.imencode(".jpg", img,
                                [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
         if ok:
-            # Serialize meta OUTSIDE the lock: json.dumps of a nested dict
-            # with hundreds of tracks is not free, and the frontend needs
-            # the SAME tick's JPEG+meta pair so both must land under one
-            # lock acquire. Encode first, swap in second.
-            meta_bytes = b"{}"
-            if meta is not None:
-                try:
-                    meta_bytes = json.dumps(meta, separators=(",", ":"),
-                                            default=_json_default).encode("utf-8")
-                except (TypeError, ValueError) as e:
-                    meta_bytes = json.dumps({"error": str(e)}).encode("utf-8")
             with self.lock:
                 self.latest = buf.tobytes()
-                self.meta_json = meta_bytes
                 self.seq += 1
                 self.note = ""
-
-    # ---- Canvas-overlay metadata builder --------------------------------
-    # Produced once per inference tick alongside the JPEG. The frontend
-    # reads it from the X-Analysis-Meta response header (base64 JSON) on
-    # /api/analysis/frame and paints it as an overlay canvas on top of
-    # the tile's still-playing <video>, so operator sees smooth video
-    # PLUS annotations refreshing at ~1 fps instead of a frozen JPEG.
-    #
-    # Coordinates are in the ORIGINAL frame's pixel space (img_w, img_h);
-    # the client CSS-scales the canvas to match the displayed video and
-    # transforms coordinates 1:1 with the intrinsic video size.
-    def _build_meta(self, frame, boxes, faces_list, layer) -> dict:
-        H, W = frame.shape[:2]
-        meta: dict = {"layer": layer, "img_w": int(W), "img_h": int(H),
-                      "seq": self.seq + 1, "boxes": []}
-        for b in (boxes or []):
-            meta["boxes"].append({
-                "x1": int(b.get("x1", 0)), "y1": int(b.get("y1", 0)),
-                "x2": int(b.get("x2", 0)), "y2": int(b.get("y2", 0)),
-                "cls": b.get("cls") or "?",
-                "conf": round(float(b.get("conf") or 0), 3),
-            })
-        try:
-            open_tracks = list(self.tracker.open) if self.tracker else []
-        except Exception:
-            open_tracks = []
-        if layer == "heat":
-            # Heatmap grid is small (48x27 by default) so shipping it in
-            # full each tick is trivial vs the JPEG. Client renders it as
-            # translucent colored cells on top of the video.
-            try:
-                meta["heat"] = [list(row) for row in self.heat]
-                meta["heat_w"] = len(self.heat[0]) if self.heat else 0
-                meta["heat_h"] = len(self.heat)
-            except Exception:
-                pass
-        elif layer == "pose":
-            meta["skeleton"] = []
-            for tr in open_tracks:
-                if getattr(tr, "misses", 0):
-                    continue
-                b = tr.boxes[-1] if getattr(tr, "boxes", None) else None
-                if b and b.get("kps"):
-                    meta["skeleton"].append({
-                        "tid": tr.tid, "kps": b["kps"],
-                        "box": [int(b.get("x1", 0)), int(b.get("y1", 0)),
-                                int(b.get("x2", 0)), int(b.get("y2", 0))],
-                    })
-        elif layer == "faces":
-            meta["faces"] = [{
-                "box": [int(f.get("x1", 0)), int(f.get("y1", 0)),
-                        int(f.get("x2", 0)), int(f.get("y2", 0))],
-                "conf": round(float(f.get("conf") or 0), 3),
-            } for f in (faces_list or [])]
-            meta["faces_available"] = bool(self._faces_ok)
-        elif layer == "line":
-            meta["line"] = self.line
-            meta["cross_in"] = int(self.cross.get("in", 0))
-            meta["cross_out"] = int(self.cross.get("out", 0))
-        elif layer in ("paths", "gestures", "body"):
-            meta["tracks"] = []
-            for tr in open_tracks:
-                if getattr(tr, "misses", 0):
-                    continue
-                path = []
-                for b in (getattr(tr, "boxes", None) or [])[-30:]:
-                    if "cx" in b and "cy" in b:
-                        path.append([int(b["cx"]), int(b["cy"])])
-                    else:
-                        path.append([int((b.get("x1", 0) + b.get("x2", 0)) / 2),
-                                     int((b.get("y1", 0) + b.get("y2", 0)) / 2)])
-                meta["tracks"].append({
-                    "tid": tr.tid, "cls": tr.cls, "path": path,
-                })
-            if layer == "gestures":
-                meta["gesture_counts"] = dict(self.gesture_counts)
-        return meta
 
     def _publish_note(self, note: str) -> None:
         with self.lock:
@@ -1071,12 +952,8 @@ class LiveAnalysisManager:
                 return {"error": self._errors.pop(cam_id, None)}
         s.last_poll = time.time()
         with s.lock:
-            # meta_json is per-tick metadata for the canvas overlay; the
-            # in-tree tests use _StubSession fixtures that predate this
-            # field, so read defensively (falls back to empty JSON blob).
             return {"jpeg": s.latest, "seq": s.seq, "layer": s.layer,
-                    "note": s.note,
-                    "meta_json": getattr(s, "meta_json", b"{}")}
+                    "note": s.note}
 
     def stop(self, cam_id: str) -> bool:
         with self._lock:

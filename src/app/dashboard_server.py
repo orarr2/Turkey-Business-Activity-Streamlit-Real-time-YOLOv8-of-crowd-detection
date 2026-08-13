@@ -350,25 +350,6 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         sys.stdout.write("  " + (fmt % args) + "\n")
 
     def do_GET(self) -> None:
-        # Split-mode routing: physically serve DIFFERENT HTML per mode.
-        # Two source files (index_main.html + index_twin.html) each hold
-        # ONLY the panels applicable to that mode - the client never
-        # receives bytes for panels that don't apply. Query resolves to
-        # main by default (no ?mode= == main). See the "Dual-mode
-        # dashboard" comment near the top of src/web/app.js for the
-        # element split.
-        from urllib.parse import urlparse, parse_qs
-        _base = self.path.split("?")[0]
-        if _base in ("/", "/index.html"):
-            _q = parse_qs(urlparse(self.path).query)
-            _mode = (_q.get("mode") or ["main"])[0]
-            _resolved = "/index_twin.html" if _mode == "twin" else "/index_main.html"
-            # Preserve the query string on the rewritten path so app.js
-            # can still read URLSearchParams(location.search).get("mode")
-            _qs = urlparse(self.path).query
-            self.path = _resolved + ("?" + _qs if _qs else "")
-            super().do_GET()
-            return
         if self.path.startswith("/tvkur/"):
             self._proxy_tvkur()
             return
@@ -425,17 +406,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/crossings":
             self._get_crossings()
             return
-        if path == "/api/snapshots-list":
-            self._snapshots_list()
-            return
         super().do_GET()
-
-    def do_DELETE(self) -> None:
-        path = self.path.split("?")[0]
-        if path == "/api/snapshot":
-            self._snapshot_delete()
-            return
-        self.send_error(404, "unknown DELETE endpoint")
 
     def do_POST(self) -> None:
         path = self.path.split("?")[0]
@@ -483,125 +454,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/lines/clear":
             self._clear_line()
             return
-        if path == "/api/snapshot":
-            self._snapshot_save()
-            return
         self.send_error(404, "unknown POST endpoint")
-
-    # ---- Operator snapshots (main-mode "📸 Snapshot grid" button) --------
-    # Client canvas-composites the 4 Analysis tiles into a single PNG and
-    # POSTs it as multipart form. We save under web/snapshots/user/ so the
-    # existing static file handler serves them at /snapshots/user/<name>.
-    # `?path=*` on DELETE = clear all. Empty on first use; the .gitkeep
-    # marker keeps the folder tracked without the PNGs.
-    _SNAPS_ROOT = WEB_DIR / "snapshots" / "user"
-    _SNAP_MAX_BYTES = 25 * 1024 * 1024   # sane per-file cap
-
-    def _snapshots_list(self) -> None:
-        d = self._SNAPS_ROOT
-        items = []
-        if d.is_dir():
-            for p in sorted(d.iterdir(),
-                            key=lambda x: x.stat().st_mtime, reverse=True):
-                if not p.is_file() or p.suffix.lower() not in (".png", ".jpg"):
-                    continue
-                if p.name.startswith("."):
-                    continue
-                try:
-                    st = p.stat()
-                except OSError:
-                    continue
-                items.append({"name": p.name,
-                              "path": p.name,
-                              "url": f"/snapshots/user/{p.name}",
-                              "bytes": st.st_size,
-                              "mtime": st.st_mtime})
-        body = json.dumps({"items": items}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _snapshot_save(self) -> None:
-        import cgi
-        n = int(self.headers.get("Content-Length") or 0)
-        if n <= 0 or n > self._SNAP_MAX_BYTES:
-            self.send_error(400, "missing or oversized body")
-            return
-        ctype = self.headers.get("Content-Type", "")
-        if not ctype.startswith("multipart/form-data"):
-            self.send_error(400, "expected multipart/form-data with a 'png' field")
-            return
-        try:
-            fs = cgi.FieldStorage(
-                fp=self.rfile, headers=self.headers,
-                environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": ctype})
-        except Exception as e:
-            self.send_error(400, f"multipart parse failed: {e}")
-            return
-        if "png" not in fs:
-            self.send_error(400, "no 'png' field in the form")
-            return
-        item = fs["png"]
-        data = item.file.read() if hasattr(item, "file") else item.value
-        if not data:
-            self.send_error(400, "empty png")
-            return
-        # timestamp filename: 20260812_224530.png (sortable, human-readable)
-        ts = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
-        # If the same second is claimed twice, append a counter.
-        d = self._SNAPS_ROOT
-        d.mkdir(parents=True, exist_ok=True)
-        name = f"{ts}.png"; i = 1
-        while (d / name).exists():
-            name = f"{ts}_{i}.png"; i += 1
-        (d / name).write_bytes(data)
-        body = json.dumps({"ok": True, "name": name, "path": name,
-                           "url": f"/snapshots/user/{name}",
-                           "bytes": len(data)}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _snapshot_delete(self) -> None:
-        from urllib.parse import urlparse, parse_qs
-        q = parse_qs(urlparse(self.path).query)
-        p = (q.get("path") or [""])[0].strip()
-        if not p:
-            self.send_error(400, "missing ?path=")
-            return
-        d = self._SNAPS_ROOT
-        removed = 0
-        if p == "*":
-            # Clear all
-            if d.is_dir():
-                for f in d.iterdir():
-                    if f.is_file() and f.suffix.lower() in (".png", ".jpg") \
-                            and not f.name.startswith("."):
-                        try: f.unlink(); removed += 1
-                        except OSError: pass
-        else:
-            # Single file - restrict to basename to prevent traversal
-            import re
-            if not re.match(r"^[A-Za-z0-9_.\-]{1,80}$", p):
-                self.send_error(400, "bad path")
-                return
-            target = d / p
-            try:
-                if target.is_file():
-                    target.unlink(); removed = 1
-            except OSError:
-                pass
-        body = json.dumps({"ok": True, "removed": removed}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
 
     # ---- Line-crossing config + event log --------------------------------
     # The Line layer in the dashboard lets the operator draw a virtual
@@ -1017,20 +870,6 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Seq", str(fr["seq"]))
         self.send_header("X-Layer", fr["layer"])
-        # Canvas-overlay metadata: base64 JSON of the tick's raw detection
-        # data. Frontend decodes this to paint boxes/skeleton/heatmap over
-        # the still-playing <video>, so operator sees smooth video PLUS
-        # annotations at ~1 fps instead of a frozen JPEG replacing video.
-        # ACCESS: browsers HIDE non-standard response headers from JS by
-        # default; we expose them explicitly so fetch().headers.get() sees
-        # X-Analysis-Meta / X-Seq / X-Layer / X-Note.
-        meta_b = fr.get("meta_json") or b""
-        if meta_b:
-            import base64 as _b64
-            self.send_header("X-Analysis-Meta",
-                             _b64.b64encode(meta_b).decode("ascii"))
-        self.send_header("Access-Control-Expose-Headers",
-                         "X-Seq, X-Layer, X-Note, X-Analysis-Meta")
         note = (fr["note"] or "").encode("ascii", "replace").decode("ascii")
         if note:
             self.send_header("X-Note", note)
