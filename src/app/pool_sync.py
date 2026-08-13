@@ -77,6 +77,16 @@ MAX_FILE_BYTES = 20 * 1024 * 1024
 # backlog drains over the next rounds and the manifest grows with it.
 MAX_UPLOADS_PER_PASS = int(os.environ.get("POOL_SYNC_MAX_UPLOADS") or 40)
 
+# Re-ID sightings retention: without an active prune, entities that keep
+# re-matching (busy-street cars on sarachane, taksim pedestrians) accumulate
+# unbounded sighting rows. Over ~20 days the sightings table reached 272K
+# rows / 210 MB physical, and the compact copy exceeded MAX_FILE_BYTES
+# forever - the reid.db push silently stopped for 3 weeks. Two knobs:
+# drop rows older than KEEP_DAYS AND keep at most MAX_PER_ENTITY newest
+# per entity. Together they hold the compact copy under 10 MB in practice.
+REID_SIGHTINGS_KEEP_DAYS = int(os.environ.get("REID_SIGHTINGS_KEEP_DAYS") or 7)
+REID_SIGHTINGS_MAX_PER_ENTITY = int(os.environ.get("REID_SIGHTINGS_MAX_PER_ENTITY") or 50)
+
 _CONTENT_TYPES = {".jpg": "image/jpeg", ".json": "application/json",
                   ".db": "application/octet-stream"}
 
@@ -117,6 +127,41 @@ def _pool_files(snapshots_root: Path) -> dict[str, float]:
 
 
 # ---- VM side ------------------------------------------------------------------
+
+def _prune_sightings_inplace(db_path: Path) -> tuple[int, int]:
+    """Trim reid.db's `sightings` table in place before VACUUM INTO.
+
+    Drops rows older than REID_SIGHTINGS_KEEP_DAYS AND caps rows per
+    entity to REID_SIGHTINGS_MAX_PER_ENTITY newest. Runs on the live DB
+    briefly; the collector's writers wait through SQLite's busy_timeout.
+    Returns (age_deleted, cap_deleted). Never raises - a prune failure
+    must not cost the reid push; the next round retries.
+    """
+    import sqlite3
+    n_age = n_cap = 0
+    cutoff = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                           time.gmtime(time.time() - REID_SIGHTINGS_KEEP_DAYS * 86400))
+    try:
+        con = sqlite3.connect(str(db_path), timeout=10.0)
+        try:
+            con.execute("PRAGMA busy_timeout = 5000")
+            n_age = con.execute(
+                "DELETE FROM sightings WHERE ts < ?", (cutoff,)).rowcount
+            n_cap = con.execute(
+                "DELETE FROM sightings WHERE sighting_id NOT IN ("
+                "  SELECT sighting_id FROM ("
+                "    SELECT sighting_id, ROW_NUMBER() OVER "
+                "      (PARTITION BY entity_id ORDER BY ts DESC) AS rn "
+                "    FROM sightings"
+                "  ) WHERE rn <= ?"
+                ")", (REID_SIGHTINGS_MAX_PER_ENTITY,)).rowcount
+            con.commit()
+        finally:
+            con.close()
+    except Exception as e:
+        print(f"pool_sync: reid prune skipped ({type(e).__name__}: {e})")
+    return n_age, n_cap
+
 
 def _compact_sqlite_copy(db_path: Path) -> bytes | None:
     """Point-in-time compacted snapshot of a live sqlite db (VACUUM INTO).
@@ -235,6 +280,14 @@ def sync_up(firebase, snapshots_root: str | Path,
                 if (r_mtime is not None
                         and now - float(reid_entry.get("pushed_at", 0)) >= REID_PUSH_EVERY_S
                         and r_mtime != reid_entry.get("mtime")):
+                    # Prune BEFORE the compact copy: otherwise VACUUM INTO
+                    # captures every accumulated sighting row and the copy
+                    # will keep breaching MAX_FILE_BYTES no matter how
+                    # small the actual working set is.
+                    n_age, n_cap = _prune_sightings_inplace(rp)
+                    if n_age or n_cap:
+                        print(f"pool_sync: reid pruned  age>{REID_SIGHTINGS_KEEP_DAYS}d={n_age}  "
+                              f"cap>{REID_SIGHTINGS_MAX_PER_ENTITY}/ent={n_cap}")
                     data = _compact_sqlite_copy(rp)
                     if data is not None and len(data) <= MAX_FILE_BYTES:
                         blob = bucket.blob(f"{PREFIX}/reid.db")

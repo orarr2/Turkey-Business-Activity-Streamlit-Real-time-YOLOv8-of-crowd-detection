@@ -31,6 +31,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--imgsz", type=int, default=640)
     ap.add_argument("--weights", default="yolov8s.pt",
                     help="YOLO weights (default yolov8s.pt)")
+    # fix 3: the panel-only extras are CLI-reachable too.
+    ap.add_argument("--pose", action="store_true",
+                    help="per-crop skeleton pass (posture labels + gestures)")
+    ap.add_argument("--faces", action="store_true",
+                    help="face-detection boxes on the final frame")
+    ap.add_argument("--lock", default=None, metavar="auto|<track id>",
+                    help="target-lock crosshair on one individual")
     ap.add_argument("--json-only", action="store_true",
                     help="print raw JSON instead of the table")
     args = ap.parse_args(argv)
@@ -41,7 +48,9 @@ def main(argv: list[str] | None = None) -> int:
     model = load_model(args.weights)
     try:
         result = analyze_window(args.cam, model, n_frames=args.frames,
-                                stride=args.stride, imgsz=args.imgsz)
+                                stride=args.stride, imgsz=args.imgsz,
+                                pose=args.pose, want_faces=args.faces,
+                                lock=args.lock)
     except (ValueError, RuntimeError) as e:
         print(f"analyze failed: {e}", file=sys.stderr)
         return 1
@@ -54,6 +63,17 @@ def main(argv: list[str] | None = None) -> int:
           f"{result['individuals']} individual(s) over "
           f"{result['window_sec']}s / {result['frames']} frames - "
           f"{result['moving']} moving, {result['stationary']} stationary")
+    if args.pose:
+        print(f"pose: skeletons on {result.get('pose_persons', 0)} "
+              f"person sighting(s)")
+    if args.faces:
+        print(f"faces: {result.get('faces', 0)} detected"
+              + ("" if result.get("faces_available")
+                 else " (face model not available)"))
+    if result.get("lock"):
+        lk = result["lock"]
+        print(f"target lock: #{lk['track_id']} at ({lk['cx']}, {lk['cy']}) "
+              f"offset ({lk['dx']}, {lk['dy']})")
     if result.get("image_url"):
         print(f"trails image: web{result['image_url']}")
     hdr = (f"{'id':>3} {'cls':<10} {'seen':>4} {'move%':>5} {'dir':<10} "

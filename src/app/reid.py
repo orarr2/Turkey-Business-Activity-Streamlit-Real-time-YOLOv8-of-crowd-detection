@@ -21,6 +21,7 @@ swap embed_crop() for an OSNet/torchreid forward pass - the rest of the registry
 from __future__ import annotations
 
 import io
+import json
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -92,6 +93,12 @@ class ReidResult:
     # are NOT positionally aligned with the input - always use this index to
     # get back to the detection box.
     box_index: int | None = None
+    # Box of the PREVIOUS sighting (from the DB, so it survives collector
+    # restarts). The returning-visitor "static object" gate compares it to
+    # the current box; before this field the gate read a process-memory dict
+    # that every restart wiped, so the first post-restart match of any
+    # long-lived static entity passed the gate unchecked (IoU vs None = 0).
+    prev_box: dict | None = None
 
 
 from app.reid_embed import HistogramEmbedder, _l2norm  # noqa: E402
@@ -147,7 +154,18 @@ class ReidStore:
         self.conn = sqlite3.connect(str(self.path))
         self.conn.executescript(SCHEMA)
         self.conn.commit()
+        self._migrate_last_box()
         self._check_embedder_version()
+
+    def _migrate_last_box(self) -> None:
+        """Add entities.last_box (JSON [x1,y1,x2,y2]) on registries created
+        before it existed. ALTER ADD COLUMN is metadata-only in SQLite -
+        instant even on a multi-hundred-MB registry."""
+        cols = {r[1] for r in
+                self.conn.execute("PRAGMA table_info(entities)").fetchall()}
+        if "last_box" not in cols:
+            self.conn.execute("ALTER TABLE entities ADD COLUMN last_box TEXT")
+            self.conn.commit()
 
     def _check_embedder_version(self) -> None:
         eid = getattr(self.embedder, "embedder_id", "unknown")
@@ -168,9 +186,30 @@ class ReidStore:
 
     # ---- write path ------------------------------------------------------
 
+    @staticmethod
+    def _box_to_json(box: dict | None) -> str | None:
+        if not box:
+            return None
+        try:
+            return json.dumps([round(float(box[k]), 1)
+                               for k in ("x1", "y1", "x2", "y2")])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _box_from_json(raw: str | None) -> dict | None:
+        if not raw:
+            return None
+        try:
+            x1, y1, x2, y2 = json.loads(raw)
+            return {"x1": float(x1), "y1": float(y1),
+                    "x2": float(x2), "y2": float(y2)}
+        except (ValueError, TypeError):
+            return None
+
     def query(self, cam_id: str, cls: str, embedding: np.ndarray,
               exclude: set[int] | None = None,
-              commit: bool = True) -> ReidResult:
+              commit: bool = True, box: dict | None = None) -> ReidResult:
         """Match `embedding` to the stored entities (same cam + class). Either
         update an existing entity or insert a new one. Always returns a result.
 
@@ -189,11 +228,13 @@ class ReidStore:
         # gap to the caller, which uses it to decide whether to save a
         # "returning visitor" image.
         cur = self.conn.execute(
-            "SELECT entity_id, sightings, last_seen, embedding FROM entities "
+            "SELECT entity_id, sightings, last_seen, embedding, last_box "
+            "FROM entities "
             "WHERE cam_id=? AND cls=? ORDER BY last_seen DESC LIMIT ?",
             (cam_id, cls, MAX_SCAN))
         best_id, best_sim, best_sight, best_last, best_vec = None, -1.0, 0, None, None
-        for eid, n_sight, last_seen, blob in cur.fetchall():
+        best_box_raw = None
+        for eid, n_sight, last_seen, blob, box_raw in cur.fetchall():
             if exclude and eid in exclude:
                 continue
             vec = _blob_to_vec(blob)
@@ -201,7 +242,9 @@ class ReidStore:
             if sim > best_sim:
                 best_sim, best_id, best_sight, best_last = sim, eid, n_sight, last_seen
                 best_vec = vec
+                best_box_raw = box_raw
 
+        box_json = self._box_to_json(box)
         if best_id is not None and best_sim >= self.threshold:
             # match: compute the gap from the prior last_seen *before* we
             # overwrite it, then bump sightings + last_seen and drift the
@@ -215,26 +258,29 @@ class ReidStore:
                        if best_sim < 0.995 else None)
             if blended is not None:
                 self.conn.execute(
-                    "UPDATE entities SET last_seen=?, sightings=?, embedding=? "
-                    "WHERE entity_id=?",
-                    (ts, new_sight, blended.tobytes(), best_id))
+                    "UPDATE entities SET last_seen=?, sightings=?, embedding=?, "
+                    "last_box=COALESCE(?, last_box) WHERE entity_id=?",
+                    (ts, new_sight, blended.tobytes(), box_json, best_id))
             else:
                 self.conn.execute(
-                    "UPDATE entities SET last_seen=?, sightings=? WHERE entity_id=?",
-                    (ts, new_sight, best_id))
+                    "UPDATE entities SET last_seen=?, sightings=?, "
+                    "last_box=COALESCE(?, last_box) WHERE entity_id=?",
+                    (ts, new_sight, box_json, best_id))
             self.conn.execute(
                 "INSERT INTO sightings (entity_id, ts, similarity) VALUES (?, ?, ?)",
                 (best_id, ts, best_sim))
             if commit:
                 self.conn.commit()
             return ReidResult(best_id, cls, is_new=False, sightings=new_sight,
-                              similarity=best_sim, gap_seconds=gap)
+                              similarity=best_sim, gap_seconds=gap,
+                              prev_box=self._box_from_json(best_box_raw))
 
         # new entity
         cur = self.conn.execute(
-            "INSERT INTO entities (cam_id, cls, first_seen, last_seen, sightings, embedding)"
-            " VALUES (?, ?, ?, ?, 1, ?)",
-            (cam_id, cls, ts, ts, embedding.astype(np.float32).tobytes()))
+            "INSERT INTO entities (cam_id, cls, first_seen, last_seen, sightings, "
+            "embedding, last_box) VALUES (?, ?, ?, ?, 1, ?, ?)",
+            (cam_id, cls, ts, ts, embedding.astype(np.float32).tobytes(),
+             box_json))
         eid = cur.lastrowid
         self.conn.execute(
             "INSERT INTO sightings (entity_id, ts, similarity) VALUES (?, ?, NULL)",
@@ -262,7 +308,8 @@ class ReidStore:
             emb = self.embedder.embed(crop, b["cls"])
             if emb is None:
                 continue
-            r = self.query(cam_id, b["cls"], emb, exclude=matched, commit=False)
+            r = self.query(cam_id, b["cls"], emb, exclude=matched, commit=False,
+                           box=b)
             matched.add(r.entity_id)
             r.box_index = i
             results.append(r)

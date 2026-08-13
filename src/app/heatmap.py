@@ -31,11 +31,12 @@ from pathlib import Path
 _SRC_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = _SRC_ROOT / "data"
 
-# Grid resolution. 32x18 (16:9) is coarse enough that a JSON stays a few
-# hundred KB across all dayparts and fine enough to see "this shop front",
-# and it matches the auto-blacklist's philosophy of learning ZONES, not
-# pixels.
-GRID_W, GRID_H = 32, 18
+# Grid resolution. 48x27 (16:9) - one cell is ~40px at 1080p, tight enough
+# to separate two adjacent shop fronts that the previous 32x18 (60px cells)
+# blurred into one hot blob, while a full state JSON stays ~200 KB. The
+# _load shape guard restarts any 32x18 file cleanly (decay half-life is
+# ~3 weeks anyway, so the map re-forms quickly).
+GRID_W, GRID_H = 48, 27
 
 # Local-time dayparts (camera timezone - a Bangkok evening is not an
 # Istanbul evening).
@@ -201,6 +202,24 @@ def accumulate(cam_id: str, boxes: list[dict], frame_shape,
         save(cam_id, root)
 
 
+def export_state(cam_id: str) -> dict | None:
+    """Slim copy of a camera's accumulated grids (same rounding save()
+    uses on disk). The collector publishes this next to the overlay JPEG
+    (snapshots/heatmaps/<cam>.json) so the operator dashboard can render
+    ANY layer x daypart combination on demand - fix 3: the stored depth
+    (person/vehicles/other x four dayparts) finally has a consumer."""
+    st = _STATE.get(cam_id)
+    if st is None:
+        return None
+    return {
+        "layers": {ln: {dp: [[round(v, 2) for v in row] for row in grid]
+                        for dp, grid in layer.items()}
+                   for ln, layer in st["layers"].items()},
+        "samples": st["samples"],
+        "updated": st["updated"],
+    }
+
+
 def save(cam_id: str, root: Path | None = None) -> None:
     st = _STATE.get(cam_id)
     if st is None:
@@ -283,6 +302,19 @@ def render(cam_id: str, base_frame=None, layer: str = "person",
            root: Path | None = None):
     """Colormap overlay of a camera's accumulated map (BGR ndarray).
 
+    Thin wrapper over overlay(): loads this camera's persisted grid and
+    hands it to the shared renderer.
+    """
+    return overlay(grid_for(cam_id, layer=layer, daypart=daypart),
+                   base_frame=base_frame, alpha=alpha, size=size)
+
+
+def overlay(grid, base_frame=None, alpha: float = 0.45,
+            size: tuple[int, int] = (640, 360)):
+    """Colormap overlay of ANY dwell grid (GRID_H rows x GRID_W cols of
+    floats) - the renderer shared by render() (persisted per-camera maps)
+    and the live-analysis heat layer (session-local accumulation).
+
     `base_frame` (BGR) gives the overlay its scene context; without one
     the map renders on a dark canvas at `size`. cv2/numpy import lives
     here so the accumulation path stays dependency-free.
@@ -290,8 +322,7 @@ def render(cam_id: str, base_frame=None, layer: str = "person",
     import cv2
     import numpy as np
 
-    grid = np.asarray(grid_for(cam_id, layer=layer, daypart=daypart),
-                      dtype=np.float32)
+    grid = np.asarray(grid, dtype=np.float32)
     if base_frame is not None:
         H, W = base_frame.shape[:2]
         canvas = base_frame.copy()

@@ -1,9 +1,11 @@
 [Unit]
-Description=Situation report at 12:00 and 20:00 Israel time
+Description=Situation report at 12:00 and 20:00 Israel time -> project archive mailbox
 
 [Timer]
 # Israel local time by name - DST handled by the tzdata on the VM, no
-# season-dependent UTC offsets to maintain.
+# season-dependent UTC offsets to maintain. Since 2026-08-09 the
+# scheduled sends go ONLY to the project mailbox (DIGEST_TO in
+# digest.env) - the archive the dashboards' send buttons draw against.
 OnCalendar=*-*-* 12:00:00 Asia/Jerusalem
 OnCalendar=*-*-* 20:00:00 Asia/Jerusalem
 # A report slot missed because the VM was rebooting fires on boot instead

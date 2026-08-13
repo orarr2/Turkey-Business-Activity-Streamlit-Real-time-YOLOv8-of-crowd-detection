@@ -1,0 +1,62 @@
+# On-demand situation report by mail (2026-08-09, replaces the cancelled
+# twice-daily timer). The operator opens this workflow's Run form (the
+# dashboard's "Send Report From VM" button links straight here), types the
+# destination address, and CI does the rest:
+#   1. composes the report from the live Firestore/Storage data - the exact
+#      code and content the VM's digest produced;
+#   2. mails it FROM the project mailbox to the requested address, with the
+#      project mailbox CC'd so its inbox stays a complete report archive.
+#
+# Abuse profile, by design: only repository collaborators can dispatch,
+# every send is a logged Actions run, and no user machine ever holds the
+# SMTP credential (repo secrets GMAIL_USER / GMAIL_APP_PASSWORD, plus the
+# existing FIREBASE_SA).
+
+name: send-report
+
+on:
+  workflow_dispatch:
+    inputs:
+      to:
+        description: "destination email address"
+        required: true
+      window_hours:
+        description: "hours the report covers"
+        default: "12"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: send-report
+  cancel-in-progress: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install report dependencies
+        run: pip install --quiet firebase-admin reportlab pillow
+
+      - name: Write service-account key
+        env:
+          FIREBASE_SA: ${{ secrets.FIREBASE_SA }}
+        run: printf '%s' "$FIREBASE_SA" > /tmp/sa.json
+
+      - name: Compose and send the report
+        env:
+          FIREBASE_CREDENTIALS: /tmp/sa.json
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          DIGEST_TO: "${{ inputs.to }},projgithub@gmail.com"
+        run: python -m tools.daily_digest --window-hours "${{ inputs.window_hours }}"

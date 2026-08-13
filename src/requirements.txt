@@ -19,6 +19,18 @@ firebase-admin>=6.5
 # Optional: nicer time handling for the notebook
 python-dateutil>=2.9
 
+# Notebook forecasting: exogenous features. Open-Meteo needs no key (requests
+# above suffices); holidays adds national-holiday flags per country to the
+# ridge feature matrix in section 11c.
+holidays>=0.60
+
+# Notebook forecasting: Chronos-2 (Amazon) - zero-shot foundation model
+# added as the 4th ladder rung in section 11c-b. LOCAL notebook only -
+# the model needs ~500 MB RSS at inference and does not fit the e2-micro
+# VM. If the package is missing, cell 11c-b prints a skip note and moves
+# on without breaking the ladder.
+# chronos-forecasting>=1.4    # uncomment on the LOCAL notebook to enable 11c-b
+
 # Twice-daily situation report PDF (tools/daily_digest, tools/report_pdf).
 # reportlab pure-python; Pillow downscales snapshots before embedding so
 # eight fullframe HD images fit under Gmail's inline-preview envelope.

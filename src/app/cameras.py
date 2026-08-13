@@ -54,6 +54,7 @@ Example (uncomment and tune per scene):
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 # Header set IBB's nginx accepts. ffmpeg/OpenCV honor this via OPENCV_FFMPEG_CAPTURE_OPTIONS.
@@ -97,6 +98,46 @@ CAMERAS = {
         # The web/ dashboard plays this HLS directly with hls.js in its own <video>.
         "embed": None,
         "type": "square/retail",
+        # The metro entrance canopy + its "M" logo (bottom-right of the
+        # plaza) fired as bus/car for two straight weeks and owned the
+        # anomaly feed (registry entities 164830: 'bus', 1181 sightings;
+        # 165327: 'car', 254 sightings). The first polygon stopped at
+        # x=0.80 and the canopy's 'bus' box kept escaping by widening to
+        # the frame edge (x 0.66-1.0 -> foot center 0.83, caught again in
+        # the 07.08 digest), so `bus` is now excluded across the WHOLE
+        # bottom strip - no real bus ever stands with its wheels on the
+        # pedestrian plaza (the terminal lanes' foot points sit at
+        # y 0.55-0.75). `car`/`truck` keep the left edge at 0.55 because
+        # real vans do park on the bottom-LEFT apron (seen 02.08).
+        # 08.08: the canopy escaped UPWARD too - the 05:39Z loiter box
+        # bottomed out at foot y=0.786, above the 0.84 strip - so a second
+        # polygon covers the canopy's right-shoulder drift range
+        # (x>=0.75, y>=0.70; the terminal lanes on the LEFT never enter it).
+        # `person` is deliberately NOT excluded: people walk in front of
+        # the canopy all day.
+        # 09.08: vendor carts (simit/corn stands with white canopies) park on
+        # the bottom-CENTER walkway (foot x 0.23-0.55, y>=0.90) and COCO has
+        # no cart class - a canopied cart reads as 'car', stood 5+ min, and
+        # produced a "Static object left · car" card that was actually a
+        # vendor cart. Real vans keep the bottom-LEFT apron (x < 0.23).
+        "roi_exclude_class": {
+            "bus":   [[[0.0, 0.84], [1.0, 0.84], [1.0, 1.0], [0.0, 1.0]],
+                      [[0.75, 0.70], [1.0, 0.70], [1.0, 1.0], [0.75, 1.0]]],
+            "car":   [[[0.55, 0.84], [1.0, 0.84], [1.0, 1.0], [0.55, 1.0]],
+                      [[0.75, 0.70], [1.0, 0.70], [1.0, 1.0], [0.75, 1.0]],
+                      [[0.23, 0.90], [0.55, 0.90], [0.55, 1.0], [0.23, 1.0]]],
+            "truck": [[[0.55, 0.84], [1.0, 0.84], [1.0, 1.0], [0.55, 1.0]],
+                      [[0.75, 0.70], [1.0, 0.70], [1.0, 1.0], [0.75, 1.0]],
+                      [[0.23, 0.90], [0.55, 0.90], [0.55, 1.0], [0.23, 1.0]]],
+        },
+        # Measured 09.08 live: person 8 -> 16 at 960 (the wide plaza's far
+        # half simply does not exist at 640). Same per-cam mechanism as
+        # Sarachane; Sultanahmet measured no gain and stays on the global.
+        "imgsz": 960,
+        # fix1-A10: pedestrian flow line across the plaza's main walking
+        # axis. A->B left-to-right => "in" = crossing DOWN-screen (toward
+        # the metro / McDonald's side).
+        "line": [[0.15, 0.74], [0.85, 0.74]],
     },
     "beyazit_meydan": {
         "name": "Beyazit Meydani",
@@ -134,6 +175,10 @@ CAMERAS = {
         "page": "https://istanbuluseyret.ibb.gov.tr/sultanahmet-1-yeni/",
         "embed": None,
         "type": "tourist square",
+        # fix1-A10: the main promenade at the bottom of the park view.
+        # A->B left-to-right => "in" = crossing down-screen (toward the
+        # camera / tram side).
+        "line": [[0.05, 0.82], [0.95, 0.82]],
     },
     # --- Three more IBB kamerayayin cameras added 2026-07-14 after the
     # Konya tvkur backend went 404. All three verified HTTP 200 at add time
@@ -147,6 +192,14 @@ CAMERAS = {
         "page": "https://istanbuluseyret.ibb.gov.tr/beyazit-meydani-yeni/",
         "embed": None,
         "type": "square/market-gateway",
+        # Measured 09.08 live: person 14 -> 16 at 960 - the far half of the
+        # university plaza gains meaningfully; same per-cam mechanism as
+        # Sarachane/Taksim.
+        "imgsz": 960,
+        # fix1-A10: gate corridor line by the university entrance (left
+        # side). A->B bottom-to-top => "in" = crossing left-to-right =
+        # out of the gate INTO the plaza.
+        "line": [[0.33, 0.95], [0.33, 0.40]],
     },
     "eyup_sultan_yeni": {
         "name": "Eyup Sultan (live)",
@@ -178,6 +231,16 @@ CAMERAS = {
         "page": "https://istanbuluseyret.ibb.gov.tr/sarachane-yeni/",
         "embed": None,
         "type": "civic square",
+        # The camera hangs far above the Valens aqueduct junction - people on
+        # the sidewalks are ~10px tall at the global imgsz 640, and the
+        # 07-08.08 digests peaked at "2 people" while the preview showed
+        # dozens (vehicles on the near road detected fine: 11-14). Running
+        # THIS cam at 960 recovers the pedestrian half of the scene for
+        # ~2.25x its share of round compute; the other cams stay at 640.
+        "imgsz": 960,
+        # fix1-A10: vertical tripwire across the main road - counts the
+        # traffic flow. A->B bottom-to-top => "in" = left-to-right traffic.
+        "line": [[0.35, 0.62], [0.35, 0.42]],
     },
     "sultanahmet_2_yeni": {
         "name": "Sultanahmet 2 (live)",
@@ -392,6 +455,11 @@ CAMERAS = {
         "kind": "youtube", "url": "https://www.youtube.com/watch?v=vn702Owd5Kk",
         "page": "https://webcamera24.com/camera/turkey/bulancak-square-cam/",
         "embed": "https://www.youtube.com/embed/vn702Owd5Kk?autoplay=1&mute=1&playsinline=1&enablejsapi=1",
+        # A bench-lined town square: sitting for 5+ minutes is the NORMAL
+        # use of the place, and the default 300s person threshold turned a
+        # summer afternoon into 10 loiter alerts (the full daily budget,
+        # 07.08). Alert-worthy dwell here starts at 15 minutes.
+        "loiter_person_sec": 900,
     },
     "tr_golden_horn": {
         "name": "Golden Horn (Istanbul)", "city": "Istanbul", "country": "turkey",
@@ -635,15 +703,20 @@ CAMERAS = {
 # CountryDirector re-probes higher-priority countries shortly before each
 # report and switches back if one has recovered.
 #
-# Turkey ladder (revised 2026-07-21 after the geo-block verification):
-# YouTube-backed cameras FIRST. tools/probe_country --country turkey from
-# the GCP VM returns HTTP 403 on every one of the 21 IBB/Konya/webcamera24-
-# tvkur entries; the only path that actually delivers Turkish frames from
-# us-east1 is YouTube-Live. TURKEY_YT sits at the head of the pool so the
-# collector starts on working cameras; the blocked tiers stay in place so
-# a future thaw (or a Turkey-routed VM) puts them right back into rotation
-# without a code change. Konya `tvkur` cams are the fast-fail lane
-# (see collector.CameraPool): one miss rests them.
+# Turkey ladder (re-revised 2026-07-29): IBB FIRST, YouTube second.
+# The 2026-07-21 revision put the YouTube tier at the head because IBB
+# returned 403 from GCP. Both facts have since flipped: IBB delivers
+# reliably through the Cloudflare-Worker relay, while YouTube starves
+# Google-datacenter IPs at the SEGMENT level - resolves succeed, then
+# googlevideo serves no data, so every YT attempt burns ~90s of open
+# timeouts before failing. With YT at the head that cost ~15-20 min of
+# empty grid after every service restart (measured live 2026-07-29,
+# including with the bgutil PO-token provider installed - the CDN
+# starvation beat the unauthenticated-token route too). IBB-first makes
+# every boot settle within one round; the YT tier stays next in line so
+# it is probed automatically whenever IBB thins, which is also the
+# passive detector for a future YouTube thaw. Konya `tvkur` cams are the
+# fast-fail lane (see collector.CameraPool): one miss rests them.
 TURKEY_YT = [
     "tr_bulancak_meydan", "tr_golden_horn", "tr_giresun_kalesi",
     "tr_ankara_kivircik_park",
@@ -664,7 +737,7 @@ TURKEY_TAIL = [
     "ulus_parki_yeni", "pierre_lotti_yeni", "emirgan_yeni", "kiz_kulesi_yeni",
     "hidiv_kasri_yeni", "dragos_yeni",
 ]
-TURKEY_POOL = TURKEY_YT + TURKEY_IBB + TURKEY_KONYA + TURKEY_TAIL
+TURKEY_POOL = TURKEY_IBB + TURKEY_YT + TURKEY_KONYA + TURKEY_TAIL
 
 # Foreign ladders: the operator's four per country first (verified live
 # 2026-07-17), then the spares discovered from the same webcamera24 country
@@ -710,6 +783,169 @@ def camera_timezone(cam_id: str) -> str:
     if ctry and ctry in COUNTRIES:
         return COUNTRIES[ctry]["tz"]
     return "Europe/Istanbul"
+
+
+# Country-level (lat, lon) used as the weather-fetch anchor by the
+# forecasting notebook. Individual cameras don't need pinpoint accuracy -
+# a Konya vs Istanbul afternoon differ mostly by 1-2 C and rain-yes/no,
+# which the country capital captures fine for the 15-min forecast bins.
+# Override per-camera by setting "lat"/"lon" on the CAMERAS entry.
+COUNTRY_LATLON = {
+    "turkey":   (41.0082, 28.9784),   # Istanbul
+    "thailand": (13.7563, 100.5018),  # Bangkok
+    "japan":    (35.6895, 139.6917),  # Tokyo
+    "usa":      (40.7128, -74.0060),  # New York City (Eastern-anchored bench)
+}
+
+
+def camera_latlon(cam_id: str) -> tuple[float, float] | None:
+    """The (lat, lon) to use when fetching weather for this camera.
+
+    Per-camera "lat"/"lon" beats the country default. Cameras with no
+    country and no explicit coords return None - the caller should skip
+    them (the forecaster does so silently)."""
+    cam = CAMERAS.get(cam_id, {})
+    if cam.get("lat") is not None and cam.get("lon") is not None:
+        return (float(cam["lat"]), float(cam["lon"]))
+    ctry = cam.get("country")
+    if ctry and ctry in COUNTRY_LATLON:
+        return COUNTRY_LATLON[ctry]
+    return None
+
+
+# ISO 3166-1 alpha-2 country codes for the `holidays` library.
+COUNTRY_ISO2 = {
+    "turkey":   "TR",
+    "thailand": "TH",
+    "japan":    "JP",
+    "usa":      "US",
+}
+
+
+def camera_country_iso2(cam_id: str) -> str | None:
+    """Country ISO-2 code for the `holidays` library. None if unknown."""
+    ctry = CAMERAS.get(cam_id, {}).get("country")
+    return COUNTRY_ISO2.get(ctry)
+
+
+# Per-camera counting-line override written by the dashboard UI (a user
+# draws a line on a snapshot -> POST /api/lines/<cam>). Overrides the
+# CAMERAS[cam]["line"] if present. Location is relative to the src/
+# directory the collector runs from; the dashboard writes to the same
+# path so both processes see the same source of truth.
+def _lines_dir() -> Path:
+    """The user-drawn line-config directory (src/data/lines/). Created
+    lazily on first write."""
+    return Path(__file__).resolve().parent.parent / "data" / "lines"
+
+
+# Classes the crossing counter is allowed to filter on. Kept narrow on
+# purpose - the picker checkboxes mirror this list, and an unknown token
+# in a hand-edited override is rejected instead of silently dropping every
+# real detection.
+LINE_ALLOWED_CLASSES = frozenset({
+    "person", "bicycle", "car", "motorcycle", "bus", "truck",
+})
+
+
+def _valid_line_shape(line) -> bool:
+    return (isinstance(line, list) and len(line) == 2
+            and all(isinstance(pt, list) and len(pt) == 2
+                    and all(isinstance(v, (int, float)) and 0.0 <= v <= 1.0
+                            for v in pt)
+                    for pt in line))
+
+
+def _valid_classes(classes) -> bool:
+    """None means "count every class"; a list means "count only these".
+    An empty list is rejected - the operator meant something, and an empty
+    filter would silently count nothing."""
+    if classes is None:
+        return True
+    if not isinstance(classes, list) or not classes:
+        return False
+    return all(isinstance(c, str) and c in LINE_ALLOWED_CLASSES
+               for c in classes)
+
+
+def resolve_line(cam_id: str) -> list | None:
+    """Return the counting line to use for this camera.
+
+    Precedence: user override (data/lines/<cam>.json) beats the CAMERAS
+    catalog entry. Returns None when neither exists. Malformed overrides
+    fall back to the catalog silently - the collector must never crash
+    because the dashboard wrote a bad file.
+    """
+    p = _lines_dir() / f"{cam_id}.json"
+    if p.exists():
+        try:
+            data = json.loads(p.read_text())
+            line = data.get("line")
+            if _valid_line_shape(line):
+                return line
+        except (OSError, ValueError):
+            pass
+    return CAMERAS.get(cam_id, {}).get("line")
+
+
+def resolve_line_classes(cam_id: str) -> list | None:
+    """Class filter for the crossing counter, if the user set one.
+
+    None (the default) means "count every tracked class"; a validated
+    list of class names means "count only these". Malformed overrides
+    fall back to None so the counter degrades to the old permissive
+    behavior instead of going silent."""
+    p = _lines_dir() / f"{cam_id}.json"
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text())
+        classes = data.get("classes")
+        if classes is None:
+            return None
+        if _valid_classes(classes):
+            return list(classes)
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def save_line(cam_id: str, line: list, classes: list | None = None) -> None:
+    """Persist a user-drawn line for this camera. Validates shape + the
+    optional class filter; raises ValueError on garbage input so the API
+    layer can return 400.
+
+    `classes`: None keeps the current behavior (count every class); a list
+    like ["person"] restricts the counter to the named classes (must all
+    be in LINE_ALLOWED_CLASSES, and the list must be non-empty)."""
+    if not _valid_line_shape(line):
+        raise ValueError(
+            "line must be exactly two [x, y] points with 0 <= x,y <= 1")
+    if not _valid_classes(classes):
+        raise ValueError(
+            f"classes must be null or a non-empty list of names from "
+            f"{sorted(LINE_ALLOWED_CLASSES)}")
+    d = _lines_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "line": [[float(line[0][0]), float(line[0][1])],
+                 [float(line[1][0]), float(line[1][1])]],
+        "set_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    if classes is not None:
+        payload["classes"] = list(classes)
+    (d / f"{cam_id}.json").write_text(json.dumps(payload))
+
+
+def clear_line(cam_id: str) -> bool:
+    """Delete a user-drawn line override; returns True if a file was
+    removed, False if none existed."""
+    p = _lines_dir() / f"{cam_id}.json"
+    try:
+        p.unlink()
+        return True
+    except OSError:
+        return False
 
 
 # Stamp every catalog entry with its own id (needed by the resolve cache in
@@ -775,9 +1011,18 @@ def _merge_auto_blacklist() -> None:
         cam = CAMERAS.get(cam_id)
         if not cam:
             continue
-        existing = dict(cam.get("roi_exclude_class") or {})
+        # Deep-copy the class lists and dedupe before appending: this merge
+        # re-runs on the collector's hot-reload timer, and the old in-place
+        # extend() re-appended every auto polygon on every reload - the
+        # lists grew by one duplicate per cycle and static catalog entries
+        # shared their list objects with the merged result.
+        existing = {c: list(p)
+                    for c, p in (cam.get("roi_exclude_class") or {}).items()}
         for cls, polys in cls_map.items():
-            existing.setdefault(cls, []).extend(polys)
+            cur = existing.setdefault(cls, [])
+            for poly in polys:
+                if poly not in cur:
+                    cur.append(poly)
         cam["roi_exclude_class"] = existing
 
 
@@ -857,29 +1102,3 @@ _merge_per_camera_conf()
 def active_cameras():
     """Cameras that have a usable URL (skips placeholders awaiting a YouTube id)."""
     return {k: v for k, v in CAMERAS.items() if v.get("url")}
-
-
-# ---------------------------------------------------------------------------
-# Line-crossing config (added 2026-08-13 on top of b58dcec so
-# app.live_analysis can import). Stubs return None + empty list because
-# the b58dcec baseline never shipped per-camera line overrides; the
-# user-drawn line workflow (POST /api/lines) is not wired in this
-# baseline either. live_analysis falls back to its DEFAULT_LINE.
-# ---------------------------------------------------------------------------
-from pathlib import Path as _Path
-def _lines_dir() -> _Path:
-    return _Path(__file__).resolve().parent.parent / "data" / "lines"
-
-def resolve_line(cam_id: str) -> list | None:
-    """No user-override support in b58dcec baseline; return catalog line if any."""
-    try:
-        return CAMERAS.get(cam_id, {}).get("line")
-    except Exception:
-        return None
-
-def resolve_line_classes(cam_id: str) -> list | None:
-    """No per-cam class-filter override in b58dcec baseline."""
-    try:
-        return CAMERAS.get(cam_id, {}).get("line_classes")
-    except Exception:
-        return None

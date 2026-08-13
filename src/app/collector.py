@@ -95,7 +95,21 @@ EVENTS_DIR     = SNAPSHOTS_ROOT / "events"
 
 # ---- Returning-visitor gates (each saved image is a real return event) -----
 RETURNING_GAP_SEC              = 300   # >= 5 min absence (the declared behavior)
-RETURNING_MIN_SIMILARITY       = 0.96  # >= 0.96 cosine
+# Similarity floor for SAVING a return event, per embedder family. 0.96 was
+# tuned on the HSV-histogram embedder's score distribution (match threshold
+# 0.92); the OSNet embedder scores the same physical entity anywhere in
+# 0.66-0.98 (measured on the live registry), so holding it to 0.96 turned
+# the gate into "only near-pixel-identical crops pass" - which is exactly
+# the static-structure population, the opposite of the intent. The default
+# now follows the ACTIVE embedder; --returning-min-similarity overrides.
+RETURNING_MIN_SIMILARITY        = 0.96  # histogram embedder
+RETURNING_MIN_SIMILARITY_OSNET  = 0.85  # osnet_onnx embedder, vehicle classes
+# People need a stricter bar than structures/vehicles under OSNet: at 0.85
+# the 06-07.08 digests matched DIFFERENT tourists as one "returning"
+# entity (yellow-backpack vs white-umbrella person, x10 budget floods on
+# three cameras) - similar clothing crops score 0.85+ between strangers,
+# while a parked van vs itself scores the same. Structures keep 0.85.
+RETURNING_MIN_SIMILARITY_OSNET_PERSON = 0.92
 RETURNING_MIN_PRIOR_SIGHTINGS  = 2     # entity must have been seen >= 2 times
 RETURNING_PER_ENTITY_COOLDOWN  = 1800  # same eid at most once per 30 min
 # A "return" is only meaningful if we were actually watching during the
@@ -106,7 +120,40 @@ RETURNING_MAX_UNOBSERVED_FRAC  = 0.5
 # Static objects (parked cars, banners detected as trucks) re-match in the
 # same spot forever; a genuine return walks/drives back INTO the scene. If the
 # entity's new box overlaps its previous box above this IoU, it never left.
-RETURNING_STATIC_IOU           = 0.5
+# 0.5 -> 0.35 (2026-08-08): on night IR frames a parked car's box drifts
+# enough that consecutive sightings overlap at only 0.35-0.5, and the same
+# parked sedan at Sarachane slid under the 0.5 bar ten times in one night
+# (the full daily budget). A vehicle that GENUINELY left and came back
+# parks with near-zero overlap; 0.35 keeps that while catching the drift.
+RETURNING_STATIC_IOU           = 0.35
+# A return must re-appear AWAY from the previous sighting: box center moved
+# at least this multiple of the larger box dimension. The IoU gate alone
+# let fixed structures through whenever their flickering detections
+# overlapped under 0.35 - the Beyazit university-gate arch (entity #166134,
+# a 260px "person") kept "returning" for three digests because its box
+# widened/narrowed around the SAME portal. A structure's center never
+# leaves its spot; a genuine returner walks in from somewhere else.
+RETURNING_MIN_MOVE_SCALE       = 1.2
+# Returning-visitor EVENTS are person-only (2026-08-08). The 07-08.08 digests
+# were owned by vehicle "returns": 39 of the day's 40 returning events were
+# car/bus/truck/bicycle - city buses on fixed routes and Istanbul's identical
+# white taxis re-match at OSNet 0.85+ every few minutes, and each pass is a
+# timetable, not an anomaly. Re-ID keeps tracking vehicles (counting, gallery,
+# regulars stats); only the saved EVENT is scoped to people.
+RETURNING_EVENT_CLASSES        = {"person"}
+# A person's box must be at least this tall (px) to claim a return. The 08.08
+# beyazit chain matched a ~60px bollard against a passing couple - OSNet
+# embeddings of sub-64px crops are upscaling artifacts, not appearance.
+RETURNING_MIN_BOX_H_PX         = 64
+
+# fix1-A12: crowd rush - this many persons at running pace (>= 0.12 frame
+# diagonals/sec, the deep window's running bar) within ONE burst reads as a
+# scene-level event: a crowd suddenly moving fast where strolling is the
+# norm. One event per camera per cooldown; the daily event budget applies
+# on top.
+CROWD_RUSH_MIN_FAST = 4
+CROWD_RUSH_COOLDOWN_SEC = 1800.0
+_CROWD_RUSH_LAST: dict[str, float] = {}
 
 # How many anomaly verdicts per physical camera per day is "normal operations".
 # Beyond this the collector logs a loud warning - the gates are miscalibrated
@@ -925,6 +972,19 @@ def _save_heatmap_view(cam_id: str, frame, firebase) -> str | None:
     if not okj:
         return None
     if firebase.storage is not None:
+        # fix 3: publish the raw grids next to the overlay - the operator
+        # dashboard renders any layer x daypart combination from this, so
+        # the accumulated depth (person/vehicles/other x four dayparts)
+        # is finally visible instead of just the summed person map.
+        state = _hm.export_state(cam_id)
+        if state:
+            try:
+                firebase.upload_snapshot(
+                    f"heatmaps/{cam_id}.json",
+                    json.dumps(state).encode("utf-8"),
+                    content_type="application/json")
+            except Exception as e:
+                print(f"  ! heatmap state publish failed for {cam_id}: {e}")
         return firebase.upload_snapshot(f"heatmaps/{cam_id}.jpg",
                                         buf.tobytes())
     hm_dir = SNAPSHOTS_ROOT / "heatmaps"
@@ -1026,6 +1086,22 @@ def _passes_returning_gates(r, gap_min_sec: float, sim_min: float,
                                               return False, "unobserved_gap"
     if box_iou(prev_box, new_box) >= static_iou:
                                               return False, "static_object"
+    if prev_box and new_box:
+        # Same-spot gate (2026-08-09): see RETURNING_MIN_MOVE_SCALE. IoU
+        # misses a structure whose flickering boxes barely overlap; the
+        # center test does not - a fixed object's center stays put while
+        # a genuine returner appears meaningfully away from where it left.
+        pcx = (float(prev_box["x1"]) + float(prev_box["x2"])) / 2.0
+        pcy = (float(prev_box["y1"]) + float(prev_box["y2"])) / 2.0
+        ncx = (float(new_box["x1"]) + float(new_box["x2"])) / 2.0
+        ncy = (float(new_box["y1"]) + float(new_box["y2"])) / 2.0
+        scale = max(float(prev_box["x2"]) - float(prev_box["x1"]),
+                    float(prev_box["y2"]) - float(prev_box["y1"]),
+                    float(new_box["x2"]) - float(new_box["x1"]),
+                    float(new_box["y2"]) - float(new_box["y1"]), 1.0)
+        moved = ((ncx - pcx) ** 2 + (ncy - pcy) ** 2) ** 0.5
+        if moved < RETURNING_MIN_MOVE_SCALE * scale:
+            return False, "same_spot"
     now  = time.time()
     last = last_save_for_eid.get(r.entity_id, 0.0)
     if now - last < cooldown_sec:             return False, "per_entity_cooldown"
@@ -1134,10 +1210,12 @@ def _handle_loiter(firebase, alerts: AlertSink | None, slot: dict,
             print(f"  ! loiter snapshot save failed: {e}")
     minutes = loiter["duration_sec"] / 60
     fh, fw = (frame.shape[:2] if hasattr(frame, "shape") else (0, 0))
+    fall = loiter.get("fall") is True
     _emit_event(firebase, alerts, {
         "kind": "loiter", "slot": slot["slot_id"], "cam_id": cam_id, "ts": ts,
         "cls": loiter["cls"], "entity_id": loiter["entity_id"],
         "duration_sec": loiter["duration_sec"],
+        "fall_suspect": fall,
         "snapshot_url": crop_url, "fullframe_url": full_url,
         # Box coordinates + frame dimensions so the emailed report can draw
         # a red overlay on the fullframe. Without this the operator sees
@@ -1145,9 +1223,11 @@ def _handle_loiter(firebase, alerts: AlertSink | None, slot: dict,
         "box": [float(box.get("x1", 0)), float(box.get("y1", 0)),
                 float(box.get("x2", 0)), float(box.get("y2", 0))],
         "frame_w": int(fw), "frame_h": int(fh),
-    }, title=f"Prolonged presence @ {slot['display_area']}",
-       body=(f"{loiter['cls']} #{loiter['entity_id']} stationary "
-             f"for {minutes:.0f} min"),
+    }, title=(f"Possible FALL @ {slot['display_area']}" if fall
+              else f"Prolonged presence @ {slot['display_area']}"),
+       body=(f"{loiter['cls']} #{loiter['entity_id']} "
+             + ("HORIZONTAL and stationary" if fall else "stationary")
+             + f" for {minutes:.0f} min"),
        image_jpeg=crop_bytes)
     print(f"  ! LOITER {loiter['cls']} eid{loiter['entity_id']} "
           f"@ {slot['slot_id']}/{cam_id} for {minutes:.0f} min")
@@ -1155,28 +1235,34 @@ def _handle_loiter(firebase, alerts: AlertSink | None, slot: dict,
 
 def _save_static_departed_images(slot_id: str, base: str,
                                  crop_bytes: bytes | None, after_frame,
-                                 firebase) -> tuple[str | None, str | None]:
-    """Persist a static_departed event's evidence pair.
+                                 firebase,
+                                 before_bytes: bytes | None = None,
+                                 prefix: str = "static",
+                                 ) -> tuple[str | None, str | None, str | None]:
+    """Persist a static/unattended event's evidence set.
 
-    The object is GONE from the current frame, so the crop is the one the
-    watch captured at settle time (the last good look); the CURRENT frame
-    is saved alongside as the "after" shot - the empty spot."""
+    The crop is the settle-time look at the object; the CURRENT frame is
+    the "after"/"now" shot; `before_bytes` (fix1-A6) is the full SCENE at
+    settle time - the image that shows what stood where, in context."""
     after_bytes = None
     if after_frame is not None:
         okf, full_buf = cv2.imencode(".jpg", _maybe_blur(after_frame),
                                      [cv2.IMWRITE_JPEG_QUALITY, 80])
         if okf:
             after_bytes = full_buf.tobytes()
-    crop_url = after_url = None
+    crop_url = after_url = before_url = None
     if firebase.storage is not None:
         if crop_bytes:
             crop_url = firebase.upload_snapshot(
-                f"events/static/{slot_id}/{base}.jpg", crop_bytes)
+                f"events/{prefix}/{slot_id}/{base}.jpg", crop_bytes)
         if after_bytes:
             after_url = firebase.upload_snapshot(
-                f"events/static/{slot_id}/{base}_after.jpg", after_bytes)
+                f"events/{prefix}/{slot_id}/{base}_after.jpg", after_bytes)
+        if before_bytes:
+            before_url = firebase.upload_snapshot(
+                f"events/{prefix}/{slot_id}/{base}_before.jpg", before_bytes)
     else:
-        cam_dir = EVENTS_DIR / "static" / slot_id
+        cam_dir = EVENTS_DIR / prefix / slot_id
         cam_dir.mkdir(parents=True, exist_ok=True)
         rel = str(cam_dir.relative_to(SNAPSHOTS_ROOT)).replace("\\", "/")
         if crop_bytes:
@@ -1185,7 +1271,10 @@ def _save_static_departed_images(slot_id: str, base: str,
         if after_bytes:
             (cam_dir / f"{base}_after.jpg").write_bytes(after_bytes)
             after_url = f"/snapshots/{rel}/{base}_after.jpg"
-    return crop_url, after_url
+        if before_bytes:
+            (cam_dir / f"{base}_before.jpg").write_bytes(before_bytes)
+            before_url = f"/snapshots/{rel}/{base}_before.jpg"
+    return crop_url, after_url, before_url
 
 
 # A loiter candidate is FURNITURE when a settled static-watch anchor of the
@@ -1200,6 +1289,34 @@ def _save_static_departed_images(slot_id: str, base: str,
 # alerts - the first-vs-current static gate cannot catch that wander,
 # anchor age can).
 LOITER_FURNITURE_MARGIN_SEC = 240.0
+
+# fix1-A11: when FALL_CHECK=1, a person loiter event triggers ONE pose pass
+# on that person's crop (top-down, app/pose.py) and the loiter is upgraded
+# to "possible fall" when the torso reads horizontal. Lazy: the pose model
+# loads on the first such event, never in the ordinary round - person
+# loiters are rare (budgeted 10/day/cam), so the steady-state RAM cost on
+# the 1 GB VM is zero until one actually fires.
+_FALL_POSE_MODEL = None
+
+
+def _fall_check(frame, box: dict) -> bool | None:
+    """True = the loitering person's torso is horizontal (possible fall),
+    False = upright, None = pose unavailable/no verdict."""
+    global _FALL_POSE_MODEL
+    try:
+        from app.pose import attach_keypoints_crops, load_pose_model
+        from app.behavior_labels import pose_flags_of
+        if _FALL_POSE_MODEL is None:
+            _FALL_POSE_MODEL = load_pose_model()
+        probe = dict(box)
+        n = attach_keypoints_crops(_FALL_POSE_MODEL, frame, [probe],
+                                   min_box_h=32)
+        if not n or not probe.get("kps"):
+            return None
+        return "fall_suspect" in pose_flags_of(probe["kps"])
+    except Exception as e:
+        print(f"  ! fall check skipped ({type(e).__name__}: {e})")
+        return None
 
 
 def _loiter_is_furniture(static_watch, cam_id: str, loiter: dict,
@@ -1218,14 +1335,15 @@ def _loiter_is_furniture(static_watch, cam_id: str, loiter: dict,
 def _handle_static_departed(firebase, alerts: AlertSink | None, slot: dict,
                             cam_id: str, ts: str, frame, dep: dict,
                             save_snapshots: bool = True) -> None:
-    crop_url = after_url = None
+    crop_url = after_url = before_url = None
     crop_bytes = dep.get("crop_jpeg")
     if save_snapshots:
         try:
             base = (f"static_a{dep['anchor_id']:04d}_"
                     f"{int(dep['dwell_sec'])}s_{_ts_filename(ts)}")
-            crop_url, after_url = _save_static_departed_images(
-                slot["slot_id"], base, crop_bytes, frame, firebase)
+            crop_url, after_url, before_url = _save_static_departed_images(
+                slot["slot_id"], base, crop_bytes, frame, firebase,
+                before_bytes=dep.get("before_jpeg"))
         except Exception as e:
             print(f"  ! static-departed snapshot save failed: {e}")
     minutes = dep["dwell_sec"] / 60
@@ -1236,6 +1354,7 @@ def _handle_static_departed(firebase, alerts: AlertSink | None, slot: dict,
         "cam_id": cam_id, "ts": ts, "cls": dep["cls"],
         "dwell_sec": dep["dwell_sec"], "sightings": dep.get("hits"),
         "snapshot_url": crop_url, "fullframe_url": after_url,
+        "before_url": before_url,
         # Where the object USED to stand, on the "after" frame - the
         # report can circle the now-empty spot.
         "box": [float(box["x1"]), float(box["y1"]),
@@ -1248,6 +1367,43 @@ def _handle_static_departed(firebase, alerts: AlertSink | None, slot: dict,
           f"@ {slot['slot_id']}/{cam_id} after {minutes:.0f} min")
 
 
+def _handle_unattended(firebase, alerts: AlertSink | None, slot: dict,
+                       cam_id: str, ts: str, frame, ev: dict,
+                       save_snapshots: bool = True) -> None:
+    """fix1-A1: a bag-class anchor settled with no person nearby. The
+    evidence set: settle-time scene (before, the bag in context), the
+    bag's crop, and the CURRENT frame (the bag still there, boxed)."""
+    crop_url = now_url = before_url = None
+    crop_bytes = ev.get("crop_jpeg")
+    if save_snapshots:
+        try:
+            base = (f"unattended_a{ev['anchor_id']:04d}_"
+                    f"{int(ev['dwell_sec'])}s_{_ts_filename(ts)}")
+            crop_url, now_url, before_url = _save_static_departed_images(
+                slot["slot_id"], base, crop_bytes, frame, firebase,
+                before_bytes=ev.get("before_jpeg"), prefix="unattended")
+        except Exception as e:
+            print(f"  ! unattended snapshot save failed: {e}")
+    minutes = ev["dwell_sec"] / 60
+    fh, fw = (frame.shape[:2] if hasattr(frame, "shape") else (0, 0))
+    box = ev["box"]
+    _emit_event(firebase, alerts, {
+        "kind": "unattended_object", "slot": slot["slot_id"],
+        "cam_id": cam_id, "ts": ts, "cls": ev["cls"],
+        "dwell_sec": ev["dwell_sec"], "sightings": ev.get("hits"),
+        "snapshot_url": crop_url, "fullframe_url": now_url,
+        "before_url": before_url,
+        "box": [float(box["x1"]), float(box["y1"]),
+                float(box["x2"]), float(box["y2"])],
+        "frame_w": int(fw), "frame_h": int(fh),
+    }, title=f"Unattended {ev['cls']} @ {slot['display_area']}",
+       body=(f"{ev['cls']} standing alone for {minutes:.0f} min - "
+             f"no person nearby"),
+       image_jpeg=crop_bytes)
+    print(f"  ! UNATTENDED {ev['cls']} a{ev['anchor_id']} "
+          f"@ {slot['slot_id']}/{cam_id} for {minutes:.0f} min")
+
+
 def sample_slot(model, slot: dict, cam_id: str, firebase,
                 reid: ReidStore | None = None, conf: float = 0.30,
                 presence: PresenceTracker | None = None,
@@ -1258,6 +1414,7 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
                 save_snapshots: bool = True,
                 returning_gap_sec: float = RETURNING_GAP_SEC,
                 returning_sim_min: float = RETURNING_MIN_SIMILARITY,
+                returning_sim_min_person: float | None = None,
                 returning_min_prior: int  = RETURNING_MIN_PRIOR_SIGHTINGS,
                 returning_cooldown_sec: float = RETURNING_PER_ENTITY_COOLDOWN,
                 _returning_last_save: dict | None = None,
@@ -1317,11 +1474,19 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
         gates = dict(cam.get("per_class_conf") or DEFAULT_PER_CLASS_CONF)
         if night:
             gates = night_adjusted_conf(gates)
+        # Per-camera imgsz override: a camera hung far above its scene (the
+        # Sarachane aqueduct junction) loses every distant pedestrian at the
+        # global 640 - its entry may request a larger inference size without
+        # taxing the other cams' share of the round.
+        eff_imgsz = cam.get("imgsz") or imgsz
+        # line: user override (data/lines/<cam>.json) beats cameras.py.
+        # Drawn from the dashboard's Line layer without redeploying.
+        from app.cameras import resolve_line
         counts, boxes, frame, burst_dbg = detect_burst(
-            model, frames, conf=cam_conf, imgsz=imgsz,
+            model, frames, conf=cam_conf, imgsz=eff_imgsz,
             roi=cam.get("roi"), roi_exclude=cam.get("roi_exclude"),
             roi_exclude_class=cam.get("roi_exclude_class"),
-            line=cam.get("line"), per_class_conf=gates,
+            line=resolve_line(cam_id), per_class_conf=gates,
             burst_stride=burst_stride)
         ok = 1
         # WS1: every box that reaches a review pool carries `uncertainty`,
@@ -1342,7 +1507,7 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
                 flip = None
                 if ((ls_due or rf_due)
                         and os.environ.get("UNCERTAINTY_FLIP") == "1"):
-                    flip = flip_delta(model, frame, boxes, imgsz)
+                    flip = flip_delta(model, frame, boxes, eff_imgsz)
                 attach_uncertainty(boxes, gates, flip)
         except Exception as _u_err:
             print(f"[{ts}] uncertainty skipped: {_u_err}")
@@ -1387,17 +1552,63 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
         # fake a departure; dark frames and scene wipes are guarded inside.
         try:
             if static_watch is not None:
+                _persons = [b for b in boxes if b.get("cls") == "person"]
                 for _dep in static_watch.observe(cam_id, boxes, frame.shape,
-                                                 luma=luma, frame=frame):
+                                                 luma=luma, frame=frame,
+                                                 person_boxes=_persons):
                     _pseudo = dict(_dep["box"], cls=_dep["cls"],
                                    conf=_dep["conf_median"])
-                    if _event_evidence_ok(_pseudo, "static_departed",
-                                          cam_id):
+                    _kind = _dep.get("kind") or "static_departed"
+                    if not _event_evidence_ok(_pseudo, _kind, cam_id):
+                        continue
+                    if _kind == "unattended_object":
+                        _handle_unattended(
+                            firebase, alerts, slot, cam_id, ts, frame,
+                            _dep, save_snapshots=save_snapshots)
+                    else:
                         _handle_static_departed(
                             firebase, alerts, slot, cam_id, ts, frame,
                             _dep, save_snapshots=save_snapshots)
         except Exception as _sw_err:
             print(f"[{ts}] static watch skipped: {_sw_err}")
+        # fix1-A12: crowd rush from the burst's own person tracks.
+        try:
+            _rush = (burst_dbg or {}).get("rush") or {}
+            if _rush.get("fast_persons", 0) >= CROWD_RUSH_MIN_FAST:
+                _now_r = time.time()
+                if (_now_r - _CROWD_RUSH_LAST.get(cam_id, 0.0)
+                        >= CROWD_RUSH_COOLDOWN_SEC
+                        and _event_evidence_ok({"cls": "person", "conf": 1.0},
+                                               "crowd_rush", cam_id)):
+                    _CROWD_RUSH_LAST[cam_id] = _now_r
+                    rush_url = None
+                    if save_snapshots:
+                        try:
+                            okr, rbuf = cv2.imencode(
+                                ".jpg", _maybe_blur(frame),
+                                [cv2.IMWRITE_JPEG_QUALITY, 80])
+                            if okr and firebase.storage is not None:
+                                rush_url = firebase.upload_snapshot(
+                                    f"events/rush/{slot_id}/"
+                                    f"{_ts_filename(ts)}.jpg",
+                                    rbuf.tobytes())
+                        except Exception as _re:
+                            print(f"  ! rush snapshot save failed: {_re}")
+                    fh_, fw_ = frame.shape[:2]
+                    _emit_event(firebase, alerts, {
+                        "kind": "crowd_rush", "slot": slot_id,
+                        "cam_id": cam_id, "ts": ts,
+                        "fast_persons": _rush.get("fast_persons"),
+                        "tracked_persons": _rush.get("tracked_persons"),
+                        "snapshot_url": rush_url, "fullframe_url": rush_url,
+                        "frame_w": int(fw_), "frame_h": int(fh_),
+                    }, title=f"Crowd rush @ {slot['display_area']}",
+                       body=(f"{_rush.get('fast_persons')} people moving at "
+                             f"running pace simultaneously"))
+                    print(f"  ! CROWD RUSH {_rush.get('fast_persons')} "
+                          f"runners @ {slot_id}/{cam_id}")
+        except Exception as _cr_err:
+            print(f"[{ts}] crowd-rush check skipped: {_cr_err}")
         if reid is not None and boxes:
             results = reid.update_from_frame(cam_id, frame, boxes)
             for r in results:
@@ -1405,7 +1616,17 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
                 box = boxes[r.box_index] if r.box_index is not None else None
                 prev_box, _prev_ts = _ENTITY_LAST_BOX.get((cam_id, r.entity_id),
                                                           (None, None))
-                if save_snapshots and box is not None:
+                if prev_box is None:
+                    # First match after a restart: the in-memory dict is
+                    # empty, and box_iou(None, box)=0 used to slide the
+                    # static-object gate open exactly for the long-lived
+                    # parked/furniture entities it exists to block. The
+                    # registry now persists each entity's last box.
+                    prev_box = getattr(r, "prev_box", None)
+                if (save_snapshots and box is not None
+                        and box.get("cls") in RETURNING_EVENT_CLASSES
+                        and (float(box.get("y2", 0)) - float(box.get("y1", 0))
+                             >= RETURNING_MIN_BOX_H_PX)):
                     # The obs-log scan is the expensive gate input; compute it
                     # only for entities whose gap can actually pass the cheap
                     # short_gap check (~1% of matches on a busy cam).
@@ -1413,8 +1634,15 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
                              if (r.gap_seconds is not None
                                  and r.gap_seconds >= returning_gap_sec)
                              else None)
+                    # People get their own (stricter) similarity floor when
+                    # configured - see RETURNING_MIN_SIMILARITY_OSNET_PERSON.
+                    _sim_min_eff = (returning_sim_min_person
+                                    if (returning_sim_min_person is not None
+                                        and box is not None
+                                        and box.get("cls") == "person")
+                                    else returning_sim_min)
                     passes, _why = _passes_returning_gates(
-                        r, returning_gap_sec, returning_sim_min,
+                        r, returning_gap_sec, _sim_min_eff,
                         returning_min_prior, returning_cooldown_sec,
                         _returning_last_save,
                         unobserved_sec=unobs,
@@ -1478,6 +1706,10 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
                               f"@ {cam_id} - a settled static anchor predates "
                               f"the stay")
                         loiter = None
+                    if (loiter is not None
+                            and box.get("cls") == "person"
+                            and os.environ.get("FALL_CHECK") == "1"):
+                        loiter["fall"] = _fall_check(frame, box)
                     if loiter is not None:
                         _handle_loiter(firebase, alerts, slot, cam_id, ts,
                                        frame, box, loiter,
@@ -1544,10 +1776,12 @@ def sample_slot(model, slot: dict, cam_id: str, firebase,
             if _POSE_MODEL is not None:
                 # Opt-in skeleton pass (--pose): keypoints ride the same box
                 # dicts as track_id/kmh; a pose failure must not cost the
-                # sample, so it degrades to a plain model view.
+                # sample, so it degrades to a plain model view. Per-crop
+                # since fix 3 - the full-frame pass attached nothing at
+                # street-cam distance (~15px of person at model resolution).
                 try:
-                    from app.pose import attach_keypoints
-                    attach_keypoints(_POSE_MODEL, frame, boxes)
+                    from app.pose import attach_keypoints_crops
+                    attach_keypoints_crops(_POSE_MODEL, frame, boxes)
                 except Exception as e:
                     print(f"  ! pose pass failed for {slot_id}: {e}")
             try:
@@ -1696,6 +1930,103 @@ def _restore_state(firebase, slot_ids: set[str]) -> None:
             print(f"  observation log seeded for {len(obs_epochs)} cam(s)")
     except Exception as e:
         print(f"  ! observation-log restore skipped ({e})")
+    # Daily event budgets: the analysis-state FILE is authoritative only when
+    # the previous process was actually persisting budgets. A process running
+    # pre-persistence code leaves a file with none - observed 08.08: the
+    # 08:31Z deploy restart restored "0 budget cell(s)" and sarachane
+    # immediately spent a second 10/day (x20 in the midday report). Firestore
+    # holds every emitted event, so rebuild today's per-(cam, kind) counts
+    # from it and keep the LARGER of file/Firestore per cell.
+    try:
+        since = (now - dt.timedelta(hours=26)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        rebuilt: dict[tuple[str, str], int] = {}
+        for e in firebase.recent_events(since):
+            cam = str(e.get("cam_id") or "")
+            kind = str(e.get("kind") or "")
+            ts = _parse_ts(e.get("ts"))
+            if not cam or not kind or ts is None:
+                continue
+            local_day = ts.astimezone(cam_tzinfo(cam)).date().isoformat()
+            today = now.astimezone(cam_tzinfo(cam)).date().isoformat()
+            if local_day != today:
+                continue
+            rebuilt[(cam, kind)] = rebuilt.get((cam, kind), 0) + 1
+        for (cam, kind), n in rebuilt.items():
+            today = now.astimezone(cam_tzinfo(cam)).date().isoformat()
+            cell = _EVENT_DAYCOUNT.setdefault((cam, kind), [today, 0, False])
+            if cell[0] != today:
+                cell[:] = [today, n, False]
+            elif cell[1] < n:
+                cell[1] = n
+        if rebuilt:
+            print(f"  event budgets rebuilt from Firestore: "
+                  f"{sum(rebuilt.values())} event(s) in "
+                  f"{len(rebuilt)} (cam, kind) cell(s)")
+    except Exception as e:
+        print(f"  ! event-budget rebuild skipped ({e})")
+
+
+# Loiter clocks + static anchors used to be memory-only; with Restart=always
+# every service bounce zeroed them together, which (a) re-armed "just past
+# threshold" loiter alerts for permanent structures and (b) blinded the
+# furniture cross-check exactly when it was needed (it requires anchors OLDER
+# than the stay). Snapshot both to VM disk each few rounds, restore on boot.
+_ANALYSIS_STATE_PATH = Path("data/analysis_state.json")
+_ANALYSIS_STATE_EVERY_ROUNDS = 5
+
+
+def _save_analysis_state(presence, static_watch) -> None:
+    try:
+        state = {"v": 1, "saved_at": time.time()}
+        if presence is not None:
+            state["presence"] = presence.to_state()
+        if static_watch is not None:
+            state["static_watch"] = static_watch.to_state()
+        # Daily event/anomaly budgets ride along: in-memory-only counters
+        # reset on every restart, and the 07.08 digest showed the result -
+        # 15 static-departed events on one camera in one day against a
+        # 10/day budget (5 before a maintenance restart + a fresh 10 after).
+        state["event_daycount"] = {f"{c}|{k}": v
+                                   for (c, k), v in _EVENT_DAYCOUNT.items()}
+        state["anomaly_daycount"] = dict(_ANOMALY_DAYCOUNT)
+        _ANALYSIS_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _ANALYSIS_STATE_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(state))
+        tmp.replace(_ANALYSIS_STATE_PATH)
+    except Exception as e:
+        print(f"  ! analysis-state save skipped ({type(e).__name__}: {e})")
+
+
+def _load_analysis_state(presence, static_watch) -> None:
+    try:
+        state = json.loads(_ANALYSIS_STATE_PATH.read_text())
+    except (OSError, ValueError):
+        return
+    try:
+        kept_p = kept_s = 0
+        if presence is not None and state.get("presence"):
+            kept_p = presence.load_state(state["presence"])
+        if static_watch is not None and state.get("static_watch"):
+            kept_s = static_watch.load_state(state["static_watch"])
+        for key, cell in (state.get("event_daycount") or {}).items():
+            try:
+                cam, kind = key.rsplit("|", 1)
+                _EVENT_DAYCOUNT[(cam, kind)] = [str(cell[0]), int(cell[1]),
+                                                bool(cell[2])]
+            except (ValueError, TypeError, IndexError):
+                continue
+        for cam, cell in (state.get("anomaly_daycount") or {}).items():
+            try:
+                _ANOMALY_DAYCOUNT[cam] = [str(cell[0]), int(cell[1]),
+                                          bool(cell[2])]
+            except (ValueError, TypeError, IndexError):
+                continue
+        if kept_p or kept_s:
+            print(f"  analysis state restored: {kept_p} stay(s), "
+                  f"{kept_s} static anchor(s), "
+                  f"{len(_EVENT_DAYCOUNT)} budget cell(s)")
+    except Exception as e:
+        print(f"  ! analysis-state restore skipped ({type(e).__name__}: {e})")
 
 
 def main() -> None:
@@ -1774,7 +2105,11 @@ def main() -> None:
     rg.add_argument("--returning-gap-min",       type=float,
                     default=RETURNING_GAP_SEC / 60.0,
                     help="minimum absence (minutes) for a return event")
-    rg.add_argument("--returning-min-similarity", type=float, default=0.96)
+    rg.add_argument("--returning-min-similarity", type=float, default=None,
+                    help="similarity floor for saving a return event; "
+                         "default follows the active embedder (0.96 "
+                         "histogram, 0.85 OSNet - their score scales "
+                         "differ)")
     rg.add_argument("--returning-min-prior",     type=int, default=2)
     rg.add_argument("--returning-per-entity-cooldown-min", type=float, default=30.0)
     og = ap.add_argument_group("operational events (loitering, alert push)")
@@ -1924,8 +2259,13 @@ def main() -> None:
             _stay_s = float(os.environ.get("STATIC_MIN_STAY_SEC") or 300)
         except ValueError:
             _stay_s = 300.0
+        # Bag classes fire an unattended-object event at SETTLE time (fix1-A1);
+        # they only exist when EXTRA_CLASSES enables them - with the stock
+        # seven classes the tuple is inert.
         static_watch = StaticWatch(min_stay_sec=_stay_s,
-                                   evidence_gates=DEFAULT_PER_CLASS_CONF)
+                                   evidence_gates=DEFAULT_PER_CLASS_CONF,
+                                   unattended_classes=("backpack", "handbag",
+                                                       "suitcase"))
         print(f"static watch: on (settle >= {_stay_s:.0f}s; "
               "STATIC_WATCH=0 to disable)")
 
@@ -1945,9 +2285,26 @@ def main() -> None:
     save_snapshots          = not args.no_snapshots
     returning_gap_sec       = args.returning_gap_min * 60
     returning_cooldown_sec  = args.returning_per_entity_cooldown_min * 60
+    # Per-embedder default (see RETURNING_MIN_SIMILARITY_OSNET note above):
+    # an explicit --returning-min-similarity always wins, for every class.
+    returning_sim_min = args.returning_min_similarity
+    returning_sim_min_person = None
+    if returning_sim_min is None:
+        _emb_id = (getattr(reid.embedder, "embedder_id", "") if reid else "")
+        if _emb_id.startswith("osnet"):
+            returning_sim_min = RETURNING_MIN_SIMILARITY_OSNET
+            returning_sim_min_person = RETURNING_MIN_SIMILARITY_OSNET_PERSON
+        else:
+            returning_sim_min = RETURNING_MIN_SIMILARITY
+        if reid:
+            print(f"returning gate: min similarity {returning_sim_min}"
+                  + (f" (person {returning_sim_min_person})"
+                     if returning_sim_min_person is not None else "")
+                  + f" (embedder {_emb_id or 'histogram'})")
 
     print("Restoring analysis state from Firestore...")
     _restore_state(firebase, set(slot_ids))
+    _load_analysis_state(presence, static_watch)
 
     # Publish the initial grid config so the dashboard renders immediately.
     slots_meta = [_slot_metadata(s, assignment[s["slot_id"]]) for s in GRID_SLOTS]
@@ -2010,6 +2367,8 @@ def main() -> None:
                     reload_review_overrides()
                 except Exception as e:
                     print(f"  ! review overrides reload failed: {e}")
+            if _round_counter % _ANALYSIS_STATE_EVERY_ROUNDS == 0:
+                _save_analysis_state(presence, static_watch)
             if _round_counter % _ADAPTER_CHECK_EVERY_ROUNDS == 0:
                 try:
                     from app import adapters
@@ -2101,7 +2460,8 @@ def main() -> None:
                                  burst=args.burst, burst_stride=args.burst_stride,
                                  save_snapshots=save_snapshots,
                                  returning_gap_sec      = returning_gap_sec,
-                                 returning_sim_min      = args.returning_min_similarity,
+                                 returning_sim_min      = returning_sim_min,
+                                 returning_sim_min_person = returning_sim_min_person,
                                  returning_min_prior    = args.returning_min_prior,
                                  returning_cooldown_sec = returning_cooldown_sec,
                                  write_reid_stats=(_round_counter
@@ -2202,6 +2562,7 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nStopped.")
     finally:
+        _save_analysis_state(presence, static_watch)
         if reid is not None:
             reid.close()
         try:

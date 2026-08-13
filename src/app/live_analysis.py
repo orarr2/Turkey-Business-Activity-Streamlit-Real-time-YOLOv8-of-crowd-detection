@@ -73,14 +73,7 @@ LAYER_TITLES = {
     "line":     "Line crossing",
 }
 
-MAX_SESSIONS = 1          # Advanced Analysis is a single-session tab (2026-08-13):
-                          # the operator picks ONE camera + ONE analysis layer at
-                          # a time inside the new Advanced Analysis tab. The four
-                          # grid tiles no longer host per-tile 🔬 sessions - they
-                          # show the ModelViewProducer's annotated frames +
-                          # Activity Index badges instead. Switching camera or
-                          # layer in the Advanced tab tears down the previous
-                          # session and starts a fresh one.
+MAX_SESSIONS = 4          # one per grid tile - the fix 2 cap
 IDLE_STOP_S = 60.0        # no client poll this long -> session shuts down
 TICK_TARGET_S = 0.8       # pacing floor between inference ticks
 LIVE_IMGSZ = 640
@@ -772,14 +765,7 @@ class LiveSession(threading.Thread):
     def _pose_pass(self, frame, boxes) -> None:
         from app.pose import attach_keypoints_crops, load_pose_model
         with INFER_LOCK:
-            # 2026-08-13: min_box_h lowered 40 -> 22 and conf 0.25 -> 0.10 so
-            # small people on far-off street cams (typical Bangkok / Patong
-            # crops of 30-80 px) actually get skeletons - the 40-px default
-            # is fine for indoor / close-range cams but skipped the entire
-            # picked-Thailand grid, which reported skeletons=0 on every tick
-            # and made the pose / gestures / body layers look broken.
-            attach_keypoints_crops(load_pose_model(), frame, boxes,
-                                   min_box_h=22, conf=0.10)
+            attach_keypoints_crops(load_pose_model(), frame, boxes)
 
     def _faces_pass(self, frame) -> list[dict]:
         from app import faces as _faces

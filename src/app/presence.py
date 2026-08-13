@@ -127,3 +127,33 @@ class PresenceTracker:
         for k in stale:
             self._stays.pop(k, None)
         return len(stale)
+
+    # -- restart persistence -----------------------------------------------
+    # _stays lives in process memory, and the collector runs under
+    # Restart=always: every bounce used to zero every loiter clock, so a
+    # structure that loiters forever re-alerted "just past threshold" after
+    # each restart instead of aging out. The collector snapshots this state
+    # each round and restores it on boot; stays whose continuity gap already
+    # expired are dropped on load (observe() would reset them anyway).
+
+    def to_state(self) -> dict:
+        return {"stays": {f"{cam}|{eid}": s
+                          for (cam, eid), s in self._stays.items()}}
+
+    def load_state(self, state: dict, now: float | None = None) -> int:
+        """Restore stays from to_state(). Returns how many were kept."""
+        now = time.time() if now is None else now
+        kept = 0
+        for key, s in (state.get("stays") or {}).items():
+            try:
+                cam, eid = key.rsplit("|", 1)
+                start, last_seen, first_box, box, last_alert = s
+                if now - float(last_seen) > self.continuity_gap_sec:
+                    continue            # observe() would treat it as broken
+                self._stays[(cam, int(eid))] = [
+                    float(start), float(last_seen), dict(first_box), dict(box),
+                    None if last_alert is None else float(last_alert)]
+                kept += 1
+            except (ValueError, TypeError, KeyError):
+                continue
+        return kept

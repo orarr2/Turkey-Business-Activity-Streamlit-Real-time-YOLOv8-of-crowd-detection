@@ -205,3 +205,48 @@ def test_parking_car_loiter_still_fires():
 
 def test_furniture_gate_survives_missing_watch():
     assert not _loiter_is_furniture(None, "cam", _loiter_ev(), now=2000.0)
+
+
+def test_person_never_becomes_an_anchor():
+    """'Static object left' means an unattended OBJECT. A person sitting
+    still for six minutes and then walking off (the 07.08 Bulancak x15
+    flood) must produce neither an anchor nor a departure event."""
+    w = StaticWatch()
+    t = _settle(w, cls="person")
+    assert w.counts("cam") == {"anchors": 0, "settled": 0}
+    assert _feed(w, "cam", [], t) == []
+    assert _feed(w, "cam", [], t + 60) == []
+
+
+def test_skip_classes_dropped_on_state_load():
+    """Persisted person anchors from before the skip must not be revived -
+    loading them would only fire a farewell departure burst."""
+    keeper = StaticWatch(skip_classes=())
+    t = _settle(keeper, cls="person")
+    assert keeper.counts("cam")["settled"] == 1
+    w = StaticWatch()
+    assert w.load_state(keeper.to_state(), now=t) == 0
+    assert w.counts("cam") == {"anchors": 0, "settled": 0}
+
+
+def test_unattended_bag_fires_once_when_owner_leaves():
+    """fix1-A1: a bag-class anchor that settles emits unattended_object -
+    but only once, and only after no person stands within reach (a bag at
+    its owner's feet is luggage, not a threat)."""
+    w = StaticWatch(min_stay_sec=10, min_hits=2, evidence_gates=None,
+                    unattended_classes=("backpack",))
+    bag = {"x1": 100, "y1": 100, "x2": 140, "y2": 140,
+           "cls": "backpack", "conf": 0.8}
+    owner = {"x1": 145, "y1": 60, "x2": 175, "y2": 150,
+             "cls": "person", "conf": 0.9}
+    t = 1000.0
+    evs = []
+    for i in range(4):
+        evs += w.observe("cam", [bag], (360, 640), now=t + i * 10,
+                         person_boxes=[owner])
+    assert evs == []                       # settled, but the owner is there
+    evs = w.observe("cam", [bag], (360, 640), now=t + 50, person_boxes=[])
+    assert [e["kind"] for e in evs] == ["unattended_object"]
+    assert evs[0]["cls"] == "backpack" and evs[0]["dwell_sec"] >= 40
+    assert w.observe("cam", [bag], (360, 640), now=t + 60,
+                     person_boxes=[]) == []   # fires exactly once

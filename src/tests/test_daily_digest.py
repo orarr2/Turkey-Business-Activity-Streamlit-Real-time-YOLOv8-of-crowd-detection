@@ -51,13 +51,34 @@ def test_footfall_stats_peaks_and_speed():
     assert stats[0]["peak_person"] == 9
     assert stats[0]["peak_person_ts"] == "2026-07-11T06:30:00Z"
     assert stats[0]["peak_vehicles"] == 2
-    assert stats[0]["typ_kmh"] == 42.5      # median-of-medians, not the 127 outlier
+    # A single speed sample is not "typical traffic" - the honesty gate
+    # (>= 5 samples and >= 10% of good rounds) hides it, exactly the
+    # Beyazit-plaza case where 42 garbage pairs out of 1059 rounds printed
+    # "~40 km/h typical" on a pedestrian square.
+    assert stats[0]["typ_kmh"] == 0.0
     # samples counts only rounds that produced usable frames - the None/None
     # row is a MISS and lands in the misses counter instead.
     assert stats[0]["samples"] == 2
     assert stats[0]["misses"] == 1
     assert stats[1]["cam"] == "Otogar" and stats[1]["peak_vehicles"] == 7
     assert stats[1]["samples"] == 1 and stats[1]["misses"] == 0
+
+
+def test_footfall_stats_speed_shown_for_real_roads():
+    """A camera whose rounds carry speeds in bulk (a real road) keeps its
+    typical-speed stat: median-of-medians, not the outlier max."""
+    rows = []
+    for i in range(10):
+        r = {"cam_name": "Sarachane", "person": 1, "vehicles": 5,
+             "ts": f"2026-07-11T0{i}:00:00Z"}
+        if i < 6:
+            r["speeds"] = {"median_kmh": [18, 19, 20, 21, 22, 90][i],
+                           "max_kmh": 127.0}
+        rows.append(r)
+    stats = footfall_stats(rows)
+    assert stats[0]["cam"] == "Sarachane"
+    assert stats[0]["samples"] == 10
+    assert stats[0]["typ_kmh"] == 21       # median of 18,19,20,21,22,90
 
 
 def test_footfall_stats_all_miss_shows_zero_samples():
@@ -224,3 +245,20 @@ def test_report_warns_when_every_peak_is_zero():
     assert "0 people and 0 vehicles" in text
     assert "streams may be dead" in text
     assert "0 people and 0 vehicles" in html
+
+
+def test_no_data_window_titles_honestly():
+    """2026-07-31 regression: an all-miss night fired a digest titled
+    'Japan' (the probe country at 12:00) with stale Turkey thumbnails.
+    With no_data the subject says what happened instead of naming the
+    probe country as if it delivered."""
+    import datetime as dt
+    now = dt.datetime(2026, 7, 31, 12, 0)
+    grid = {"country": "japan", "slots": []}
+    subject, text, _html = compose_digest(
+        now, 12, [], [], None, [], grid=grid, dominant=None, no_data=True)
+    assert subject.startswith("No live data (Japan grid) - Midday report")
+    # And the same window WITH data keeps the country title untouched.
+    subject2, *_ = compose_digest(
+        now, 12, [], [], None, [], grid=grid, dominant="thailand")
+    assert subject2.startswith("Thailand - Midday report")
