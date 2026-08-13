@@ -1576,4 +1576,43 @@ def bind(port: int, directory: Path | None = None) -> http.server.ThreadingHTTPS
         start_pull_thread(SNAPSHOTS_DIR)
     except Exception as e:
         print(f"  ! pool-sync puller not started: {type(e).__name__}: {e}")
+    # Auto-start local ModelViewProducer + ReviewFrameProducer if a picker
+    # has already written web/local_grid.json. This is what feeds the local
+    # tiles' Activity Index + KPI badges when the operator picked cams that
+    # are NOT the VM's active grid (typical for a Thailand pick while the VM
+    # watches Turkey). The producers run inside this Python process, share
+    # the same YOLO model as the visual-search warmup + live-analysis
+    # sessions, and write annotated JPEGs + counts JSON that the frontend's
+    # LOCAL_MODE poll reads from /snapshots/model_view/local_*.json.
+    def _start_local_producers_when_ready():
+        import time as _t
+        _lg = WEB_DIR / "local_grid.json"
+        if not _lg.exists():
+            return
+        # Wait for the visual-search warmup to finish loading the model.
+        for _ in range(120):
+            if _VISUAL_SEARCH._ready and _VISUAL_SEARCH.model is not None:
+                break
+            _t.sleep(1)
+        if not (_VISUAL_SEARCH._ready and _VISUAL_SEARCH.model is not None):
+            print("  ! local_producers not started: YOLO model not loaded within 2 min")
+            return
+        try:
+            import json as _json
+            grid = _json.loads(_lg.read_text(encoding="utf-8"))
+            slots = grid.get("slots") or []
+            if not slots:
+                return
+            from app.local_producers import start_all as _start_all
+            _start_all(slots, _VISUAL_SEARCH.model,
+                       model_view_interval_s=25, review_interval_s=60)
+            print(f"local_producers running: {len(slots)} slots -> "
+                  f"web/snapshots/model_view/local_*.jpg (~25s per round)")
+        except Exception as e:
+            print(f"  ! local_producers not started: {type(e).__name__}: {e}")
+
+    import threading as _threading
+    _threading.Thread(target=_start_local_producers_when_ready,
+                      daemon=True,
+                      name="local-producers-autostart").start()
     return server

@@ -2403,3 +2403,88 @@ setInterval(async () => {
     } catch (_e) { /* transient - retry next tick */ }
   }
 }, 4000);
+
+// ============================================================================
+// LOCAL_MODE model-view poll (2026-08-13, backported on 27bced9 baseline).
+//
+// Fires the tile's Activity Index badge + anomaly badge + KPI overlay from
+// the ModelViewProducer JSON that app/local_producers.py writes every ~25 s
+// to web/snapshots/model_view/local_*.json when the operator picked cameras
+// that are NOT the VM's active grid (typical for a Thailand pick while the
+// VM watches Turkey - the cloudMismatch guard hides badges in that case).
+//
+// Rolling window of the last 6 rounds (~2.5 min) drives computeActivity so a
+// single glitchy sample cannot swing the badge. Same absolute bands as the
+// cloud path (people bucket + weighted vehicle load).
+// ============================================================================
+const _LOCAL_ACTIVITY_WINDOW = 6;
+const _LOCAL_HISTORY = Object.create(null);   // slot_id -> [{person, vehicles, ts}, ...]
+
+function _updateLocalTileBadges(slotId, j) {
+  const st = tileState[slotId];
+  if (!st) return;
+  const person   = Number(j?.counts?.person   ?? 0);
+  const vehicles = Number(j?.counts?.vehicles ?? 0);
+  const ts       = j?.at ? j.at * 1000 : Date.now();
+  const hist = _LOCAL_HISTORY[slotId] || (_LOCAL_HISTORY[slotId] = []);
+  hist.push({ person, vehicles, ts, counts: j?.counts || null });
+  if (hist.length > _LOCAL_ACTIVITY_WINDOW) hist.shift();
+
+  // Activity Index (X/10 + label) - same math as the cloud path.
+  const act = computeActivity(hist);
+  st.activityBadge.style.display = "";
+  setActivityBadge(st, act);
+
+  // Anomaly badge - same absolute bands as app/collector.py:
+  //   EXTREME_VEH_LOAD = 38 weighted-vehicles  ->  spike
+  //   >= 50 people                              ->  spike
+  //   activity idx >= 8                          ->  spike
+  const load = act?.load ?? 0;
+  const now  = act?.now  ?? 0;
+  let mood = "unk", msg = "no data yet";
+  if (hist.length >= 2) {
+    if (now >= 50 || load >= 38) {
+      mood = "spike"; msg = `extreme load - ${now} people + ${load} veh-load units`;
+    } else if (act && act.idx >= 8) {
+      mood = "spike"; msg = `busy - activity ${act.idx}/10 · ${act.label}`;
+    } else {
+      mood = "ok"; msg = act ? `activity ${act.idx}/10 · ${act.label}` : "ok";
+    }
+  }
+  st.anomalyBadge.style.display = "";
+  st.anomalyBadge.className = `anomaly-badge ${mood}`;
+  const anomalyTextEl = st.anomalyBadge.querySelector("[data-anomaly-text]");
+  if (anomalyTextEl) {
+    anomalyTextEl.textContent = mood === "spike" ? "!"
+                              : mood === "unk"   ? "-"
+                              : "ok";
+  }
+  st.anomalyBadge.title = msg;
+
+  // KPI overlay (People / Vehicles) - never cleared by cloudMismatch anymore.
+  if (!st.analysis) st.overlay.style.display = "";
+  const setK = (k, v) => {
+    const el = [...st.latestVals].find((x) => x.dataset.k === k);
+    if (el) el.textContent = v != null ? v : "-";
+  };
+  setK("person", person);
+  setK("vehicles", vehicles);
+  st.lastSampleMs = ts;
+  if (typeof renderSampleAge === "function") renderSampleAge(st);
+}
+
+if (LOCAL_MODE) {
+  const _pollLocalModelView = async () => {
+    for (const slot of GRID_SLOTS) {
+      const meta_url = `/snapshots/model_view/${slot.slot_id}.json?_=` + Date.now();
+      try {
+        const r = await fetch(meta_url, { cache: "no-store" });
+        if (!r.ok) continue;
+        const j = await r.json();
+        _updateLocalTileBadges(slot.slot_id, j);
+      } catch (_) { /* file not written yet - keep placeholder */ }
+    }
+  };
+  _pollLocalModelView();
+  setInterval(_pollLocalModelView, 10000);
+}
