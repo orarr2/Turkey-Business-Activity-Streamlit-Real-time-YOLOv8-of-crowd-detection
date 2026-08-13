@@ -857,3 +857,29 @@ _merge_per_camera_conf()
 def active_cameras():
     """Cameras that have a usable URL (skips placeholders awaiting a YouTube id)."""
     return {k: v for k, v in CAMERAS.items() if v.get("url")}
+
+
+# ---------------------------------------------------------------------------
+# Line-crossing config (added 2026-08-13 on top of b58dcec so
+# app.live_analysis can import). Stubs return None + empty list because
+# the b58dcec baseline never shipped per-camera line overrides; the
+# user-drawn line workflow (POST /api/lines) is not wired in this
+# baseline either. live_analysis falls back to its DEFAULT_LINE.
+# ---------------------------------------------------------------------------
+from pathlib import Path as _Path
+def _lines_dir() -> _Path:
+    return _Path(__file__).resolve().parent.parent / "data" / "lines"
+
+def resolve_line(cam_id: str) -> list | None:
+    """No user-override support in b58dcec baseline; return catalog line if any."""
+    try:
+        return CAMERAS.get(cam_id, {}).get("line")
+    except Exception:
+        return None
+
+def resolve_line_classes(cam_id: str) -> list | None:
+    """No per-cam class-filter override in b58dcec baseline."""
+    try:
+        return CAMERAS.get(cam_id, {}).get("line_classes")
+    except Exception:
+        return None

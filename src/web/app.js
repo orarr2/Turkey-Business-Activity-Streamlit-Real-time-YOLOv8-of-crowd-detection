@@ -1518,3 +1518,460 @@ async function renderAlCurve() {
 }
 renderAlCurve();
 setInterval(renderAlCurve, 300000);
+
+
+// ===========================================================================
+// Advanced Analysis tab (2026-08-13): imported from da7f001 on top of b58dcec
+// baseline. Draw helpers + init IIFE. Depends on /api/analysis/{start,frame,
+// stop} endpoints and app/live_analysis.py MANAGER + MAX_SESSIONS=1.
+// ===========================================================================
+
+
+
+
+
+// ===========================================================================
+// Advanced Analysis tab (2026-08-13): draw helpers + init IIFE from da7f001
+// on top of the b58dcec baseline. Depends on /api/analysis/{start,frame,stop}
+// endpoints in dashboard_server.py and MAX_SESSIONS=1 in live_analysis.py.
+// ===========================================================================
+
+function drawAnalysisOverlay(a, meta) {
+  const canvas = a.canvas, ctx = a.ctx;
+  if (canvas.width !== meta.img_w || canvas.height !== meta.img_h) {
+    canvas.width = meta.img_w || 640;
+    canvas.height = meta.img_h || 360;
+  }
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const layer = meta.layer;
+  if (layer === "heat")      drawHeatOverlay(ctx, meta);
+  if (layer !== "heat")      drawBoxesOverlay(ctx, meta.boxes || []);
+  if (layer === "pose")      drawSkeletonOverlay(ctx, meta.skeleton || []);
+  if (layer === "faces")     drawFacesOverlay(ctx, meta.faces || [], meta);
+  if (layer === "line")      drawLineOverlay(ctx, meta);
+  if (layer === "paths" || layer === "gestures" || layer === "body")
+    drawTracksOverlay(ctx, meta.tracks || []);
+}
+
+function drawBoxesOverlay(ctx, boxes) {
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = "rgba(79,140,255,0.75)";
+  ctx.font = "12px sans-serif";
+  ctx.fillStyle = "rgba(79,140,255,0.95)";
+  for (const b of boxes) {
+    ctx.strokeRect(b.x1, b.y1, b.x2 - b.x1, b.y2 - b.y1);
+    if (b.cls) {
+      const label = `${b.cls} ${Math.round((b.conf || 0) * 100)}%`;
+      const w = ctx.measureText(label).width + 6;
+      ctx.fillStyle = "rgba(15,23,42,0.85)";
+      ctx.fillRect(b.x1, b.y1 - 14, w, 14);
+      ctx.fillStyle = "rgba(255,255,255,0.95)";
+      ctx.fillText(label, b.x1 + 3, b.y1 - 3);
+    }
+  }
+}
+
+function drawHeatOverlay(ctx, meta) {
+  const grid = meta.heat, gw = meta.heat_w, gh = meta.heat_h;
+  if (!grid || !gw || !gh) return;
+  const cw = ctx.canvas.width / gw, ch = ctx.canvas.height / gh;
+  let mx = 0;
+  for (const row of grid) for (const v of row) if (v > mx) mx = v;
+  if (mx <= 0) return;
+  for (let y = 0; y < gh; y++) {
+    const row = grid[y];
+    for (let x = 0; x < gw; x++) {
+      const v = row[x] / mx;
+      if (v <= 0.05) continue;
+      const a = Math.min(0.65, v * 0.75);
+      // Blue -> yellow -> red gradient
+      const r = Math.round(255 * Math.min(1, v * 1.5));
+      const g = Math.round(255 * Math.max(0, 1 - Math.abs(v - 0.5) * 2));
+      const b = Math.round(255 * Math.max(0, 1 - v * 1.5));
+      ctx.fillStyle = `rgba(${r},${g},${b},${a})`;
+      ctx.fillRect(x * cw, y * ch, cw + 1, ch + 1);
+    }
+  }
+}
+
+const _COCO_POSE_LINKS = [
+  [5,6],[5,7],[7,9],[6,8],[8,10],[5,11],[6,12],[11,12],
+  [11,13],[13,15],[12,14],[14,16],
+];
+function drawSkeletonOverlay(ctx, skeletons) {
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = "rgba(255,204,0,0.9)";
+  ctx.fillStyle = "rgba(255,204,0,0.95)";
+  for (const p of skeletons) {
+    const kps = p.kps || [];
+    for (const [a, b] of _COCO_POSE_LINKS) {
+      const ka = kps[a], kb = kps[b];
+      if (!ka || !kb || (ka[2] || 0) < 0.3 || (kb[2] || 0) < 0.3) continue;
+      ctx.beginPath();
+      ctx.moveTo(ka[0], ka[1]); ctx.lineTo(kb[0], kb[1]);
+      ctx.stroke();
+    }
+    for (const k of kps) {
+      if (k && (k[2] || 0) > 0.3) {
+        ctx.beginPath();
+        ctx.arc(k[0], k[1], 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+}
+
+function drawFacesOverlay(ctx, faces, meta) {
+  if (meta && meta.faces_available === false) {
+    ctx.fillStyle = "rgba(15,23,42,0.85)";
+    ctx.fillRect(6, 6, 280, 22);
+    ctx.fillStyle = "#f0a35e"; ctx.font = "12px sans-serif";
+    ctx.fillText("faces: FACE_MODEL not configured", 12, 21);
+    return;
+  }
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = "rgba(236,72,153,0.9)";
+  ctx.fillStyle = "rgba(236,72,153,0.95)";
+  ctx.font = "11px sans-serif";
+  for (const f of faces) {
+    const [x1, y1, x2, y2] = f.box;
+    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+    if (f.conf) ctx.fillText(`face ${Math.round(f.conf * 100)}%`, x1 + 2, y1 - 3);
+  }
+}
+
+function drawLineOverlay(ctx, meta) {
+  const W = ctx.canvas.width, H = ctx.canvas.height;
+  const line = meta.line;
+  if (line && line.length === 2 && line[0].length === 2) {
+    const [[x1, y1], [x2, y2]] = line;
+    ctx.strokeStyle = "rgba(0,255,136,0.9)";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(x1 * W, y1 * H); ctx.lineTo(x2 * W, y2 * H);
+    ctx.stroke();
+  }
+  ctx.fillStyle = "rgba(15,23,42,0.85)";
+  ctx.fillRect(6, 6, 240, 26);
+  ctx.fillStyle = "#e2e8f0"; ctx.font = "14px sans-serif";
+  ctx.fillText(`IN ${meta.cross_in || 0} · OUT ${meta.cross_out || 0}`, 12, 25);
+}
+
+function drawTracksOverlay(ctx, tracks) {
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = "rgba(56,189,248,0.85)";
+  ctx.fillStyle = "rgba(56,189,248,0.95)";
+  ctx.font = "11px sans-serif";
+  for (const t of tracks) {
+    const p = t.path || [];
+    if (p.length < 2) continue;
+    ctx.beginPath();
+    ctx.moveTo(p[0][0], p[0][1]);
+    for (let i = 1; i < p.length; i++) ctx.lineTo(p[i][0], p[i][1]);
+    ctx.stroke();
+    const last = p[p.length - 1];
+    ctx.beginPath();
+    ctx.arc(last[0], last[1], 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "rgba(15,23,42,0.85)";
+    ctx.fillRect(last[0] + 5, last[1] - 14, 30, 14);
+    ctx.fillStyle = "rgba(255,255,255,0.95)";
+    ctx.fillText(`#${t.tid}`, last[0] + 8, last[1] - 3);
+    ctx.fillStyle = "rgba(56,189,248,0.95)";
+  }
+}
+
+
+(function initAdvancedAnalysis() {
+  const section = document.querySelector('[data-tab="advanced"]');
+  if (!section) return;
+  const camsHost = section.querySelector("#adv-cams");
+  const pickedHost = section.querySelector("#adv-picked-cam");
+  const runTitle = section.querySelector("#adv-run-title");
+  const statusEl = section.querySelector("#adv-status");
+  const videoWrap = section.querySelector("#adv-video-wrap");
+  const canvas = section.querySelector("#adv-canvas");
+  const ctx = canvas ? canvas.getContext("2d") : null;
+
+  const state = {
+    picked: null,     // slot dict {slot_id, placeholder_name, display_area,
+                      //            placeholder_embed, placeholder_hls, placeholder_page}
+    layer: null,
+    timer: null,
+    inflight: false,
+    failures: 0,
+    lastRestart: 0,
+    hls: null,        // hls.js instance we own, destroyed on stop
+  };
+  const overlayState = { canvas, ctx };  // shape drawAnalysisOverlay expects
+
+  function showStep(name) {
+    for (const el of section.querySelectorAll("[data-adv-step]"))
+      el.style.display = (el.dataset.advStep === name) ? "" : "none";
+  }
+
+  function populateCameras() {
+    const slots = Object.values(tileState || {});
+    if (!slots.length) {
+      camsHost.innerHTML = '<div style="color:#94a3b8;font-size:12px">' +
+        'waiting for the notebook to write local_grid.json (run the ' +
+        'picker cell, then the Section 7 dashboard cell)...</div>';
+      return;
+    }
+    camsHost.innerHTML = "";
+    for (const st of slots) {
+      const s = st.slot || {};
+      const btn = document.createElement("button");
+      btn.dataset.advCam = s.slot_id;
+      btn.innerHTML =
+        `<span class="name">${escapeHtml(s.placeholder_name || s.slot_id)}</span>` +
+        `<span class="slot">${escapeHtml(s.display_area || s.slot_id)}</span>`;
+      btn.addEventListener("click", () => onPickCam(s));
+      camsHost.appendChild(btn);
+    }
+  }
+
+  function onPickCam(slot) {
+    state.picked = slot;
+    pickedHost.textContent =
+      "Camera: " + (slot.placeholder_name || slot.slot_id) +
+      (slot.display_area ? "  (" + slot.display_area + ")" : "");
+    showStep("layer");
+  }
+
+  section.querySelectorAll("[data-adv-back]").forEach((b) => {
+    b.addEventListener("click", () => {
+      resetRun();
+      showStep("cam");
+      populateCameras();
+    });
+  });
+
+  section.querySelectorAll("[data-adv-layer]").forEach((b) => {
+    b.addEventListener("click", () => startRun(b.dataset.advLayer));
+  });
+
+  section.querySelector("[data-adv-stop]")?.addEventListener("click", stopAndBack);
+
+  // Build the live-video player for a slot. YouTube slots get an <iframe>
+  // (autoplay + mute so the browser lets it start without a user gesture),
+  // tvkur/HLS slots get a <video> driven by hls.js (already loaded for the
+  // grid tiles). Any slot without either falls back to the analyzed-JPEG
+  // path so we still show something.
+  function buildVideoInto(slot) {
+    if (!videoWrap) return false;
+    if (state.hls) { try { state.hls.destroy(); } catch (_) {} state.hls = null; }
+    videoWrap.innerHTML = "";
+    if (slot.placeholder_embed) {
+      // Add the `origin` param so YouTube's IFrame API accepts our
+      // postMessage playVideo below (drops silent auth failures that
+      // manifest as "black video after autoplay=1" in Chrome).
+      let embed = slot.placeholder_embed;
+      if (!/[?&]origin=/.test(embed)) {
+        embed += (embed.includes("?") ? "&" : "?") +
+                 "origin=" + encodeURIComponent(window.location.origin);
+      }
+      const yt = document.createElement("iframe");
+      yt.src = embed;
+      yt.title = slot.placeholder_name || slot.slot_id;
+      yt.allow = "autoplay; encrypted-media; picture-in-picture";
+      yt.allowFullscreen = true;
+      yt.referrerPolicy = "no-referrer-when-downgrade";
+      videoWrap.appendChild(yt);
+      // Click-to-play overlay: Chrome blocks iframe autoplay in a lot of
+      // situations even when autoplay=1 + mute=1. One tap on this
+      // overlay counts as the user gesture, triggers playVideo via YT
+      // JS API + removes itself. The video then keeps playing as long
+      // as the tab is visible.
+      const playBtn = document.createElement("button");
+      playBtn.type = "button";
+      playBtn.className = "adv-play-overlay";
+      playBtn.style.cssText =
+        "position:absolute;inset:0;z-index:3;background:rgba(0,0,0,0.55);" +
+        "color:#e2e8f0;border:0;font-size:15px;cursor:pointer;display:flex;" +
+        "flex-direction:column;align-items:center;justify-content:center;gap:8px";
+      playBtn.innerHTML =
+        '<div style="font-size:44px;line-height:1">&#9654;</div>' +
+        '<div>tap to start live video</div>';
+      const _startPlayback = () => {
+        try {
+          yt.contentWindow.postMessage(
+            JSON.stringify({event: "command", func: "playVideo", args: []}),
+            "https://www.youtube.com");
+        } catch (_) {}
+        playBtn.remove();
+      };
+      playBtn.addEventListener("click", _startPlayback);
+      videoWrap.appendChild(playBtn);
+      // Also auto-attempt playVideo after the iframe finishes loading, in
+      // case the browser policy allows it silently - user then never sees
+      // the overlay flicker.
+      yt.addEventListener("load", () => {
+        setTimeout(() => {
+          try {
+            yt.contentWindow.postMessage(
+              JSON.stringify({event: "command", func: "playVideo", args: []}),
+              "https://www.youtube.com");
+          } catch (_) {}
+        }, 300);
+      });
+      return true;
+    }
+    if (slot.placeholder_hls) {
+      const v = document.createElement("video");
+      v.autoplay = true; v.muted = true; v.playsInline = true; v.controls = false;
+      videoWrap.appendChild(v);
+      try {
+        if (window.Hls && window.Hls.isSupported()) {
+          const hls = new window.Hls({ liveSyncDurationCount: 2 });
+          hls.loadSource(slot.placeholder_hls); hls.attachMedia(v);
+          state.hls = hls;
+        } else if (v.canPlayType("application/vnd.apple.mpegurl")) {
+          v.src = slot.placeholder_hls;   // Safari native
+        }
+      } catch (_) { /* fall through; server-side JPEG is the visible fallback */ }
+      return true;
+    }
+    if (slot.placeholder_page) {
+      const a = document.createElement("a");
+      a.href = slot.placeholder_page; a.target = "_blank"; a.rel = "noopener";
+      a.style.cssText = "color:#94a3b8;font-size:13px;text-align:center;padding:20px";
+      a.textContent = "no embeddable stream - open the source page";
+      videoWrap.appendChild(a);
+      return false;
+    }
+    return false;
+  }
+
+  function tearDownVideo() {
+    if (state.hls) { try { state.hls.destroy(); } catch (_) {} state.hls = null; }
+    if (videoWrap) videoWrap.innerHTML = "";
+  }
+
+  function resetRun() {
+    if (state.timer) { clearInterval(state.timer); state.timer = null; }
+    state.picked = null;
+    state.layer = null;
+    state.failures = 0;
+    state.inflight = false;
+    if (ctx && canvas) ctx.clearRect(0, 0, canvas.width, canvas.height);
+    tearDownVideo();
+    pickedHost.textContent = "";
+    statusEl.className = "adv-status";
+    statusEl.textContent = "";
+  }
+
+  async function stopAndBack() {
+    const cam = state.picked && state.picked.slot_id;
+    if (cam) {
+      fetch(`/api/analysis/stop?cam=${encodeURIComponent(cam)}`,
+            { method: "POST" }).catch(() => {});
+    }
+    resetRun();
+    showStep("cam");
+    populateCameras();
+  }
+
+  async function startRun(layer) {
+    if (!state.picked) return;
+    fetch(`/api/analysis/stop?cam=${encodeURIComponent(state.picked.slot_id)}`,
+          { method: "POST" }).catch(() => {});
+    state.layer = layer;
+    showStep("run");
+    const camLabel = state.picked.placeholder_name || state.picked.slot_id;
+    runTitle.textContent = camLabel + "  ·  " + layer;
+    statusEl.className = "adv-status";
+    statusEl.textContent = "starting session on " + camLabel + " ...";
+    // Bring up the live video RIGHT AWAY so operator sees motion even
+    // before the server produces its first analyzed frame + meta.
+    buildVideoInto(state.picked);
+    try {
+      const r = await fetch(
+        `/api/analysis/start?cam=${encodeURIComponent(state.picked.slot_id)}` +
+        `&layer=${encodeURIComponent(layer)}`, { method: "POST" });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        throw new Error(j.error || `HTTP ${r.status}`);
+      }
+      state.failures = 0; state.lastRestart = 0;
+      if (state.timer) clearInterval(state.timer);
+      state.timer = setInterval(poll, 1000);
+      poll();
+    } catch (e) {
+      statusEl.className = "adv-status err";
+      statusEl.textContent = "failed to start: " + e.message;
+    }
+  }
+
+  async function poll() {
+    if (state.inflight || !state.picked) return;
+    state.inflight = true;
+    try {
+      const cam = state.picked.slot_id;
+      // HEAD-style meta only: the JPEG is 100-500 KB per tick and we do
+      // not need it (video plays natively). Server always ships the JPEG
+      // in the response BODY, but we ignore it - r.blob() below drains
+      // the body so the connection is reusable.
+      const r = await fetch(
+        `/api/analysis/frame?cam=${encodeURIComponent(cam)}&_=${Date.now()}`,
+        { cache: "no-store" });
+      if (r.status === 200) {
+        const metaB64 = r.headers.get("X-Analysis-Meta");
+        let meta = null;
+        if (metaB64) {
+          try {
+            const bin = atob(metaB64);
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            meta = JSON.parse(new TextDecoder("utf-8").decode(bytes));
+          } catch (_) {}
+        }
+        // Drain the body without holding it (avoids leaking blob-URL
+        // handles the way the earlier <img> path did).
+        r.blob().catch(() => {});
+        if (meta && ctx) drawAnalysisOverlay(overlayState, meta);
+        state.failures = 0;
+        const seq = r.headers.get("X-Seq") || "?";
+        const layer = r.headers.get("X-Layer") || state.layer || "?";
+        const nBoxes = meta && meta.boxes ? meta.boxes.length : 0;
+        statusEl.className = "adv-status";
+        statusEl.textContent =
+          "tick #" + seq + "  ·  layer " + layer +
+          "  ·  " + nBoxes + " object" + (nBoxes === 1 ? "" : "s") + " detected " +
+          "(overlay updates ~1/s; video plays at native rate)";
+      } else if (r.status === 202) {
+        statusEl.className = "adv-status";
+        statusEl.textContent = "session starting, first frame not ready yet...";
+      } else if (r.status === 404 || r.status === 410) {
+        state.failures += 1;
+        statusEl.className = "adv-status err";
+        statusEl.textContent =
+          "session dropped (attempt " + state.failures +
+          "). Auto-restarting...";
+        if (Date.now() - state.lastRestart > 5000 && state.picked && state.layer) {
+          state.lastRestart = Date.now();
+          fetch(
+            `/api/analysis/start?cam=${encodeURIComponent(state.picked.slot_id)}` +
+            `&layer=${encodeURIComponent(state.layer)}`,
+            { method: "POST" }).catch(() => {});
+        }
+      } else {
+        state.failures += 1;
+      }
+    } catch (_) { state.failures += 1; }
+    finally { state.inflight = false; }
+    if (state.failures > 15) {
+      statusEl.className = "adv-status err";
+      statusEl.textContent =
+        "backend unreachable. Ensure the dashboard server is running " +
+        "(python -m app.dashboard_server or notebook Section 7).";
+    }
+  }
+
+  document.getElementById("tabbar")?.addEventListener("click", (ev) => {
+    const b = ev.target?.closest?.("[data-tab-btn]");
+    if (b && b.dataset.tabBtn === "advanced") populateCameras();
+  });
+
+  populateCameras();
+})();

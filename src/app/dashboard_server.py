@@ -324,10 +324,19 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/heatmap":
             self._heatmap()
             return
+        if path == "/api/analysis/frame":
+            self._analysis_frame()
+            return
         super().do_GET()
 
     def do_POST(self) -> None:
         path = self.path.split("?")[0]
+        if path == "/api/analysis/start":
+            self._analysis_start()
+            return
+        if path == "/api/analysis/stop":
+            self._analysis_stop()
+            return
         # /api/search is the current entry point (image + browse modes).
         # /api/visual-search is the compat alias for the legacy image-only
         # endpoint - the frontend and tools/search_by_image.py both used it
@@ -358,6 +367,99 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self._deep_analyze()
             return
         self.send_error(404, "unknown POST endpoint")
+
+    # -- live advanced analysis (app/live_analysis.py) --------------------
+
+    def _analysis_start(self) -> None:
+        """POST /api/analysis/start?cam=<id>&layer=<layer>
+
+        Starts a live-analysis session on ONE camera (registry id or a
+        local-picker slot id), or switches the layer of a running session
+        in place - stream, tracker and accumulators survive the switch.
+        At most live_analysis.MAX_SESSIONS run concurrently (409 beyond).
+        """
+        from urllib.parse import parse_qs, urlparse
+        q = parse_qs(urlparse(self.path).query)
+        cam = (q.get("cam") or [""])[0]
+        layer = (q.get("layer") or [""])[0]
+        if not cam or not layer:
+            self._send_json(400, {"error": "need ?cam= and ?layer="})
+            return
+        # b58dcec-vintage _VisualSearchState exposes .model after .get() runs
+        # (no dedicated get_model() convenience method in this baseline).
+        _VISUAL_SEARCH.get()
+        model = _VISUAL_SEARCH.model
+        if model is None:
+            self._send_json(503, {"error": "no detection model loaded "
+                                           "(SEARCH_YOLO=off?)"})
+            return
+        from app.live_analysis import MANAGER, BusyError
+        try:
+            info = MANAGER.start(cam, layer, model)
+            self._send_json(200, {"ok": True, **info})
+        except BusyError as e:
+            self._send_json(409, {"error": str(e)})
+        except ValueError as e:
+            self._send_json(404, {"error": str(e)})
+        except Exception as e:
+            self._send_json(502, {"error": f"{type(e).__name__}: {e}"})
+
+    def _analysis_frame(self) -> None:
+        """GET /api/analysis/frame?cam=<id>
+
+        Latest analyzed JPEG of the session (200 image/jpeg with X-Seq /
+        X-Layer / X-Note / X-Analysis-Meta headers), 202 while the first
+        frame is still being produced, 410 when the session died with a
+        reported reason, and 404 when no session ever ran. Polling this
+        keeps the session's idle clock alive.
+        """
+        from urllib.parse import parse_qs, urlparse
+        q = parse_qs(urlparse(self.path).query)
+        cam = (q.get("cam") or [""])[0]
+        from app.live_analysis import MANAGER
+        fr = MANAGER.frame(cam) if cam else None
+        if fr is None:
+            self._send_json(404, {"error": "no live analysis for this "
+                                           "camera"})
+            return
+        if fr.get("error"):
+            self._send_json(410, {"error": fr["error"], "ended": True})
+            return
+        if not fr["jpeg"]:
+            self._send_json(202, {"ok": True, "pending": True,
+                                  "note": fr["note"] or "starting..."})
+            return
+        body = fr["jpeg"]
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Seq", str(fr["seq"]))
+        self.send_header("X-Layer", fr["layer"])
+        meta_b = fr.get("meta_json") or b""
+        if meta_b:
+            import base64 as _b64
+            self.send_header("X-Analysis-Meta",
+                             _b64.b64encode(meta_b).decode("ascii"))
+        self.send_header("Access-Control-Expose-Headers",
+                         "X-Seq, X-Layer, X-Note, X-Analysis-Meta")
+        note = (fr["note"] or "").encode("ascii", "replace").decode("ascii")
+        if note:
+            self.send_header("X-Note", note)
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def _analysis_stop(self) -> None:
+        """POST /api/analysis/stop?cam=<id> - back to plain video."""
+        from urllib.parse import parse_qs, urlparse
+        q = parse_qs(urlparse(self.path).query)
+        cam = (q.get("cam") or [""])[0]
+        from app.live_analysis import MANAGER
+        stopped = MANAGER.stop(cam) if cam else False
+        self._send_json(200, {"ok": True, "stopped": stopped})
 
     def _send_json(self, status: int, payload: dict) -> None:
         body = json.dumps(payload).encode("utf-8")

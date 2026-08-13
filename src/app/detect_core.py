@@ -1460,3 +1460,12 @@ if __name__ == "__main__":  # one-time stream-resolution check (run on an open n
             print(f"{cid:16s} -> {resolve_stream(cam)}")
         except Exception as e:
             print(f"{cid:16s} -> FAILED ({e})")
+
+
+def invalidate_stream(cam_id: str) -> None:
+    """Stream-URL cache eviction hook. b58dcec's cache is implicit via yt-dlp
+    + cv2.VideoCapture and does not expose a per-cam invalidator; the stub
+    is a no-op so app.live_analysis (imported from a later commit) does not
+    ImportError. A fresh resolve happens on the next _grab attempt anyway
+    because grab_frame reopens the source each call."""
+    return None
