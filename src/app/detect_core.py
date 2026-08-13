@@ -175,10 +175,35 @@ def _yt_opts(client: str) -> dict:
     return opts
 
 
+_YT_HLS_MANIFEST_RE = re.compile(r'"hlsManifestUrl"\s*:\s*"([^"]+)"')
+
+
+def _yt_scrape_hls(url: str) -> str | None:
+    """Last-resort YouTube resolver: fetch the watch page like a normal
+    browser and pull `hlsManifestUrl` out of the player JSON.
+
+    Exists because yt-dlp's innertube calls periodically hit YouTube's
+    "Sign in to confirm you're not a bot" wall (observed killing the
+    Sainamyen cam mid-session), while a plain browser-UA page fetch of
+    the same video keeps working. No cookies, no yt-dlp.
+    """
+    try:
+        html = _http_get(url, _BROWSER_HEADERS).decode("utf-8", "replace")
+    except Exception:
+        return None
+    m = _YT_HLS_MANIFEST_RE.search(html)
+    if not m:
+        return None
+    return (m.group(1)
+            .replace("\\/", "/")
+            .replace("\\u0026", "&"))
+
+
 def resolve_youtube(url: str) -> str:
     """Resolve a YouTube Live (or webcamera24 YouTube-backed) page to an HLS
     .m3u8 URL. Tries each configured innertube client until one yields a
-    stream, so a single client outage doesn't take the camera down."""
+    stream, then falls back to scraping the watch page itself - the scrape
+    frequently survives the bot-wall that blocks yt-dlp's API clients."""
     import yt_dlp
 
     if not url.startswith("http"):                      # bare 11-char video id
@@ -193,6 +218,9 @@ def resolve_youtube(url: str) -> str:
                 return info["url"]
         except Exception as e:
             last = e
+    scraped = _yt_scrape_hls(url)
+    if scraped:
+        return scraped
     raise RuntimeError(f"youtube: no client resolved a stream ({last})")
 
 
@@ -204,8 +232,53 @@ def resolve_youtube(url: str) -> str:
 # The googlevideo manifest URL carries its own `expire=<unixts>`; tvkur/skyline
 # tokens rotate on a similar timescale. Cache the resolved URL per camera and
 # reuse it until shortly before it expires (or a grab fails and clears it).
-_RESOLVE_CACHE: dict = {}                                # cam_id -> (url, good_until)
 _RESOLVE_TTL_FALLBACK = int(os.environ.get("RESOLVE_TTL_FALLBACK") or 900)
+_RESOLVE_FAIL_BACKOFF_S = int(os.environ.get("RESOLVE_FAIL_BACKOFF") or 60)
+
+
+def _resolve_cache_file():
+    from pathlib import Path
+    return (Path(__file__).resolve().parent.parent / "data"
+            / "resolve_cache.json")
+
+
+def _load_resolve_cache() -> dict:
+    """Warm the resolve cache from disk at import.
+
+    Signed googlevideo URLs stay valid for ~6 h; before this, a server
+    restart threw every one of them away and forced fresh resolves - and
+    the night YouTube's bot-wall was up, that one restart took down ALL
+    four cameras at once even though their old URLs were still perfectly
+    good. Only positive, unexpired entries are loaded.
+    """
+    import json as _json
+    try:
+        raw = _json.loads(_resolve_cache_file().read_text())
+    except (OSError, ValueError):
+        return {}
+    now = time.time()
+    out = {}
+    for k, v in raw.items():
+        if (isinstance(v, list) and len(v) == 2 and v[0]
+                and isinstance(v[1], (int, float)) and v[1] > now):
+            out[k] = (v[0], float(v[1]))
+    return out
+
+
+def _persist_resolve_cache() -> None:
+    import json as _json
+    try:
+        p = _resolve_cache_file()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(_json.dumps(
+            {k: [v[0], v[1]] for k, v in _RESOLVE_CACHE.items() if v[0]}))
+    except OSError:
+        pass
+
+
+_RESOLVE_CACHE: dict = _load_resolve_cache()
+                                   # cam_id -> (url | None, good_until)
+                                   # url None = negative entry (backoff)
 _EXPIRE_RE = re.compile(r"[?&/]expire[/=](\d{10})")
 
 
@@ -298,10 +371,23 @@ def resolve_stream(cam: dict, now: float | None = None) -> str:
     if cam_id:
         hit = _RESOLVE_CACHE.get(cam_id)
         if hit and now < hit[1]:
+            if hit[0] is None:
+                # Negative-cache hit: the last resolve failed. Raising
+                # instantly (instead of shelling out to yt-dlp again)
+                # is what stops a dead camera from spawning a resolver
+                # subprocess every two seconds for hours.
+                raise RuntimeError("resolve backing off after failure "
+                                   f"({cam_id})")
             return hit[0]
-    resolved = _resolve_uncached(cam)
+    try:
+        resolved = _resolve_uncached(cam)
+    except Exception:
+        if cam_id:
+            _RESOLVE_CACHE[cam_id] = (None, now + _RESOLVE_FAIL_BACKOFF_S)
+        raise
     if cam_id:
         _RESOLVE_CACHE[cam_id] = (resolved, _expiry_of(resolved, now))
+        _persist_resolve_cache()
     return resolved
 
 
@@ -563,6 +649,42 @@ def grab_frame(stream_url: str):
         return frame if ok else None
     finally:
         cap.release()
+
+
+def detect_with_boxes_batch(model, frames, conf: float = 0.35,
+                            imgsz: int | None = None,
+                            per_class_conf_list=None,
+                            conf_list=None):
+    """Batched detect_with_boxes: ONE model forward over N frames.
+
+    On the CPU-only laptop a batch-of-4 forward costs ~2.5x a single frame
+    instead of 4x, which is what makes four concurrent live-analysis
+    sessions tick at a usable rate. Post-filtering (per-class gates,
+    person plausibility, rider rescue) is reused verbatim from
+    detect_with_boxes via its `_res` shortcut, one frame at a time, so
+    batch results are bit-identical to serial ones.
+
+    Returns a list of (counts, boxes) tuples, one per input frame.
+    """
+    frames = list(frames)
+    if not frames:
+        return []
+    gates_list = list(per_class_conf_list or [None] * len(frames))
+    confs = list(conf_list or [conf] * len(frames))
+    # The shared model gate must be the loosest any frame needs, so no
+    # frame's candidates are dropped before its own filters get to look.
+    floors = [conf]
+    for g, c in zip(gates_list, confs):
+        floors.append(min(g.values()) if g else c)
+    model_gate = max(0.001, min(floors))
+    kwargs = dict(conf=model_gate,
+                  classes=list(CLASSES_OF_INTEREST.values()), verbose=False)
+    if imgsz:
+        kwargs["imgsz"] = imgsz
+    results = model.predict(frames, **kwargs)
+    return [detect_with_boxes(model, frames[i], conf=confs[i], imgsz=imgsz,
+                              per_class_conf=gates_list[i], _res=results[i])
+            for i in range(len(frames))]
 
 
 def iter_frames(stream_url: str, max_frames: int, stride: int = 1):
@@ -1162,7 +1284,8 @@ def detect_with_boxes(model, frame, conf: float = 0.35,
                       person_max_aspect: float | None = DEFAULT_PERSON_MAX_ASPECT,
                       person_min_height_px: int | None = DEFAULT_PERSON_MIN_HEIGHT_PX,
                       person_max_width_frac: float | None = DEFAULT_PERSON_MAX_WIDTH_FRAC,
-                      rider_iou: float | None = DEFAULT_RIDER_IOU
+                      rider_iou: float | None = DEFAULT_RIDER_IOU,
+                      _res=None,
                       ) -> tuple[dict, list[dict]]:
     """Like detect_and_count but also returns per-detection boxes.
 
@@ -1201,7 +1324,10 @@ def detect_with_boxes(model, frame, conf: float = 0.35,
                   classes=list(CLASSES_OF_INTEREST.values()), verbose=False)
     if imgsz:
         kwargs["imgsz"] = imgsz
-    res = model.predict(frame, **kwargs)[0]
+    # _res lets detect_with_boxes_batch run ONE batched forward pass over
+    # several frames and reuse this function purely for the per-frame
+    # post-filtering (per-class gates, person plausibility, rider rescue).
+    res = _res if _res is not None else model.predict(frame, **kwargs)[0]
     xyxy = res.boxes.xyxy.cpu().numpy()
     cls_ids = res.boxes.cls.cpu().numpy().astype(int)
     confs = res.boxes.conf.cpu().numpy()

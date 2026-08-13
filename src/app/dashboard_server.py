@@ -350,6 +350,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         sys.stdout.write("  " + (fmt % args) + "\n")
 
     def do_GET(self) -> None:
+        if self.path.startswith("/ytproxy"):
+            self._proxy_yt()
+            return
         if self.path.startswith("/tvkur/"):
             self._proxy_tvkur()
             return
@@ -363,6 +366,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             return
         if path == "/api/analysis/frame":
             self._analysis_frame()
+            return
+        if path == "/api/analysis/data":
+            self._analysis_data()
             return
         if path == "/api/review-sample":
             self._review_sample()
@@ -402,6 +408,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             return
         if path == "/api/lines":
             self._get_line()
+            return
+        if path == "/api/zones":
+            self._get_zones()
             return
         if path == "/api/crossings":
             self._get_crossings()
@@ -453,6 +462,12 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             return
         if path == "/api/lines/clear":
             self._clear_line()
+            return
+        if path == "/api/zones":
+            self._save_zones()
+            return
+        if path == "/api/zones/clear":
+            self._clear_zones()
             return
         self.send_error(404, "unknown POST endpoint")
 
@@ -538,6 +553,45 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         self.send_response(200); self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body))); self.end_headers()
         self.wfile.write(body)
+
+    # ---- Analysis zones (loiter areas + parking spots) -------------------
+    #   GET  /api/zones?cam=<id>        -> {"zones": [...]}
+    #   POST /api/zones?cam=<id>        body: {"zones": [...]} (full replace)
+    #   POST /api/zones/clear?cam=<id>  -> delete the file
+    # Running loiter/parking sessions hot-reload within a few seconds.
+
+    def _get_zones(self) -> None:
+        cam = self._q_cam()
+        if cam is None:
+            return
+        from app.cameras import resolve_zones
+        self._send_json(200, {"zones": resolve_zones(cam)})
+
+    def _save_zones(self) -> None:
+        cam = self._q_cam()
+        if cam is None:
+            return
+        n = int(self.headers.get("Content-Length") or 0)
+        if n <= 0 or n > 64 * 1024:
+            self.send_error(400, "empty or oversized body"); return
+        try:
+            data = json.loads(self.rfile.read(n).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            self.send_error(400, "body must be JSON"); return
+        from app.cameras import save_zones
+        try:
+            save_zones(cam, data.get("zones"))
+        except ValueError as e:
+            self.send_error(400, str(e)); return
+        self._send_json(200, {"ok": True, "cam": cam,
+                              "count": len(data.get("zones") or [])})
+
+    def _clear_zones(self) -> None:
+        cam = self._q_cam()
+        if cam is None:
+            return
+        from app.cameras import clear_zones
+        self._send_json(200, {"ok": True, "removed": clear_zones(cam)})
 
     def _get_crossings(self) -> None:
         cam = self._q_cam()
@@ -878,6 +932,36 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError):
             pass  # poller gave up mid-frame - the next poll catches up
+
+    def _analysis_data(self) -> None:
+        """GET /api/analysis/data?cam=<id>
+
+        JSON snapshot for the canvas-overlay renderer: boxes+heat+line
+        instead of a rendered JPEG. The client draws these on a canvas
+        positioned over the live iframe so the video stays smooth while
+        the overlay ticks at YOLO pace. Same idle-clock behaviour as
+        /api/analysis/frame: polling keeps the session alive.
+        """
+        from urllib.parse import parse_qs, urlparse
+        q = parse_qs(urlparse(self.path).query)
+        cam = (q.get("cam") or [""])[0]
+        from app.live_analysis import MANAGER
+        d = MANAGER.data(cam) if cam else None
+        if d is None:
+            self._send_json(404, {"error": "no live analysis for this "
+                                           "camera"})
+            return
+        if d.get("error"):
+            self._send_json(410, {"error": d["error"], "ended": True})
+            return
+        if not d.get("data"):
+            self._send_json(202, {"ok": True, "pending": True,
+                                  "note": d.get("note") or "starting..."})
+            return
+        payload = dict(d["data"])
+        payload["seq"] = d["seq"]
+        payload["layer"] = d["layer"]
+        self._send_json(200, payload)
 
     def _analysis_stop(self) -> None:
         """POST /api/analysis/stop?cam=<id> - back to plain video."""
@@ -1471,6 +1555,112 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             return
         super().do_HEAD()
 
+    # ---- YouTube-HLS relay -------------------------------------------------
+    # googlevideo.com serves the live HLS manifests + segments that back the
+    # picked YouTube cams, but sends no Access-Control-Allow-Origin header,
+    # so hls.js in the browser is CORS-blocked from fetching them directly.
+    # Same story as tvkur, same cure: relay through this server (which has
+    # no CORS restriction) and rewrite every URL inside a playlist so the
+    # browser's follow-up requests come back through the relay too.
+    #
+    #   GET /ytproxy?cam=<cam_id>   resolve the cam's live HLS URL (cached
+    #                               by detect_core.resolve_stream), fetch the
+    #                               playlist, rewrite, serve. On a 4xx from
+    #                               googlevideo (signed URL rotated - they
+    #                               expire every ~6h) invalidate + re-resolve
+    #                               once, so long dashboard runs self-heal.
+    #   GET /ytproxy?u=<url>        relay one absolute googlevideo URL
+    #                               (nested playlist or media segment).
+    #                               Host-whitelisted to *.googlevideo.com so
+    #                               this can't be abused as an open proxy.
+
+    def _yt_upstream_fetch(self, url: str):
+        """GET an upstream URL; (bytes, content_type) or (None, None) on 4xx."""
+        req = urllib.request.Request(url, headers={
+            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/126.0.0.0 Safari/537.36")})
+        try:
+            with urllib.request.urlopen(req, timeout=15, context=_SSL_CTX) as r:
+                return r.read(), r.headers.get("Content-Type")
+        except urllib.error.HTTPError as e:
+            if 400 <= e.code < 500:
+                return None, None
+            raise
+
+    def _proxy_yt(self) -> None:
+        from urllib.parse import parse_qs, urlparse
+        q = parse_qs(urlparse(self.path).query)
+        cam_id = (q.get("cam") or [""])[0]
+        # parse_qs already percent-decoded the value ONCE - exactly undoing
+        # the quote(..., safe="") the playlist rewriter applied. A second
+        # unquote here corrupted googlevideo's signed paths (%3D -> =) and
+        # got every segment 403'd. Use as-is.
+        raw = (q.get("u") or [""])[0]
+        try:
+            if cam_id:
+                from app.cameras import CAMERAS
+                from app.detect_core import invalidate_stream, resolve_stream
+                cam = CAMERAS.get(cam_id)
+                if cam is None:
+                    self._send_json(404, {"error": f"unknown camera {cam_id!r}"})
+                    return
+                url = resolve_stream(cam)
+                body, _ct = self._yt_upstream_fetch(url)
+                if body is None:
+                    invalidate_stream(cam_id)
+                    url = resolve_stream(cam)
+                    body, _ct = self._yt_upstream_fetch(url)
+                if body is None:
+                    self._send_json(502, {"error": "manifest fetch failed "
+                                                   "after re-resolve"})
+                    return
+                text = body.decode("utf-8", "replace")
+                # Measure how far the stream's PROGRAM-DATE-TIME live edge
+                # trails wall clock (YouTube ingest+CDN latency). The live
+                # analysis stamps its ticks with this offset applied, so
+                # the browser can align boxes with the exact video frame
+                # being displayed. Refreshes on every playlist reload.
+                off = _ytproxy_pdt_offset(text)
+                if off is not None:
+                    from app.live_analysis import STREAM_PDT_OFFSET
+                    STREAM_PDT_OFFSET[cam_id] = off
+                data = _ytproxy_rewrite(text, url).encode()
+                ct = "application/vnd.apple.mpegurl"
+            elif raw:
+                url = raw
+                host = urlparse(url).hostname or ""
+                if not (host == "googlevideo.com"
+                        or host.endswith(".googlevideo.com")):
+                    self._send_json(403, {"error": "host not allowed"})
+                    return
+                body, up_ct = self._yt_upstream_fetch(url)
+                if body is None:
+                    self._send_json(502, {"error": "upstream expired/refused"})
+                    return
+                if body[:16].lstrip().startswith(b"#EXTM3U"):
+                    data = _ytproxy_rewrite(body.decode("utf-8", "replace"),
+                                            url).encode()
+                    ct = "application/vnd.apple.mpegurl"
+                else:
+                    data = body
+                    ct = up_ct or "video/mp2t"
+            else:
+                self._send_json(400, {"error": "need ?cam= or ?u="})
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", ct)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            try:
+                self.wfile.write(data)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # browser dropped the segment mid-flight - fine
+        except Exception as e:
+            self._send_json(502, {"error": f"{type(e).__name__}: {e}"})
+
     def _proxy_tvkur(self) -> None:
         # /tvkur/<stream_id>/<path...> -> content.tvkur.com/l/<stream_id>/<path...>
         # Strip any ?query so we mirror exactly what the browser asked for.
@@ -1502,6 +1692,62 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(f"tvkur proxy error: {type(e).__name__}: {e}".encode())
+
+
+def _ytproxy_pdt_offset(playlist: str):
+    """Seconds between wall clock and the playlist's live edge, or None.
+
+    Live edge = the last EXT-X-PROGRAM-DATE-TIME plus the EXTINF durations
+    of every segment after it. googlevideo playlists carry one PDT tag at
+    the top, so in practice this is pdt + the whole window's duration.
+    """
+    import datetime as _dt
+    import re
+    pdt = None
+    dur_after = 0.0
+    for line in playlist.splitlines():
+        s = line.strip()
+        if s.startswith("#EXT-X-PROGRAM-DATE-TIME:"):
+            try:
+                pdt = _dt.datetime.fromisoformat(
+                    s.split(":", 1)[1].strip())
+                dur_after = 0.0
+            except ValueError:
+                pass
+        elif s.startswith("#EXTINF:") and pdt is not None:
+            m = re.match(r"#EXTINF:([\d.]+)", s)
+            if m:
+                dur_after += float(m.group(1))
+    if pdt is None:
+        return None
+    edge = pdt.timestamp() + dur_after
+    return time.time() - edge
+
+
+def _ytproxy_rewrite(playlist: str, base_url: str) -> str:
+    """Route every URL inside an HLS playlist back through /ytproxy?u=.
+
+    Handles both bare URL lines (segments / nested variant playlists,
+    absolute or relative) and URI="..." attributes on tags such as
+    EXT-X-MAP and EXT-X-MEDIA. Everything else passes through untouched.
+    """
+    import re
+    from urllib.parse import quote, urljoin
+
+    def _wrap(u: str) -> str:
+        return "/ytproxy?u=" + quote(urljoin(base_url, u), safe="")
+
+    out = []
+    for line in playlist.splitlines():
+        s = line.strip()
+        if not s:
+            out.append(line)
+        elif s.startswith("#"):
+            out.append(re.sub(r'URI="([^"]+)"',
+                              lambda m: f'URI="{_wrap(m.group(1))}"', line))
+        else:
+            out.append(_wrap(s))
+    return "\n".join(out) + "\n"
 
 
 def make_handler_factory(directory: Path | None = None):
@@ -1585,17 +1831,8 @@ def bind(port: int, directory: Path | None = None) -> http.server.ThreadingHTTPS
     # sessions, and write annotated JPEGs + counts JSON that the frontend's
     # LOCAL_MODE poll reads from /snapshots/model_view/local_*.json.
     def _start_local_producers_when_ready():
-        import time as _t
         _lg = WEB_DIR / "local_grid.json"
         if not _lg.exists():
-            return
-        # Wait for the visual-search warmup to finish loading the model.
-        for _ in range(120):
-            if _VISUAL_SEARCH._ready and _VISUAL_SEARCH.model is not None:
-                break
-            _t.sleep(1)
-        if not (_VISUAL_SEARCH._ready and _VISUAL_SEARCH.model is not None):
-            print("  ! local_producers not started: YOLO model not loaded within 2 min")
             return
         try:
             import json as _json
@@ -1603,11 +1840,24 @@ def bind(port: int, directory: Path | None = None) -> http.server.ThreadingHTTPS
             slots = grid.get("slots") or []
             if not slots:
                 return
+            # Load our own yolo26m directly so producers boot INSIDE this
+            # process (same PID as _analysis_start/_analysis_stop) - the
+            # shared local_producers.PAUSED_SLOT_IDS set only works when
+            # the producer loop lives in the same PID that adds/removes.
+            # An earlier version waited on _VISUAL_SEARCH.get(), whose
+            # review-pool bootstrap can block for minutes on disk I/O and
+            # left the producers unstarted.
+            from app.detect_core import load_model as _load_model
+            weights = "yolo26m.pt"
+            model_path = ROOT.parent / weights   # <project>/src/yolo26m.pt
+            if not model_path.is_file():
+                model_path = ROOT / weights
+            _local_model = _load_model(str(model_path))
             from app.local_producers import start_all as _start_all
-            _start_all(slots, _VISUAL_SEARCH.model,
-                       model_view_interval_s=25, review_interval_s=60)
+            _start_all(slots, _local_model,
+                       model_view_interval_s=8, review_interval_s=60)
             print(f"local_producers running: {len(slots)} slots -> "
-                  f"web/snapshots/model_view/local_*.jpg (~25s per round)")
+                  f"web/snapshots/model_view/local_*.jpg (~8s per round)")
         except Exception as e:
             print(f"  ! local_producers not started: {type(e).__name__}: {e}")
 

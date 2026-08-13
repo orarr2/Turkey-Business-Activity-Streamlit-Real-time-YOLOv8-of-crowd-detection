@@ -48,21 +48,70 @@ REVIEW_FRAMES_DIR = SNAPSHOTS_DIR / "review_frames"
 DEFAULT_MODEL_VIEW_INTERVAL_S = 30.0
 DEFAULT_REVIEW_FRAME_INTERVAL_S = 60.0
 
+_LAST_ERR_PRINT: dict[str, float] = {}
+
+
+def _print_throttled(key: str, msg: str, every: float = 60.0) -> None:
+    """print(), but at most once per `every` seconds per key - a dead
+    camera used to write the same failure line every round for hours."""
+    now = time.time()
+    if now - _LAST_ERR_PRINT.get(key, 0.0) >= every:
+        _LAST_ERR_PRINT[key] = now
+        print(msg)
+
+
+def _analysis_active() -> bool:
+    """True while any Advanced Analysis session is running.
+
+    Both producers skip their whole round then, yielding the CPU so the
+    analyzed stream ticks as fast as the model allows - on the 4-core
+    laptop the producers' grab+infer rounds on the OTHER cams were
+    measured to saturate the CPU and roughly double the analysis tick
+    time. KPI badges freeze during analysis and resume on Stop. Reading
+    live thread state (not a bookkeeping set) means a session that dies
+    on idle-timeout releases the pause by itself.
+    """
+    try:
+        from app.live_analysis import MANAGER
+        return MANAGER.any_alive()
+    except Exception:
+        return False
+
 
 def _grab_and_detect(cam_dict: dict, model,
                      conf: float = 0.30, imgsz: int = 640):
-    """One-shot: resolve stream, grab frame, run YOLO. Returns
-    ``(frame, boxes)`` or ``(None, None)`` on any failure."""
+    """Grab the freshest frame + run YOLO. Returns ``(frame, boxes)`` or
+    ``(None, None)`` on any failure.
+
+    Frames come from live_analysis's SHARED reader pool when possible -
+    one persistent decoder per camera serving both the producers and any
+    analysis session - instead of the old open-read-close VideoCapture
+    that cost 1-2 s of stream handshake per camera per round. Header-
+    required hosts (no plain VideoCapture possible) and pool failures
+    fall back to the old one-shot segment path.
+    """
     from app.detect_core import (grab_frame, resolve_stream,
                                  detect_with_boxes,
                                  DEFAULT_PER_CLASS_CONF)
-    try:
-        url = resolve_stream(cam_dict)
-    except Exception:
-        return None, None
-    frame = grab_frame(url)
+    frame = None
+    cam_id = (cam_dict.get("id") or cam_dict.get("cam_id")
+              or cam_dict.get("slot_id"))
+    if cam_id:
+        try:
+            from app.live_analysis import get_shared_reader
+            r = get_shared_reader(cam_dict, cam_id)
+            if r is not None:
+                frame = r.snapshot_wait(timeout=8.0)
+        except Exception:
+            frame = None
     if frame is None:
-        return None, None
+        try:
+            url = resolve_stream(cam_dict)
+        except Exception:
+            return None, None
+        frame = grab_frame(url)
+        if frame is None:
+            return None, None
     try:
         gates = dict(cam_dict.get("per_class_conf")
                      or DEFAULT_PER_CLASS_CONF)
@@ -117,6 +166,11 @@ class ModelViewProducer(threading.Thread):
         MODEL_VIEW_DIR.mkdir(parents=True, exist_ok=True)
         while not self.stop_event.is_set():
             t0 = time.time()
+            if _analysis_active():
+                # Advanced Analysis owns the CPU - skip the whole round.
+                if self.stop_event.wait(2.0):
+                    break
+                continue
             for slot in self.picked_slots:
                 if self.stop_event.is_set():
                     break
@@ -154,8 +208,9 @@ class ModelViewProducer(threading.Thread):
                 except Exception as e:
                     # A single-cam glitch (network, decoder, disk-lock) must
                     # never kill the loop for the OTHER cams.
-                    print(f"[model-view] slot {slot_id}: "
-                          f"{type(e).__name__}: {e}")
+                    _print_throttled(f"mv:{slot_id}",
+                                     f"[model-view] slot {slot_id}: "
+                                     f"{type(e).__name__}: {e}")
             elapsed = time.time() - t0
             if self.stop_event.wait(max(1.0, self.interval_s - elapsed)):
                 break
@@ -195,6 +250,11 @@ class ReviewFrameProducer(threading.Thread):
         while not self.stop_event.is_set():
             t0 = time.time()
             if not self.picked_slots:
+                if self.stop_event.wait(self.interval_s):
+                    break
+                continue
+            if _analysis_active():
+                # Advanced Analysis owns the CPU - skip this round.
                 if self.stop_event.wait(self.interval_s):
                     break
                 continue

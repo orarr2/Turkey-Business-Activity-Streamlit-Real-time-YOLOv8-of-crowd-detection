@@ -199,6 +199,62 @@ for (const slot of GRID_SLOTS) {
     { active_hls: slot.placeholder_hls, active_embed: slot.placeholder_embed,
       active_page: slot.placeholder_page },
     slot);
+  // Per-tile click-to-play overlay for YouTube iframes. Chrome's autoplay
+  // policy blackens muted-autoplay iframes on multi-embed pages after the
+  // first one, and YouTube's own JS may also queue a pre-roll ad that
+  // needs a user gesture. Overlay a big "play" button that on click calls
+  // YT.Player.playVideo() through the iframe API (buildVideoInto already
+  // mounted a Player with enablejsapi=1 so postMessage works). Once the
+  // player fires onStateChange=1 (playing), the overlay fades out.
+  // Click-to-play overlay only where an iframe would actually mount:
+  // slots with a placeholder_hls (the /ytproxy relay) autoplay muted on
+  // their own, and a "Play live" button floating over an already-playing
+  // video just dims it and confuses.
+  const _isYtEmbed = /youtube\.com\/embed/.test(slot.placeholder_embed || "")
+                     && !slot.placeholder_hls;
+  if (_isYtEmbed) {
+    const _vw = tileState[slot.slot_id].videoWrap;
+    _vw.style.position = _vw.style.position || "relative";
+    const _play = document.createElement("button");
+    _play.className = "play-overlay";
+    _play.type = "button";
+    _play.title = "Play (Chrome blocks multi-iframe autoplay - one tap starts it)";
+    _play.innerHTML =
+      '<span style="display:inline-flex;align-items:center;gap:10px;'
+      + 'padding:14px 26px;border-radius:14px;background:rgba(37,99,235,0.92);'
+      + 'color:#f8fafc;font-size:20px;font-weight:600;'
+      + 'box-shadow:0 6px 20px rgba(0,0,0,0.4);pointer-events:none;">'
+      + '<span style="font-size:26px;line-height:1;">▶</span>'
+      + '<span>Play live</span></span>';
+    _play.style.cssText =
+      "position:absolute;inset:0;display:flex;align-items:center;justify-content:center;"
+      + "background:linear-gradient(180deg,rgba(15,23,42,0.35),rgba(15,23,42,0.7));"
+      + "border:0;cursor:pointer;z-index:5;transition:opacity .35s ease;"
+      + "backdrop-filter:blur(1px);";
+    _play.addEventListener("click", () => {
+      _play.style.opacity = "0";
+      setTimeout(() => _play.remove(), 400);
+      // Reach into the iframe player and call playVideo() through the
+      // official IFrame API (the wrapper is stashed on tileState by
+      // mountYouTubePlayer when it's ready). Fall back to a postMessage
+      // if the wrapper is not there yet.
+      const st = tileState[slot.slot_id];
+      const p = st?.ytPlayer;
+      if (p && typeof p.playVideo === "function") {
+        try { p.unMute && p.unMute(); } catch (_) {}
+        try { p.playVideo(); } catch (_) {}
+      } else {
+        const _if = _vw.querySelector("iframe");
+        if (_if && _if.contentWindow) {
+          _if.contentWindow.postMessage(
+            JSON.stringify({ event: "command", func: "playVideo", args: [] }),
+            "*");
+        }
+      }
+    });
+    _vw.appendChild(_play);
+    tileState[slot.slot_id].playOverlay = _play;
+  }
   // Per-tile 🔬 advanced-analysis button (restored on top of 27bced9 baseline).
   // The 27bced9 commit removed the button from the tile template but left this
   // event-binding line intact; the resulting null.addEventListener() threw and
@@ -291,8 +347,14 @@ const ANALYSIS_LAYER_DEFS = [
   ["body",     "Body anomalies"],
   ["faces",    "Face detection"],
   ["line",     "Line crossing"],
+  ["loiter",   "Zone & loitering"],
+  ["parking",  "Parking occupancy"],
 ];
-const ANALYSIS_POLL_MS = 1000;
+// Layers whose geometry the operator draws on the frame themselves.
+const DRAWABLE_LAYERS = { line: "✏ Draw line",
+                          loiter: "✏ Draw zones",
+                          parking: "✏ Draw spots" };
+const ANALYSIS_POLL_MS = 500;
 
 const analysisPanel = document.createElement("div");
 analysisPanel.style.cssText =
@@ -409,8 +471,38 @@ analysisPanel.querySelector("[data-an-run]").addEventListener("click",
         { method: "POST" });
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || r.status);
+      // Belt-and-braces against a lost switch (seen once in testing: a
+      // fast tile-to-tile flow left one session on its old layer): the
+      // server echoes the layer it actually runs - retry once if it
+      // doesn't match what the operator picked.
+      if (data.layer && data.layer !== picked.value) {
+        await new Promise((res) => setTimeout(res, 300));
+        const r2 = await fetch(
+          `/api/analysis/start?cam=${encodeURIComponent(cam)}` +
+          `&layer=${encodeURIComponent(picked.value)}`,
+          { method: "POST" });
+        const d2 = await r2.json();
+        if (!r2.ok || (d2.layer && d2.layer !== picked.value))
+          throw new Error("layer switch did not take - try again");
+      }
       beginTileAnalysis(st, cam, picked.value);
       analysisPanel.style.display = "none";
+      // Deferred confirmation: a second later, ask the server which layer
+      // is ACTUALLY running and silently re-issue the switch if it lost
+      // the race (observed under rapid tile-to-tile switching).
+      setTimeout(async () => {
+        try {
+          const chk = await fetch(
+            `/api/analysis/data?cam=${encodeURIComponent(cam)}`)
+            .then((x) => x.status === 200 ? x.json() : null);
+          if (chk && chk.layer && chk.layer !== picked.value) {
+            await fetch(
+              `/api/analysis/start?cam=${encodeURIComponent(cam)}` +
+              `&layer=${encodeURIComponent(picked.value)}`,
+              { method: "POST" });
+          }
+        } catch (_) {}
+      }, 1200);
     } catch (e) {
       errEl.textContent = "Failed to start: " + e.message;
     } finally {
@@ -425,32 +517,172 @@ function beginTileAnalysis(st, cam, layer) {
     // Same tile, new layer: the session already switched server-side
     // (stream + accumulators kept) - just relabel; the poller runs on.
     st.analysis.layer = layer;
+    st.analysis.tickBuf.length = 0;   // old-layer ticks are stale now
     const tag = st.videoWrap.querySelector(".analysis-live-tag");
     if (tag) tag.textContent = `LIVE ANALYSIS · ${_layerLabel[layer] || layer}`;
+    const lb = st.videoWrap.querySelector(".analysis-drawline");
+    if (lb) {
+      lb.style.display = DRAWABLE_LAYERS[layer] ? "" : "none";
+      if (DRAWABLE_LAYERS[layer]) lb.textContent = DRAWABLE_LAYERS[layer];
+    }
     return;
   }
-  stopTileVideo(st);
+  // Canvas-overlay mode: keep the iframe playing at native fps, draw
+  // YOLO boxes / heat / line on a transparent canvas above it. The old
+  // design tore down the video and replaced it with an analyzed-JPEG
+  // slideshow, capping the tile at ~1 fps - the operator read that as
+  // "the video froze the moment I clicked heat".
   st._overlayWasHidden = st.overlay.style.display === "none";
   st.overlay.style.display = "none";
   const wrap = document.createElement("div");
-  wrap.className = "analysis-wrap";
+  wrap.className = "analysis-wrap analysis-overlay-mode";
+  // background:transparent overrides the stylesheet's .analysis-wrap
+  // {background:#000} - that rule belongs to the old replace-the-video
+  // design and would paint solid black over the smooth /ytproxy video
+  // this wrap now floats above.
+  wrap.style.cssText = "position:absolute;inset:0;pointer-events:none;"
+                     + "z-index:4;background:transparent;";
+  // Remove any lingering "Play live" overlay from tile-creation - it
+  // sits at z-index:5 above the analysis wrap and would visually block
+  // the whole tile once analysis is on. The overlay was there so the
+  // operator could kick YouTube autoplay; inside Advanced Analysis the
+  // canvas + bg fallback are what the operator wants to see.
+  const _leftoverPlay = st.videoWrap.querySelector(".play-overlay");
+  if (_leftoverPlay) _leftoverPlay.remove();
+  st.playOverlay = null;
+  // Best-effort autoplay kick inside the operator's Start-click gesture
+  // so YouTube plays too (if Chrome allows) - the ytPlayer state is not
+  // used to hide the bg anymore, so this is purely a nice-to-have.
+  try {
+    if (st.ytPlayer && typeof st.ytPlayer.playVideo === "function") {
+      try { st.ytPlayer.mute && st.ytPlayer.mute(); } catch (_) {}
+      st.ytPlayer.playVideo();
+    }
+  } catch (_) {}
   wrap.innerHTML = `
-    <img alt="live analysis" draggable="false" style="display:none">
-    <div class="analysis-status">starting live analysis...</div>
-    <span class="analysis-live-tag">LIVE ANALYSIS ·
+    <img class="analysis-bg" alt="" draggable="false"
+         style="position:absolute;inset:0;width:100%;height:100%;
+                object-fit:cover;background:#0f172a;display:block;"
+         data-hidden-when-playing="1">
+    <canvas class="analysis-canvas"
+            style="position:absolute;inset:0;width:100%;height:100%;
+                   pointer-events:none;background:transparent;"></canvas>
+    <div class="analysis-status"
+         style="position:absolute;left:8px;top:8px;padding:4px 10px;
+                background:rgba(15,23,42,0.85);color:#e2e8f0;border-radius:6px;
+                font-size:12px;pointer-events:none;">starting live analysis...</div>
+    <span class="analysis-live-tag"
+          style="position:absolute;right:8px;top:8px;padding:4px 10px;
+                 background:rgba(37,99,235,0.9);color:#f8fafc;border-radius:6px;
+                 font-size:12px;font-weight:600;pointer-events:none;">LIVE ·
       ${escapeHtml(_layerLabel[layer] || layer)}</span>
-    <button class="analysis-stop">■ Stop - back to video</button>`;
-  st.videoWrap.insertBefore(wrap, st.overlay);
+    <button class="analysis-drawline"
+            style="position:absolute;right:78px;bottom:8px;padding:6px 12px;
+                   background:#2563eb;color:#f8fafc;border:0;border-radius:6px;
+                   cursor:pointer;font-size:13px;pointer-events:auto;
+                   display:${DRAWABLE_LAYERS[layer] ? "" : "none"};">
+      ${DRAWABLE_LAYERS[layer] || "✏ Draw"}</button>
+    <button class="analysis-stop"
+            style="position:absolute;right:8px;bottom:8px;padding:6px 12px;
+                   background:#dc2626;color:#f8fafc;border:0;border-radius:6px;
+                   cursor:pointer;font-size:13px;pointer-events:auto;">
+      ■ Stop</button>`;
+  st.videoWrap.style.position = st.videoWrap.style.position || "relative";
+  st.videoWrap.appendChild(wrap);
   wrap.querySelector(".analysis-stop").addEventListener("click",
     () => stopTileAnalysis(st));
+  wrap.querySelector(".analysis-drawline").addEventListener("click", () => {
+    const snap =
+      `/api/analysis/frame?cam=${encodeURIComponent(cam)}&_=${Date.now()}`;
+    const lay = st.analysis ? st.analysis.layer : layer;
+    if (lay === "line") window.openLineEditor(cam, snap);
+    else openZoneEditor(cam, lay, snap);
+  });
   st.analysis = {
     cam, layer,
-    img: wrap.querySelector("img"),
+    wrap,
+    bg: wrap.querySelector(".analysis-bg"),
+    canvas: wrap.querySelector(".analysis-canvas"),
     status: wrap.querySelector(".analysis-status"),
-    lastUrl: null, failures: 0, lastRestart: 0, inflight: false,
+    lastBgUrl: null,
+    // Ring buffer of recent analysis ticks (each stamped with `at`, the
+    // capture time on the stream's own clock). The rAF draw loop picks
+    // the tick matching the video time on screen and extrapolates box
+    // positions by track velocity - see _analysisDrawLoop.
+    tickBuf: [],
+    failures: 0, lastRestart: 0, inflight: false, lastSeq: -1,
     timer: setInterval(() => pollAnalysisFrame(st), ANALYSIS_POLL_MS),
+    // Twice a second, decide which layer the operator sees UNDER the
+    // canvas boxes: the smooth /ytproxy <video> when it is genuinely
+    // advancing, or the analyzed-frame JPEG otherwise. This check is
+    // trustworthy ONLY because the video is now our own same-origin
+    // <video> element (currentTime cannot advance without pixels being
+    // decoded) - the old YT-iframe API happily reported PLAYING while
+    // Chrome rendered a black surface, which is why every iframe-based
+    // heuristic before this failed.
+    videoStateTimer: setInterval(() => _syncAnalysisBgVisibility(st), 500),
   };
+  // Analyzed frame visible from the first paint; the smooth video is
+  // the upgrade once it proves it is actually advancing.
+  st.analysis.bg.style.display = "block";
+  st.analysis.canvas.style.display = "none";
   pollAnalysisFrame(st);
+  // Kick a first bg fetch immediately so we don't wait a whole poll
+  // interval before painting anything visible.
+  _refreshAnalysisBg(st.analysis);
+  _analysisDrawLoop(st, st.analysis);
+}
+
+// 60fps draw loop for one tile's analysis overlay. Runs only while that
+// tile's analysis is active (self-terminates when st.analysis changes).
+// Each frame: pick the buffered tick whose capture time matches the video
+// time currently on screen (hls.js exposes it as playingDate, driven by
+// the stream's EXT-X-PROGRAM-DATE-TIME tags), then shift every box by its
+// track velocity times the residual dt. Boxes glide with the traffic
+// instead of jumping once a second onto pixels the object already left.
+function _analysisDrawLoop(st, a) {
+  if (!st.analysis || st.analysis !== a) return;   // stopped or restarted
+  requestAnimationFrame(() => _analysisDrawLoop(st, a));
+  if (a.canvas.style.display === "none") return;   // JPEG mode covers it
+  const buf = a.tickBuf;
+  if (!buf.length) return;
+  let d = buf[buf.length - 1];
+  let dt = 0;
+  const hls = st.currentHlsInstance;
+  const pd = hls && hls.playingDate;
+  if (pd instanceof Date && !isNaN(pd)) {
+    const vidEpoch = pd.getTime() / 1000;
+    for (let i = buf.length - 1; i >= 0; i--) {
+      if ((buf[i].at || 0) <= vidEpoch + 0.25) { d = buf[i]; break; }
+    }
+    dt = Math.min(3, Math.max(0, vidEpoch - (d.at || vidEpoch)));
+  }
+  _drawAnalysisOverlay(a.canvas, d, dt);
+}
+
+function _syncAnalysisBgVisibility(st) {
+  const a = st.analysis;
+  if (!a || !a.bg) return;
+  let playing = false;
+  const v = st.videoWrap.querySelector("video");
+  if (v && !v.paused && !v.ended && v.readyState >= 2) {
+    const t = v.currentTime;
+    playing = (a._lastVidT !== undefined) && (t > a._lastVidT + 0.05);
+    a._lastVidT = t;
+  } else {
+    a._lastVidT = undefined;
+  }
+  const want = playing ? "none" : "block";
+  if (a.bg.style.display !== want) {
+    a.bg.style.display = want;
+    // The canvas draws over live video ONLY - the JPEG fallback already
+    // carries the server-rendered overlay burned in, and stacking the
+    // canvas on top of it double-draws every box.
+    a.canvas.style.display = playing ? "" : "none";
+    // Falling back to the frame view: refresh right away so the
+    // operator doesn't stare at a stale image for a poll interval.
+    if (want === "block") _refreshAnalysisBg(a);
+  }
 }
 
 async function pollAnalysisFrame(st) {
@@ -459,16 +691,37 @@ async function pollAnalysisFrame(st) {
   a.inflight = true;
   try {
     const r = await fetch(
-      `/api/analysis/frame?cam=${encodeURIComponent(a.cam)}&_=${Date.now()}`,
+      `/api/analysis/data?cam=${encodeURIComponent(a.cam)}&_=${Date.now()}`,
       { cache: "no-store" });
-    if (r.status === 200
-        && (r.headers.get("Content-Type") || "").includes("image")) {
-      const blob = await r.blob();
-      const url = URL.createObjectURL(blob);
-      a.img.src = url;
-      a.img.style.display = "";
-      if (a.lastUrl) URL.revokeObjectURL(a.lastUrl);
-      a.lastUrl = url;
+    if (r.status === 200) {
+      const d = await r.json();
+      if (d.seq !== a.lastSeq) {
+        a.lastSeq = d.seq;
+        a.tickBuf.push(d);
+        if (a.tickBuf.length > 24) a.tickBuf.shift();
+        // Skip the JPEG round-trip while the smooth video is confirmed
+        // playing (the bg is hidden then and the bytes would be wasted).
+        if (a.bg && a.bg.style.display !== "none") _refreshAnalysisBg(a);
+        // Loitering alerts: toast + tile flash once per zone-episode
+        // (re-arms when the zone drops back below its threshold).
+        if (d.layer === "loiter" && Array.isArray(d.zones)) {
+          a._loiterAlerted = a._loiterAlerted || new Set();
+          for (const z of d.zones) {
+            if (z.alert && !a._loiterAlerted.has(z.name)) {
+              a._loiterAlerted.add(z.name);
+              showCrossToast(`⚠ loitering in ${z.name} - `
+                             + `${z.max_dwell}s (${st.slot.placeholder_name})`);
+              const t = st.tile;
+              if (t) {
+                t.style.outline = "3px solid #ef4444";
+                setTimeout(() => { t.style.outline = ""; }, 2500);
+              }
+            } else if (!z.alert) {
+              a._loiterAlerted.delete(z.name);
+            }
+          }
+        }
+      }
       a.status.style.display = "none";
       a.failures = 0;
     } else if (r.status === 202) {
@@ -502,11 +755,282 @@ async function pollAnalysisFrame(st) {
   }
 }
 
+// Draw one analysis tick (boxes + optional heat/line) onto the tile's
+// overlay canvas. `dtExtra` is how many seconds of video time have passed
+// since this tick's frame was captured - every box shifts by its track
+// velocity times that, so boxes ride along with the traffic between YOLO
+// updates instead of sitting on vacated pixels.
+function _drawAnalysisOverlay(canvas, d, dtExtra = 0) {
+  const parent = canvas.parentElement;
+  const rect = parent.getBoundingClientRect();
+  const cw = Math.max(1, Math.round(rect.width));
+  const ch = Math.max(1, Math.round(rect.height));
+  if (canvas.width !== cw)  canvas.width = cw;
+  if (canvas.height !== ch) canvas.height = ch;
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, cw, ch);
+  const fw = Math.max(1, Number(d.frame_w) || cw);
+  const fh = Math.max(1, Number(d.frame_h) || ch);
+  const sx = cw / fw, sy = ch / fh;
+
+  // Heat layer paints a semi-transparent grid over the whole tile.
+  // The grid only changes once per analysis tick, but this draw runs at
+  // 60fps for the box extrapolation - so the ~400 fillRects render into
+  // an offscreen canvas once per (tick, size) and every rAF just blits.
+  if (d.layer === "heat" && Array.isArray(d.heat) && d.heat.length) {
+    let hc = canvas._heatCache;
+    if (!hc || hc.seq !== d.seq || hc.cw !== cw || hc.ch !== ch) {
+      const off = document.createElement("canvas");
+      off.width = cw; off.height = ch;
+      const octx = off.getContext("2d");
+      const gh = d.heat.length, gw = d.heat[0].length;
+      const cellW = cw / gw, cellH = ch / gh;
+      let peak = 0;
+      for (const row of d.heat) for (const v of row) if (v > peak) peak = v;
+      if (peak > 0) {
+        for (let gy = 0; gy < gh; gy++) {
+          for (let gx = 0; gx < gw; gx++) {
+            const v = d.heat[gy][gx] / peak;
+            if (v < 0.05) continue;
+            const alpha = Math.min(0.65, v * 0.7);
+            octx.fillStyle = _heatColor(v, alpha);
+            octx.fillRect(gx * cellW, gy * cellH, cellW + 1, cellH + 1);
+          }
+        }
+      }
+      hc = canvas._heatCache = { seq: d.seq, cw, ch, off };
+    }
+    ctx.drawImage(hc.off, 0, 0);
+  }
+
+  // Line layer: the crossing line + running counts. Line points are
+  // NORMALIZED (0..1 of the frame) when they come from the line editor
+  // or the default - detect and scale accordingly (a <=1 coordinate on a
+  // 1920px frame can only be normalized).
+  if (d.layer === "line" && Array.isArray(d.line) && d.line.length === 2) {
+    const norm = d.line.every((p) => p[0] <= 1.001 && p[1] <= 1.001);
+    const lx = (p) => norm ? p[0] * cw : p[0] * sx;
+    const ly = (p) => norm ? p[1] * ch : p[1] * sy;
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = "rgba(59,130,246,0.95)";
+    ctx.setLineDash([10, 6]);
+    ctx.beginPath();
+    ctx.moveTo(lx(d.line[0]), ly(d.line[0]));
+    ctx.lineTo(lx(d.line[1]), ly(d.line[1]));
+    ctx.stroke();
+    ctx.setLineDash([]);
+    if (d.cross) {
+      ctx.fillStyle = "rgba(15,23,42,0.85)";
+      ctx.fillRect(8, ch - 30, 150, 22);
+      ctx.fillStyle = "#f8fafc";
+      ctx.font = "12px system-ui, sans-serif";
+      ctx.fillText(`in: ${d.cross.in || 0}   out: ${d.cross.out || 0}`,
+                   14, ch - 14);
+    }
+  }
+
+  // Loiter zones / parking spots - normalized polygons.
+  if ((d.layer === "loiter" && Array.isArray(d.zones))
+      || (d.layer === "parking" && Array.isArray(d.spots))) {
+    const entries = d.layer === "loiter" ? d.zones : d.spots;
+    ctx.font = "12px system-ui, sans-serif";
+    for (const z of entries) {
+      const hot = d.layer === "loiter" ? z.alert : z.occupied;
+      const col = hot ? "239,68,68" : "74,222,128";
+      ctx.beginPath();
+      ctx.moveTo(z.points[0][0] * cw, z.points[0][1] * ch);
+      for (let i = 1; i < z.points.length; i++)
+        ctx.lineTo(z.points[i][0] * cw, z.points[i][1] * ch);
+      ctx.closePath();
+      ctx.fillStyle = `rgba(${col},${hot ? 0.22 : 0.12})`;
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = `rgba(${col},0.95)`;
+      ctx.stroke();
+      const label = d.layer === "loiter"
+        ? `${z.name}: ${z.count} inside · max ${z.max_dwell}s`
+        : `${z.name}: ${z.occupied ? (z.cls || "occupied") : "free"}`;
+      const zx = z.points[0][0] * cw, zy = z.points[0][1] * ch;
+      const tw = ctx.measureText(label).width + 8;
+      ctx.fillStyle = "rgba(15,23,42,0.85)";
+      ctx.fillRect(zx, Math.max(0, zy - 16), tw, 16);
+      ctx.fillStyle = "#f8fafc";
+      ctx.fillText(label, zx + 4, Math.max(12, zy - 4));
+    }
+    if (d.layer === "parking" && d.parking) {
+      const t = `parking: ${d.parking.occupied}/${d.parking.total} occupied`;
+      ctx.fillStyle = "rgba(15,23,42,0.85)";
+      ctx.fillRect(8, ch - 30, ctx.measureText(t).width + 14, 22);
+      ctx.fillStyle = "#f8fafc";
+      ctx.fillText(t, 14, ch - 14);
+    }
+    if (!entries.length) {
+      const t = "no zones drawn yet - press the Draw button";
+      ctx.fillStyle = "rgba(15,23,42,0.85)";
+      ctx.fillRect(8, 8, ctx.measureText(t).width + 14, 22);
+      ctx.fillStyle = "#fbbf24";
+      ctx.fillText(t, 14, 23);
+    }
+  }
+
+  // Trails first (paths layer) so boxes draw over them.
+  if (d.layer === "paths") {
+    for (const b of d.boxes || []) {
+      if (!Array.isArray(b.trail) || b.trail.length < 2) continue;
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = _trailColor(b.tid || 0);
+      ctx.beginPath();
+      ctx.moveTo(b.trail[0][0] * sx, b.trail[0][1] * sy);
+      for (let i = 1; i < b.trail.length; i++)
+        ctx.lineTo(b.trail[i][0] * sx, b.trail[i][1] * sy);
+      // extend the trail tip to the extrapolated current position
+      ctx.lineTo((b.x1 + b.x2) / 2 * sx + (b.vx || 0) * dtExtra * sx,
+                 (b.y1 + b.y2) / 2 * sy + (b.vy || 0) * dtExtra * sy);
+      ctx.stroke();
+    }
+  }
+
+  // Face rectangles (faces layer) - not tracked, so no extrapolation.
+  if (d.layer === "faces") {
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "rgba(250,204,21,0.95)";
+    for (const f of d.faces || [])
+      ctx.strokeRect(f.x1 * sx, f.y1 * sy,
+                     (f.x2 - f.x1) * sx, (f.y2 - f.y1) * sy);
+    if (d.faces_ok === false) {
+      ctx.fillStyle = "rgba(15,23,42,0.85)";
+      ctx.fillRect(8, 8, 220, 22);
+      ctx.fillStyle = "#fbbf24";
+      ctx.font = "12px system-ui, sans-serif";
+      ctx.fillText("face backend unavailable", 14, 23);
+    }
+  }
+
+  // Boxes - tracker-confirmed only (server filters), extrapolated
+  // forward by track velocity. Pose-ish layers only box people;
+  // body layer only boxes FLAGGED people (matching the server render).
+  ctx.font = "12px system-ui, sans-serif";
+  let alertOn = false;
+  for (const b of d.boxes || []) {
+    const isPose = (d.layer === "pose" || d.layer === "gestures");
+    if (isPose && b.cls !== "person") continue;
+    if (d.layer === "body" && !b.flag) continue;
+    if (d.layer === "gestures" && !b.gestures && !b.kps) continue;
+    const ox = (b.vx || 0) * dtExtra, oy = (b.vy || 0) * dtExtra;
+    const x = (b.x1 + ox) * sx, y = (b.y1 + oy) * sy;
+    const w = (b.x2 - b.x1) * sx, h = (b.y2 - b.y1) * sy;
+    if (x + w < 0 || y + h < 0 || x > cw || y > ch) continue;
+    let color = b.cls === "person"
+      ? "rgba(74,222,128,0.95)" : "rgba(251,146,60,0.95)";
+    let label = `${b.cls} ${Math.round((b.conf || 0) * 100)}%`;
+    if (d.layer === "paths" && b.kmh)
+      label += ` · ${b.kmh} km/h`;
+    if (d.layer === "gestures" && b.gestures)
+      label = `#${b.tid} ${b.gestures.join("+")}`;
+    if (d.layer === "body" && b.flag) {
+      color = b.alert ? "rgba(239,68,68,0.95)" : "rgba(234,140,8,0.95)";
+      label = `#${b.tid} ${String(b.flag).toUpperCase()}`
+        + (b.flags ? " " + b.flags.join("+") : "");
+      if (b.alert) alertOn = true;
+    }
+    if (d.layer === "loiter" && b.dwell != null) {
+      label += ` · ${b.dwell}s in zone`;
+      if ((d.zones || []).some((z) => z.alert)) color = "rgba(239,68,68,0.95)";
+    }
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = color;
+    ctx.strokeRect(x, y, w, h);
+    if (b.kps) _drawSkeleton(ctx, b.kps, sx, sy, ox, oy);
+    const tw = ctx.measureText(label).width + 8;
+    ctx.fillStyle = "rgba(15,23,42,0.85)";
+    ctx.fillRect(x, Math.max(0, y - 16), tw, 16);
+    ctx.fillStyle = "#f8fafc";
+    ctx.fillText(label, x + 4, Math.max(12, y - 4));
+  }
+
+  // Gesture session tally (bottom-left chip, mirrors the JPEG caption).
+  if (d.layer === "gestures" && d.gesture_counts) {
+    const txt = "session: " + Object.entries(d.gesture_counts)
+      .map(([g, n]) => `${g} x${n}`).join(", ");
+    ctx.fillStyle = "rgba(15,23,42,0.85)";
+    ctx.fillRect(8, ch - 30, ctx.measureText(txt).width + 14, 22);
+    ctx.fillStyle = "#f8fafc";
+    ctx.fillText(txt, 14, ch - 14);
+  }
+
+  // Body-anomaly alert: burn a red frame so it can't be missed.
+  if (alertOn) {
+    ctx.lineWidth = 6;
+    ctx.strokeStyle = "rgba(239,68,68,0.9)";
+    ctx.strokeRect(3, 3, cw - 6, ch - 6);
+  }
+}
+
+// COCO-17 keypoint skeleton edges (indices into the kps array).
+const _SKELETON_EDGES = [
+  [5, 7], [7, 9], [6, 8], [8, 10], [5, 6], [5, 11], [6, 12],
+  [11, 12], [11, 13], [13, 15], [12, 14], [14, 16],
+  [0, 5], [0, 6],
+];
+
+function _drawSkeleton(ctx, kps, sx, sy, ox, oy) {
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = "rgba(96,165,250,0.95)";
+  for (const [a, b] of _SKELETON_EDGES) {
+    const p = kps[a], q = kps[b];
+    if (!p || !q || p[2] < 0.3 || q[2] < 0.3) continue;
+    ctx.beginPath();
+    ctx.moveTo((p[0] + ox) * sx, (p[1] + oy) * sy);
+    ctx.lineTo((q[0] + ox) * sx, (q[1] + oy) * sy);
+    ctx.stroke();
+  }
+  ctx.fillStyle = "rgba(219,234,254,0.95)";
+  for (const k of kps) {
+    if (!k || k[2] < 0.3) continue;
+    ctx.beginPath();
+    ctx.arc((k[0] + ox) * sx, (k[1] + oy) * sy, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+const _TRAIL_PALETTE = [
+  "rgba(96,165,250,0.9)", "rgba(74,222,128,0.9)", "rgba(251,146,60,0.9)",
+  "rgba(232,121,249,0.9)", "rgba(250,204,21,0.9)", "rgba(45,212,191,0.9)",
+];
+function _trailColor(tid) {
+  return _TRAIL_PALETTE[Math.abs(tid) % _TRAIL_PALETTE.length];
+}
+
+async function _refreshAnalysisBg(a) {
+  if (!a || !a.bg) return;
+  try {
+    const r = await fetch(
+      `/api/analysis/frame?cam=${encodeURIComponent(a.cam)}&_=${Date.now()}`,
+      { cache: "no-store" });
+    if (r.status !== 200
+        || !(r.headers.get("Content-Type") || "").includes("image")) return;
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    a.bg.src = url;
+    if (a.lastBgUrl) URL.revokeObjectURL(a.lastBgUrl);
+    a.lastBgUrl = url;
+  } catch (_) { /* transient - next tick tries again */ }
+}
+
+function _heatColor(v, alpha) {
+  // v in [0,1]: cold (blue) -> warm (yellow) -> hot (red).
+  const r = Math.round(255 * Math.min(1, v * 2));
+  const g = Math.round(255 * Math.min(1, (1 - Math.abs(v - 0.5) * 2)));
+  const b = Math.round(255 * Math.max(0, 1 - v * 2));
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
 function stopTileAnalysis(st) {
   const a = st.analysis;
   if (!a) return;
   clearInterval(a.timer);
-  if (a.lastUrl) URL.revokeObjectURL(a.lastUrl);
+  if (a.videoStateTimer) clearInterval(a.videoStateTimer);
+  if (a.lastBgUrl) URL.revokeObjectURL(a.lastBgUrl);
   st.analysis = null;
   fetch(`/api/analysis/stop?cam=${encodeURIComponent(a.cam)}`,
         { method: "POST" }).catch(() => {});
@@ -516,10 +1040,7 @@ function stopTileAnalysis(st) {
   const strip = st.tile && st.tile.querySelector(".crossings-strip");
   if (strip) strip.remove();
   if (!st._overlayWasHidden) st.overlay.style.display = "";
-  // Rebuild the live video from the remembered inputs (kept current by
-  // applyGridConfig even while the tile was analyzing).
-  if (st.lastVideoBuild)
-    buildVideoInto(st, st.lastVideoBuild.cfg, st.lastVideoBuild.slot);
+  // Overlay mode never tore down the video, so no rebuild needed.
 }
 
 // Tear down whatever player the tile currently runs (hls.js / YT API /
@@ -1018,7 +1539,7 @@ function attachHls(st, video, cfg) {
                  allowfullscreen loading="lazy"></iframe>`);
   };
   if (window.Hls && window.Hls.isSupported()) {
-    const hls = new window.Hls({ lowLatencyMode: true, liveSyncDuration: 4 });
+    const hls = new window.Hls({ lowLatencyMode: true, liveSyncDuration: 3 });
     hls.loadSource(src);
     hls.attachMedia(video);
     // Kick play() the moment the manifest parses. Chrome allows
@@ -1028,12 +1549,29 @@ function attachHls(st, video, cfg) {
     // on scroll position; the promise-rejection swallow keeps the flow
     // clean when browsers block autoplay in exotic contexts.
     hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
+      st._ytproxyRetries = 0;
       const p = video.play();
       if (p && p.catch) p.catch(() => { /* autoplay blocked; user clicks play */ });
     });
     hls.on(window.Hls.Events.ERROR, (_, data) => {
       if (!data.fatal) return;
       console.warn("hls.js fatal error on", src, data);
+      // /ytproxy sources: googlevideo's signed URLs rotate every few
+      // hours - a rebuild re-asks the server, which re-resolves a fresh
+      // one. Retry FOREVER with exponential backoff (2s..30s): a long
+      // overnight run must survive every rotation, and the server's
+      // negative-cache makes each retry nearly free while the camera
+      // is genuinely down.
+      if (src.startsWith("/ytproxy") && st.lastVideoBuild) {
+        st._ytproxyRetries = (st._ytproxyRetries || 0) + 1;
+        const delay = Math.min(30000,
+                               2000 * Math.pow(2, st._ytproxyRetries - 1));
+        setTimeout(() => {
+          if (st.analysis) return;   // tile switched to analysis meanwhile
+          buildVideoInto(st, st.lastVideoBuild.cfg, st.lastVideoBuild.slot);
+        }, delay);
+        return;
+      }
       fallbackToEmbed();
     });
     st.currentHlsInstance = hls;
@@ -2256,6 +2794,194 @@ async function openLineEditor(cam, snapshotUrl) {
 // Expose so the picker's "Edit line" button can call it.
 window.openLineEditor = openLineEditor;
 
+// -----------------------------------------------------------------------------
+// Zones editor (loiter areas + parking spots)
+// -----------------------------------------------------------------------------
+// Click to drop vertices on the snapshot, "Close polygon" (or double-click)
+// seals the current shape, Save POSTs the full set to /api/zones. Zones of
+// the OTHER kind are preserved untouched - drawing parking spots never
+// clobbers loiter areas and vice versa. A running session hot-reloads the
+// file within a few seconds, no restart.
+
+const zoneEditor = document.createElement("div");
+zoneEditor.style.cssText =
+  "display:none;position:fixed;inset:0;z-index:70;background:rgba(2,6,23,.82);" +
+  "align-items:center;justify-content:center";
+zoneEditor.innerHTML = `
+  <div style="background:#0f172a;border:1px solid #334155;border-radius:12px;
+              padding:16px 18px;max-width:800px;width:94%;color:#e2e8f0">
+    <h3 style="margin:0 0 4px;font-size:17px"><span data-ze-title></span> -
+      <span data-ze-cam></span></h3>
+    <div style="color:#94a3b8;font-size:13px;margin-bottom:10px">
+      Click the snapshot to drop polygon corners; double-click (or the
+      button) closes the shape. Repeat for more zones, then Save.</div>
+    <div style="position:relative;background:#020617;border:1px solid #334155;
+                border-radius:8px;overflow:hidden">
+      <img data-ze-img style="display:block;width:100%;height:auto;
+                              user-select:none;-webkit-user-drag:none">
+      <canvas data-ze-canvas style="position:absolute;inset:0;width:100%;
+                                     height:100%;cursor:crosshair"></canvas>
+    </div>
+    <div data-ze-dwellrow style="margin-top:10px;font-size:13px;color:#cbd5e1">
+      Loiter alert after <input data-ze-dwell type="number" min="5" max="3600"
+        value="30" style="width:70px;background:#1e293b;color:#e2e8f0;
+        border:1px solid #334155;border-radius:6px;padding:3px 6px"> seconds
+      inside a zone.</div>
+    <div data-ze-err style="color:#f87171;font-size:13px;min-height:18px;
+                            margin-top:8px"></div>
+    <div style="display:flex;gap:10px;margin-top:6px;flex-wrap:wrap">
+      <button data-ze-closepoly style="cursor:pointer;background:#334155;
+              border:0;color:#fff;border-radius:8px;padding:7px 14px">
+        Close polygon</button>
+      <button data-ze-undo style="cursor:pointer;background:#334155;border:0;
+              color:#fff;border-radius:8px;padding:7px 14px">Undo point</button>
+      <button data-ze-clear style="cursor:pointer;background:#7f1d1d;border:0;
+              color:#fff;border-radius:8px;padding:7px 14px">Clear all</button>
+      <button data-ze-save style="cursor:pointer;background:#2563eb;border:0;
+              color:#fff;border-radius:8px;padding:7px 18px">Save</button>
+      <button data-ze-cancel style="cursor:pointer;background:#1e293b;
+              border:1px solid #334155;color:#e2e8f0;border-radius:8px;
+              padding:7px 14px">Close</button>
+    </div>
+  </div>`;
+document.body.appendChild(zoneEditor);
+
+const _zeImg = zoneEditor.querySelector("[data-ze-img]");
+const _zeCanvas = zoneEditor.querySelector("[data-ze-canvas]");
+const _zeErr = zoneEditor.querySelector("[data-ze-err]");
+let _zeCam = null, _zeKind = "loiter";
+let _zeZones = [];     // zones of the edited kind (editable)
+let _zeOthers = [];    // zones of the other kind (preserved on save)
+let _zeCurrent = [];   // in-progress polygon, normalized points
+
+function _zeRedraw() {
+  const r = _zeImg.getBoundingClientRect();
+  _zeCanvas.width = Math.max(1, Math.round(r.width));
+  _zeCanvas.height = Math.max(1, Math.round(r.height));
+  const cw = _zeCanvas.width, ch = _zeCanvas.height;
+  const ctx = _zeCanvas.getContext("2d");
+  ctx.clearRect(0, 0, cw, ch);
+  ctx.font = "12px system-ui, sans-serif";
+  for (const z of _zeZones) {
+    ctx.beginPath();
+    ctx.moveTo(z.points[0][0] * cw, z.points[0][1] * ch);
+    for (let i = 1; i < z.points.length; i++)
+      ctx.lineTo(z.points[i][0] * cw, z.points[i][1] * ch);
+    ctx.closePath();
+    ctx.fillStyle = "rgba(74,222,128,0.15)";
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "rgba(74,222,128,0.95)";
+    ctx.stroke();
+    ctx.fillStyle = "#f8fafc";
+    ctx.fillText(z.name || "?",
+                 z.points[0][0] * cw + 4, z.points[0][1] * ch + 14);
+  }
+  if (_zeCurrent.length) {
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "rgba(250,204,21,0.95)";
+    ctx.beginPath();
+    ctx.moveTo(_zeCurrent[0][0] * cw, _zeCurrent[0][1] * ch);
+    for (let i = 1; i < _zeCurrent.length; i++)
+      ctx.lineTo(_zeCurrent[i][0] * cw, _zeCurrent[i][1] * ch);
+    ctx.stroke();
+    ctx.fillStyle = "rgba(250,204,21,0.95)";
+    for (const p of _zeCurrent) {
+      ctx.beginPath();
+      ctx.arc(p[0] * cw, p[1] * ch, 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+function _zeClosePoly() {
+  if (_zeCurrent.length < 3) {
+    _zeErr.textContent = "a polygon needs at least 3 points";
+    return;
+  }
+  const prefix = _zeKind === "parking" ? "P" : "Z";
+  _zeZones.push({
+    kind: _zeKind,
+    name: prefix + (_zeZones.length + 1),
+    points: _zeCurrent.slice(),
+  });
+  _zeCurrent = [];
+  _zeErr.textContent = "";
+  _zeRedraw();
+}
+
+_zeCanvas.addEventListener("click", (e) => {
+  const r = _zeCanvas.getBoundingClientRect();
+  _zeCurrent.push([
+    Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)),
+    Math.min(1, Math.max(0, (e.clientY - r.top) / r.height))]);
+  _zeRedraw();
+});
+_zeCanvas.addEventListener("dblclick", (e) => {
+  e.preventDefault();
+  // The dblclick already delivered two click events for the same spot -
+  // drop the duplicate vertex before sealing.
+  if (_zeCurrent.length >= 2) _zeCurrent.pop();
+  _zeClosePoly();
+});
+zoneEditor.querySelector("[data-ze-closepoly]")
+  .addEventListener("click", _zeClosePoly);
+zoneEditor.querySelector("[data-ze-undo]").addEventListener("click", () => {
+  if (_zeCurrent.length) _zeCurrent.pop();
+  else _zeZones.pop();
+  _zeRedraw();
+});
+zoneEditor.querySelector("[data-ze-clear]").addEventListener("click", () => {
+  _zeZones = []; _zeCurrent = [];
+  _zeRedraw();
+});
+zoneEditor.querySelector("[data-ze-cancel]").addEventListener("click",
+  () => { zoneEditor.style.display = "none"; });
+zoneEditor.querySelector("[data-ze-save]").addEventListener("click",
+  async () => {
+    if (_zeCurrent.length) _zeClosePoly();
+    const dwell = Number(zoneEditor.querySelector("[data-ze-dwell]").value)
+                  || 30;
+    const mine = _zeZones.map((z) => (_zeKind === "loiter"
+      ? { ...z, dwell_s: Math.min(3600, Math.max(5, dwell)) } : z));
+    try {
+      const r = await fetch(`/api/zones?cam=${encodeURIComponent(_zeCam)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ zones: [..._zeOthers, ...mine] }),
+      });
+      if (!r.ok) throw new Error((await r.text()).slice(0, 120));
+      zoneEditor.style.display = "none";
+    } catch (e) {
+      _zeErr.textContent = "save failed: " + e.message;
+    }
+  });
+
+async function openZoneEditor(cam, kind, snapshotUrl) {
+  _zeCam = cam;
+  _zeKind = kind === "parking" ? "parking" : "loiter";
+  _zeCurrent = [];
+  _zeErr.textContent = "";
+  zoneEditor.querySelector("[data-ze-title]").textContent =
+    _zeKind === "parking" ? "Parking spots" : "Loitering zones";
+  zoneEditor.querySelector("[data-ze-cam]").textContent = cam;
+  zoneEditor.querySelector("[data-ze-dwellrow]").style.display =
+    _zeKind === "loiter" ? "" : "none";
+  try {
+    const j = await fetch(`/api/zones?cam=${encodeURIComponent(cam)}`)
+      .then((r) => r.json());
+    const all = Array.isArray(j.zones) ? j.zones : [];
+    _zeZones = all.filter((z) => z.kind === _zeKind);
+    _zeOthers = all.filter((z) => z.kind !== _zeKind);
+    const dz = _zeZones.find((z) => z.dwell_s);
+    if (dz) zoneEditor.querySelector("[data-ze-dwell]").value = dz.dwell_s;
+  } catch (_) { _zeZones = []; _zeOthers = []; }
+  _zeImg.onload = _zeRedraw;
+  _zeImg.src = snapshotUrl;
+  zoneEditor.style.display = "flex";
+  if (_zeImg.complete) _zeRedraw();
+}
+
 // ---- Crossing toast + tile flash ---------------------------------------
 
 const _crossToast = document.createElement("div");
@@ -2486,5 +3212,5 @@ if (LOCAL_MODE) {
     }
   };
   _pollLocalModelView();
-  setInterval(_pollLocalModelView, 10000);
+  setInterval(_pollLocalModelView, 8000);
 }

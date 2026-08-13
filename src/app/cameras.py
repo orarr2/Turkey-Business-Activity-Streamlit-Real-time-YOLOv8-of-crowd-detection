@@ -868,6 +868,75 @@ def _valid_classes(classes) -> bool:
                for c in classes)
 
 
+def _zones_dir() -> Path:
+    """User-drawn analysis zones (src/data/zones/<cam>.json). Same
+    write-from-dashboard / read-from-analysis contract as _lines_dir."""
+    return Path(__file__).resolve().parent.parent / "data" / "zones"
+
+
+ZONE_KINDS = frozenset({"loiter", "parking"})
+
+
+def _valid_zone(z) -> bool:
+    if not isinstance(z, dict):
+        return False
+    if z.get("kind") not in ZONE_KINDS:
+        return False
+    pts = z.get("points")
+    if not (isinstance(pts, list) and len(pts) >= 3
+            and all(isinstance(p, list) and len(p) == 2
+                    and all(isinstance(v, (int, float)) and 0.0 <= v <= 1.0
+                            for v in p)
+                    for p in pts)):
+        return False
+    d = z.get("dwell_s")
+    if d is not None and not (isinstance(d, (int, float)) and 5 <= d <= 3600):
+        return False
+    name = z.get("name")
+    if name is not None and not (isinstance(name, str) and len(name) <= 24):
+        return False
+    return True
+
+
+def resolve_zones(cam_id: str) -> list:
+    """The user-drawn zones for this camera ([] when none / malformed).
+    Malformed files are ignored entry-by-entry - one bad polygon must not
+    take down the good ones."""
+    p = _zones_dir() / f"{cam_id}.json"
+    if not p.exists():
+        return []
+    try:
+        data = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return []
+    zones = data.get("zones")
+    if not isinstance(zones, list):
+        return []
+    return [z for z in zones if _valid_zone(z)]
+
+
+def save_zones(cam_id: str, zones: list) -> None:
+    """Persist the user-drawn zones for one camera (full replace).
+    Raises ValueError on a malformed payload - the API surfaces it as 400."""
+    if not isinstance(zones, list) or len(zones) > 24:
+        raise ValueError("zones must be a list of at most 24 entries")
+    if not all(_valid_zone(z) for z in zones):
+        raise ValueError("invalid zone entry (kind/points/dwell_s/name)")
+    d = _zones_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{cam_id}.json").write_text(
+        json.dumps({"zones": zones, "set_at": time.time()}))
+
+
+def clear_zones(cam_id: str) -> bool:
+    p = _zones_dir() / f"{cam_id}.json"
+    try:
+        p.unlink()
+        return True
+    except OSError:
+        return False
+
+
 def resolve_line(cam_id: str) -> list | None:
     """Return the counting line to use for this camera.
 

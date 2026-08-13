@@ -45,7 +45,10 @@ _SRC_ROOT = Path(__file__).resolve().parent.parent
 
 # The seven analysis layers an operator can run live. "line" is the
 # threshold-crossing layer added in fix 2.
-LIVE_LAYERS = ("paths", "pose", "gestures", "body", "faces", "heat", "line")
+LIVE_LAYERS = ("paths", "pose", "gestures", "body", "faces", "heat", "line",
+               "loiter", "parking")
+DEFAULT_LOITER_DWELL_S = 30.0
+_VEHICLE_CLASSES = ("car", "truck", "bus", "motorcycle", "bicycle")
 LAYER_TITLES = {
     "paths":    "Paths & speeds",
     "pose":     "Pose & skeleton",
@@ -60,6 +63,26 @@ MAX_SESSIONS = 4          # one per grid tile - the fix 2 cap
 IDLE_STOP_S = 60.0        # no client poll this long -> session shuts down
 TICK_TARGET_S = 0.8       # pacing floor between inference ticks
 LIVE_IMGSZ = 640
+
+# ---- overlay display filters (2026-08 accuracy pass) ----------------------
+# Raw single-frame detections flicker: one-tick ghosts, low-conf floaters,
+# and COCO classes that make no sense on a street cam ("train" on a fence).
+# The overlay publishes tracker-CONFIRMED objects instead - seen on at
+# least DISPLAY_MIN_HITS ticks, recent conf at or above DISPLAY_MIN_CONF,
+# class not blacklisted. The analytics accumulators (heat, crossings,
+# counts) still consume every raw detection - display strictness must not
+# starve the statistics.
+DISPLAY_MIN_HITS = 2
+DISPLAY_MIN_CONF = 0.40
+DISPLAY_MAX_MISSES = 1     # allow 1-tick coasting through brief occlusion
+DISPLAY_CLASS_BLACKLIST = {"train", "boat", "airplane"}
+
+# cam_id -> seconds between wall clock and the stream's PROGRAM-DATE-TIME
+# live edge, measured by dashboard_server's /ytproxy manifest handler on
+# every playlist refresh. Lets _publish_data stamp each tick with the
+# capture time in the VIDEO's own clock, so the browser can align boxes
+# with the exact frame the operator is watching.
+STREAM_PDT_OFFSET: dict[str, float] = {}
 JPEG_MAX_W = 960
 JPEG_QUALITY = 80
 TRACK_KEEP = 48           # per-track box history cap (live runs are open-ended)
@@ -454,6 +477,44 @@ def draw_paths_layer(img, tracks, last_boxes: list[dict],
     return _caption(img, [note])
 
 
+def draw_zones_layer(img, entries: list[dict], kind: str):
+    """Polygons + occupancy caption for the loiter / parking layers - the
+    JPEG-fallback rendering; the canvas overlay is the primary view."""
+    import cv2
+    import numpy as np
+    H, W = img.shape[:2]
+    overlay = img.copy()
+    for e in entries:
+        pts = np.array([[int(p[0] * W), int(p[1] * H)]
+                        for p in e["points"]], dtype=np.int32)
+        if kind == "parking":
+            hot = bool(e.get("occupied"))
+            label = f"{e['name']}: {'occupied' if hot else 'free'}"
+        else:
+            hot = bool(e.get("alert"))
+            label = (f"{e['name']}: {e.get('count', 0)} inside"
+                     f", max {int(e.get('max_dwell', 0))}s")
+        color = (0, 0, 220) if hot else (0, 200, 80)
+        cv2.fillPoly(overlay, [pts], color)
+        cv2.polylines(img, [pts], True, color, 2, cv2.LINE_AA)
+        x0, y0 = int(pts[0][0]), int(pts[0][1])
+        cv2.putText(img, label, (x0, max(14, y0 - 6)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1,
+                    cv2.LINE_AA)
+    cv2.addWeighted(overlay, 0.18, img, 0.82, 0, img)
+    if not entries:
+        note = (f"{'Parking' if kind == 'parking' else 'Zone & loitering'}"
+                " - nothing drawn yet (use the Draw zones button)")
+    elif kind == "parking":
+        occ = sum(1 for e in entries if e.get("occupied"))
+        note = f"Parking - {occ}/{len(entries)} occupied"
+    else:
+        note = (f"Zone & loitering - "
+                f"{sum(e.get('count', 0) for e in entries)} inside, "
+                f"{sum(1 for e in entries if e.get('alert'))} alert(s)")
+    return _caption(img, [note])
+
+
 def draw_pose_layer(img, boxes: list[dict]):
     """Skeletons ONLY, on people close enough for the per-crop pose pass.
     No detection boxes, no vehicles - fix 2's core layer-correctness
@@ -619,6 +680,206 @@ def draw_line_layer(img, line: list, cross: dict):
 # The live session.
 # ---------------------------------------------------------------------------
 
+def _pt_in_poly(x: float, y: float, pts: list) -> bool:
+    """Ray-casting point-in-polygon on normalized coords."""
+    inside = False
+    j = len(pts) - 1
+    for i in range(len(pts)):
+        xi, yi = pts[i][0], pts[i][1]
+        xj, yj = pts[j][0], pts[j][1]
+        if ((yi > y) != (yj > y)) and \
+                (x < (xj - xi) * (y - yi) / (yj - yi + 1e-12) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
+class _InferBatcher(threading.Thread):
+    """Coalesces concurrent sessions' YOLO requests into one batched call.
+
+    With N sessions free-running behind INFER_LOCK each session ticked
+    every N x 1.4 s (measured: 4 cams -> a new frame every 5-8 s). Here a
+    session hands its frame in and blocks; the batcher waits a short
+    COLLECT_S for the other active sessions (they pace off the same
+    previous round, so after one round they arrive nearly together), then
+    runs detect_with_boxes_batch once and fans the per-frame results
+    back. Single-session cost: +COLLECT_S. Four-session cost: one
+    batch-of-4 forward (~2.5x single) instead of 4x serial.
+    """
+
+    COLLECT_S = 0.10
+
+    def __init__(self):
+        super().__init__(daemon=True, name="live-infer-batcher")
+        self._lock = threading.Lock()
+        self._reqs: list[dict] = []
+        self._wake = threading.Event()
+        self.start()
+
+    def infer(self, model, frame, conf: float, gates: dict) -> list[dict]:
+        req = {"model": model, "frame": frame, "conf": conf,
+               "gates": gates, "done": threading.Event(),
+               "out": None, "err": None}
+        with self._lock:
+            self._reqs.append(req)
+        self._wake.set()
+        req["done"].wait(timeout=90)
+        if req["err"] is not None:
+            raise req["err"]
+        return req["out"] or []
+
+    def run(self) -> None:
+        from app.detect_core import detect_with_boxes_batch
+        while True:
+            self._wake.wait()
+            time.sleep(self.COLLECT_S)
+            with self._lock:
+                batch, self._reqs = self._reqs, []
+                self._wake.clear()
+            if not batch:
+                continue
+            try:
+                with INFER_LOCK:
+                    outs = detect_with_boxes_batch(
+                        batch[0]["model"],
+                        [r["frame"] for r in batch],
+                        imgsz=LIVE_IMGSZ,
+                        per_class_conf_list=[r["gates"] for r in batch],
+                        conf_list=[r["conf"] for r in batch])
+                for r, (_counts, boxes) in zip(batch, outs):
+                    r["out"] = boxes
+            except Exception as e:  # noqa: BLE001 - deliver, don't die
+                for r in batch:
+                    r["err"] = e
+            finally:
+                for r in batch:
+                    r["done"].set()
+
+
+BATCHER = _InferBatcher()
+
+
+class _StreamReader(threading.Thread):
+    """Continuously tracks the live edge of one direct-HLS stream.
+
+    The old per-tick path opened a fresh cv2.VideoCapture for every
+    analyzed frame - measured at 1.0-2.1 s per open on the operator's
+    laptop, which alone made a ~2.5 s floor between analysis updates.
+    This thread opens the capture ONCE, then grab()s every source frame
+    (decode-only, no BGR conversion - the cheap half of read()) to stay
+    pinned to the live edge, and retrieve()s a full frame a few times a
+    second into `latest`. The analysis tick takes the newest frame
+    instantly instead of paying the open cost again and again.
+    """
+
+    RETRIEVE_EVERY = 6      # ~4 fresh BGR frames/s at a 25 fps source
+
+    def __init__(self, url: str):
+        super().__init__(daemon=True, name="live-analysis-reader")
+        self.url = url
+        self.lock = threading.Lock()
+        self.stop_event = threading.Event()
+        self.latest = None          # newest BGR frame (ndarray)
+        self.latest_ts = 0.0
+        self.dead = False
+
+    def run(self) -> None:
+        from app.detect_core import _open_cap   # applies ffmpeg timeouts
+        cap = _open_cap(self.url)
+        if not cap.isOpened():
+            self.dead = True
+            return
+        n = 0
+        try:
+            while not self.stop_event.is_set():
+                if not cap.grab():
+                    # Live edge starved or the signed manifest rotated:
+                    # one in-place reopen attempt, then declare dead and
+                    # let LiveSession._grab rebuild us on a fresh URL.
+                    cap.release()
+                    time.sleep(0.5)
+                    cap = _open_cap(self.url)
+                    if not cap.isOpened() or not cap.grab():
+                        self.dead = True
+                        return
+                n += 1
+                if n % self.RETRIEVE_EVERY == 0:
+                    ok, frame = cap.retrieve()
+                    if ok and frame is not None:
+                        with self.lock:
+                            self.latest = frame
+                            self.latest_ts = time.time()
+        finally:
+            cap.release()
+
+    def snapshot(self):
+        self.last_used = time.time()
+        with self.lock:
+            return self.latest
+
+    def snapshot_wait(self, timeout: float = 8.0):
+        """snapshot(), but block up to `timeout` for the FIRST frame of a
+        freshly-started reader instead of returning None."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            fr = self.snapshot()
+            if fr is not None or self.dead:
+                return fr
+            time.sleep(0.1)
+        return self.snapshot()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+
+
+# ---- Shared reader pool ----------------------------------------------------
+# ONE persistent live-edge reader per camera, shared by every consumer:
+# live-analysis sessions AND local_producers' KPI rounds. Before the pool,
+# producers re-opened the HLS stream from scratch every 8 s round (measured
+# 1-2 s per open, times four cams) while the sessions each held their own
+# open reader for the very same streams - double infrastructure that
+# saturated the CPU and slowed everyone's ticks. Readers idle-stop after
+# _READER_IDLE_STOP_S without a snapshot() so an unwatched camera doesn't
+# decode forever.
+
+_READER_POOL: dict[str, _StreamReader] = {}
+_READER_POOL_LOCK = threading.Lock()
+_READER_IDLE_STOP_S = 180.0
+
+
+def get_shared_reader(cam: dict, cam_id: str):
+    """The pool's reader for this camera, (re)built as needed.
+
+    Returns None for header-required hosts (tvkur/ibb/skyline) - those
+    can't ride a plain VideoCapture and keep their per-tick segment path.
+    Raises when the stream can't be resolved (caller counts the failure;
+    resolve_stream's negative cache keeps the retry cost near zero).
+    """
+    from app.detect_core import HEADER_HOSTS, resolve_stream
+    url = resolve_stream(cam)
+    if any(h in url for h in HEADER_HOSTS):
+        return None
+    now = time.time()
+    with _READER_POOL_LOCK:
+        # Idle-stop readers nobody snapshots anymore.
+        for key, r in list(_READER_POOL.items()):
+            if key != cam_id and now - getattr(r, "last_used", now) \
+                    > _READER_IDLE_STOP_S:
+                r.stop()
+                _READER_POOL.pop(key, None)
+        r = _READER_POOL.get(cam_id)
+        stale = (r is not None and r.latest is not None
+                 and now - r.latest_ts > 10)
+        if r is None or r.dead or not r.is_alive() or r.url != url or stale:
+            if r is not None:
+                r.stop()
+            r = _StreamReader(url)
+            r.last_used = now
+            r.start()
+            _READER_POOL[cam_id] = r
+        return r
+
+
 class LiveSession(threading.Thread):
     """One camera's live analysis: stream -> detect -> track -> layer."""
 
@@ -634,6 +895,12 @@ class LiveSession(threading.Thread):
         self.stop_event = threading.Event()
         self.lock = threading.Lock()  # guards latest/seq/note
         self.latest: bytes | None = None
+        # Structured snapshot for the canvas-overlay renderer. The
+        # frontend fetches this every ~800 ms and draws boxes/heat/line
+        # on a canvas positioned over the live iframe, so the video
+        # stays 25 fps while the analysis overlay ticks at YOLO's pace.
+        # Same PID as the poll handler, so a plain dict is safe.
+        self.latest_data: dict | None = None
         self.seq = 0
         self.note = "starting stream..."
         self.err: str | None = None
@@ -647,10 +914,17 @@ class LiveSession(threading.Thread):
         # effect within LINE_RELOAD_POLL_S seconds without restart.
         from app.cameras import resolve_line as _resolve_line
         from app.cameras import resolve_line_classes as _resolve_classes
-        self.line = _resolve_line(cam_id) or cam.get("line") or DEFAULT_LINE
-        self.line_classes = _resolve_classes(cam_id)
+        from app.cameras import resolve_zones as _resolve_zones
+        self.line = _resolve_line(self.cam_id) or cam.get("line") or DEFAULT_LINE
+        self.line_classes = _resolve_classes(self.cam_id)
         self._line_mtime = self._line_json_mtime()
         self._next_line_check = time.time() + LINE_RELOAD_POLL_S
+        # User-drawn zones (loiter areas + parking spots) - same hot-reload
+        # contract as the counting line.
+        self.zones = _resolve_zones(self.cam_id)
+        self._zones_mtime = self._zones_json_mtime()
+        self._next_zones_check = time.time() + LINE_RELOAD_POLL_S
+        self._zone_since: dict[tuple, float] = {}   # (tid, zone_idx) -> t0
         self.cross = {"in": 0, "out": 0}
         self._line_sides: dict[int, float] = {}
         self._last_cross_ts: dict[int, float] = {}
@@ -689,6 +963,7 @@ class LiveSession(threading.Thread):
                 self._accumulate(frame, boxes, now)
                 img = self._render(frame, faces_list, layer)
                 self._publish(img)
+                self._publish_data(frame.shape, boxes, layer, faces_list)
                 dt = time.time() - t0
                 wait = max(0.0, TICK_TARGET_S - dt)
                 if wait and self.stop_event.wait(wait):
@@ -697,17 +972,46 @@ class LiveSession(threading.Thread):
             self.err = f"{type(e).__name__}: {e}"
             self._publish_note(f"analysis stopped: {self.err}")
             print(f"live-analysis {self.cam_id}: crashed ({self.err})")
+        # No reader cleanup here: readers live in the shared pool now and
+        # idle-stop on their own when nothing snapshots them anymore.
 
     # -- pipeline stages ---------------------------------------------------
 
     def _grab(self):
-        from app.detect_core import grab_frame, invalidate_stream, resolve_stream
+        from app.detect_core import (HEADER_HOSTS, grab_frame,
+                                     invalidate_stream, resolve_stream)
         try:
             url = resolve_stream(self.cam)
         except Exception:
             self._fail += 1
             return None
-        frame = grab_frame(url)
+        # Header-required hosts (tvkur, ibb, skyline) can't ride a plain
+        # persistent VideoCapture - every segment request needs Referer/
+        # Origin headers - so they keep the old per-tick segment path.
+        if any(h in url for h in HEADER_HOSTS):
+            frame = grab_frame(url)
+            if frame is None:
+                self._fail += 1
+                if self._fail % GRAB_FAIL_REFRESH == 0:
+                    invalidate_stream(self.cam_id)
+            else:
+                self._fail = 0
+                self._last_frame_ts = time.time()
+            return frame
+        try:
+            r = get_shared_reader(self.cam, self.cam_id)
+        except Exception:
+            self._fail += 1
+            return None
+        if r is None:      # header host slipped through - segment path
+            return grab_frame(url)
+        frame = r.snapshot_wait(timeout=4.0)
+        # A reader whose frames stopped aging forward is wedged (stalled
+        # stream that still holds its last decode) - rebuild next tick.
+        if frame is not None and time.time() - r.latest_ts > 10:
+            r.stop()
+            r.dead = True
+            frame = None
         if frame is None:
             self._fail += 1
             if self._fail % GRAB_FAIL_REFRESH == 0:
@@ -715,16 +1019,16 @@ class LiveSession(threading.Thread):
                 invalidate_stream(self.cam_id)
         else:
             self._fail = 0
+            self._last_frame_ts = r.latest_ts
         return frame
 
     def _infer(self, frame) -> list[dict]:
-        from app.detect_core import (DEFAULT_PER_CLASS_CONF,
-                                     detect_with_boxes, filter_boxes_roi)
+        from app.detect_core import DEFAULT_PER_CLASS_CONF, filter_boxes_roi
         gates = dict(self.cam.get("per_class_conf") or DEFAULT_PER_CLASS_CONF)
-        with INFER_LOCK:
-            _c, boxes = detect_with_boxes(
-                self.model, frame, conf=self.cam.get("conf", 0.30),
-                imgsz=LIVE_IMGSZ, per_class_conf=gates)
+        # All sessions funnel through the batcher: concurrent ticks share
+        # one batched forward pass instead of queueing on INFER_LOCK.
+        boxes = BATCHER.infer(self.model, frame,
+                              self.cam.get("conf", 0.30), gates)
         if (self.cam.get("roi") or self.cam.get("roi_exclude")
                 or self.cam.get("roi_exclude_class")):
             boxes = filter_boxes_roi(boxes, frame.shape, self.cam.get("roi"),
@@ -741,7 +1045,40 @@ class LiveSession(threading.Thread):
         from app import faces as _faces
         if self._faces_ok is None:
             self._faces_ok = _faces.available()
-        return _faces.detect_faces(frame) if self._faces_ok else []
+        if not self._faces_ok:
+            return []
+        out = _faces.detect_faces(frame)
+        # Night frames made the raw detector spray hundreds of noise
+        # rects (measured 440 on one tick) - a conf floor, a minimum
+        # size and a hard cap keep both the render and the JSON sane.
+        out = [f for f in out
+               if float(f.get("conf") or 0) >= 0.6
+               and (f["x2"] - f["x1"]) >= 8 and (f["y2"] - f["y1"]) >= 8]
+        out.sort(key=lambda f: -float(f.get("conf") or 0))
+        return out[:32]
+
+    def _zones_json_mtime(self) -> float | None:
+        from app.cameras import _zones_dir
+        p = _zones_dir() / f"{self.cam_id}.json"
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return None
+
+    def _maybe_reload_zones(self, now: float) -> None:
+        """Hot-reload user-drawn zones on the same cadence as the line.
+        The dwell clocks restart on an edit (indices may have shifted);
+        occupancy recovers within one tick."""
+        if now < self._next_zones_check:
+            return
+        self._next_zones_check = now + LINE_RELOAD_POLL_S
+        mtime = self._zones_json_mtime()
+        if mtime == self._zones_mtime:
+            return
+        self._zones_mtime = mtime
+        from app.cameras import resolve_zones as _resolve_zones
+        self.zones = _resolve_zones(self.cam_id)
+        self._zone_since.clear()
 
     def _line_json_mtime(self) -> float | None:
         """Current mtime of data/lines/<cam>.json, or None when the file
@@ -800,6 +1137,7 @@ class LiveSession(threading.Thread):
             self.heat_since = now
         bump_heat(self.heat, boxes, frame_shape, w)
         self._maybe_reload_line(now)
+        self._maybe_reload_zones(now)
         # Persist an event per crossing (bounded JSONL + optional snap).
         # The dashboard's Line layer polls /api/crossings?cam=<id> for the
         # toast + history strip. Frame is passed so the crop of the mover
@@ -871,7 +1209,72 @@ class LiveSession(threading.Thread):
             return draw_heat_layer(img, self.heat, since=self.heat_since)
         if layer == "line":
             return draw_line_layer(img, self.line, self.cross)
+        if layer in ("loiter", "parking"):
+            lo, pk, _dwell = self._zone_stats(frame.shape)
+            return draw_zones_layer(img, lo if layer == "loiter" else pk,
+                                    layer)
         return img
+
+    def _zone_stats(self, frame_shape):
+        """Occupancy + dwell for loiter zones, occupancy for parking spots,
+        computed from the tracker's confirmed tracks. Cached per tick
+        (keyed on the frame's capture stamp) so the JPEG render and the
+        JSON publish share ONE computation instead of walking every
+        track against every polygon twice."""
+        key = getattr(self, "_last_frame_ts", None)
+        if key is not None and getattr(self, "_zone_cache_key", None) == key:
+            return self._zone_cache
+        H, W = int(frame_shape[0]), int(frame_shape[1])
+        now_t = time.time()
+        loiter, parking = [], []
+        for zi, z in enumerate(self.zones or []):
+            entry = {"name": z.get("name") or f"Z{zi + 1}",
+                     "points": z["points"]}
+            if z.get("kind") == "parking":
+                entry.update(occupied=False, cls=None)
+                parking.append((zi, entry))
+            else:
+                entry.update(count=0, max_dwell=0.0, alert=False,
+                             dwell_s=float(z.get("dwell_s")
+                                           or DEFAULT_LOITER_DWELL_S))
+                loiter.append((zi, entry))
+        dwell_by_tid: dict[int, float] = {}
+        active: set[tuple] = set()
+        for tr in (self.tracker.open if self.tracker else []):
+            if tr.misses > DISPLAY_MAX_MISSES or tr.hits < DISPLAY_MIN_HITS:
+                continue
+            b = tr.boxes[-1]
+            if tr.cls == "person" and loiter:
+                cx = ((b["x1"] + b["x2"]) / 2) / W
+                by = b["y2"] / H            # feet, not head
+                for zi, e in loiter:
+                    if _pt_in_poly(cx, by, e["points"]):
+                        key = (tr.tid, zi)
+                        active.add(key)
+                        dw = now_t - self._zone_since.setdefault(key, now_t)
+                        e["count"] += 1
+                        e["max_dwell"] = max(e["max_dwell"], dw)
+                        if dw >= e["dwell_s"]:
+                            e["alert"] = True
+                        dwell_by_tid[tr.tid] = max(
+                            dwell_by_tid.get(tr.tid, 0.0), dw)
+            if tr.cls in _VEHICLE_CLASSES and parking:
+                cx = ((b["x1"] + b["x2"]) / 2) / W
+                cy = ((b["y1"] + b["y2"]) / 2) / H
+                for zi, e in parking:
+                    if not e["occupied"] and _pt_in_poly(cx, cy,
+                                                         e["points"]):
+                        e["occupied"] = True
+                        e["cls"] = tr.cls
+        # Drop clocks of tracks that left their zone (or died) so a
+        # RETURN starts a fresh dwell instead of resuming the old one.
+        self._zone_since = {k: v for k, v in self._zone_since.items()
+                            if k in active}
+        result = ([e for _, e in loiter], [e for _, e in parking],
+                  dwell_by_tid)
+        self._zone_cache_key = key
+        self._zone_cache = result
+        return result
 
     def _publish(self, img) -> None:
         import cv2
@@ -890,6 +1293,142 @@ class LiveSession(threading.Thread):
     def _publish_note(self, note: str) -> None:
         with self.lock:
             self.note = note
+
+    def _publish_data(self, frame_shape, boxes, layer: str,
+                      faces_list: list[dict] | None = None) -> None:
+        """Snapshot the just-inferred tick as JSON for the overlay canvas.
+
+        Boxes come from the TRACKER, not the raw detections: only objects
+        confirmed across DISPLAY_MIN_HITS ticks are published, each with
+        its track id and centroid velocity (px/s) so the client can
+        extrapolate positions between ticks and glide boxes with the
+        video instead of letting them sit on vacated pixels. `at` is the
+        capture time translated into the stream's PROGRAM-DATE-TIME clock
+        (when known), which is the clock hls.js reports for the frame the
+        operator is currently watching.
+        """
+        H, W = int(frame_shape[0]), int(frame_shape[1])
+        js_boxes = []
+        for tr in (self.tracker.open if self.tracker else []):
+            last = tr.boxes[-1]
+            conf = max(float(b.get("conf") or 0) for b in tr.boxes[-2:])
+            if (tr.hits < DISPLAY_MIN_HITS
+                    or tr.misses > DISPLAY_MAX_MISSES
+                    or conf < DISPLAY_MIN_CONF
+                    or (tr.cls or "?") in DISPLAY_CLASS_BLACKLIST):
+                continue
+            jb = {
+                "tid": tr.tid,
+                "x1": int(last.get("x1", 0)),
+                "y1": int(last.get("y1", 0)),
+                "x2": int(last.get("x2", 0)),
+                "y2": int(last.get("y2", 0)),
+                "cls": tr.cls or "?",
+                "conf": round(conf, 3),
+                "vx": round(float(tr.vx), 1),
+                "vy": round(float(tr.vy), 1),
+            }
+            # Layer-specific extras ride on each box so the canvas can
+            # draw the REAL layer, not just generic rectangles - this
+            # was the "analysis is not logically right" gap: trails,
+            # skeletons, gesture chips and anomaly flags existed only
+            # inside the server-rendered JPEG.
+            if layer == "paths":
+                jb["trail"] = [
+                    [int((b["x1"] + b["x2"]) / 2),
+                     int((b["y1"] + b["y2"]) / 2)]
+                    for b in tr.boxes[-12:]]
+                try:
+                    from app.behavior import track_stats
+                    row = track_stats(tr.cls, tr.boxes, tr.times,
+                                      frame_shape)
+                    if row.get("kmh_est"):
+                        jb["kmh"] = row["kmh_est"]
+                except Exception:
+                    pass
+            elif layer in ("pose", "gestures", "body"):
+                kps = last.get("kps")
+                if kps:
+                    jb["kps"] = [[int(k[0]), int(k[1]), round(k[2], 2)]
+                                 for k in kps]
+                if layer == "gestures" and tr.cls == "person":
+                    try:
+                        from app.gestures import detect_gestures
+                        kseq = [b.get("kps") for b in tr.boxes[-16:]]
+                        if any(kseq):
+                            g = detect_gestures(kseq)
+                            if g:
+                                jb["gestures"] = g
+                    except Exception:
+                        pass
+                if layer == "body" and tr.cls == "person":
+                    try:
+                        from app.behavior import track_stats
+                        from app.behavior_labels import label_track
+                        row = track_stats(tr.cls, tr.boxes, tr.times,
+                                          frame_shape)
+                        kseq = [b.get("kps") for b in tr.boxes[-16:]]
+                        row.update(label_track(row, frame_shape,
+                                               kseq if any(kseq) else None))
+                        if (row.get("label") in BODY_ANOMALY_LABELS
+                                or row.get("pose_flags")):
+                            jb["flag"] = row.get("label") or ""
+                            jb["alert"] = bool(row.get("alert"))
+                            flags = [f for f in (row.get("pose_flags") or [])
+                                     if f and f != row.get("label")]
+                            if flags:
+                                jb["flags"] = flags
+                    except Exception:
+                        pass
+            js_boxes.append(jb)
+        cap_ts = getattr(self, "_last_frame_ts", None) or time.time()
+        pdt_off = STREAM_PDT_OFFSET.get(self.cam_id, 3.0)
+        data: dict = {
+            "seq": self.seq + 1,        # matches _publish's post-bump seq
+            "layer": layer,
+            "frame_w": W,
+            "frame_h": H,
+            # capture time on the video's own clock; clamp the measured
+            # ingest offset to something sane so one bad manifest parse
+            # can't shove every box seconds off.
+            "at": round(cap_ts - min(15.0, max(0.0, pdt_off)), 3),
+            "boxes": js_boxes,
+            "person": sum(1 for b in (boxes or [])
+                          if b.get("cls") == "person"),
+            "vehicles": sum(1 for b in (boxes or [])
+                            if b.get("cls") in ("car", "truck", "bus",
+                                                "motorcycle", "bicycle")),
+        }
+        if layer == "heat":
+            data["heat"] = self.heat
+        if layer == "line":
+            data["line"] = self.line
+            data["cross"] = dict(self.cross)
+        if layer == "gestures" and self.gesture_counts:
+            data["gesture_counts"] = dict(self.gesture_counts)
+        if layer in ("loiter", "parking"):
+            lo, pk, dwell_by_tid = self._zone_stats(frame_shape)
+            if layer == "loiter":
+                data["zones"] = [{**e, "max_dwell": int(e["max_dwell"])}
+                                 for e in lo]
+                for jb in js_boxes:
+                    if (jb["cls"] == "person"
+                            and jb["tid"] in dwell_by_tid):
+                        jb["dwell"] = int(dwell_by_tid[jb["tid"]])
+            else:
+                data["spots"] = pk
+                data["parking"] = {
+                    "total": len(pk),
+                    "occupied": sum(1 for e in pk if e["occupied"])}
+        if layer == "faces":
+            data["faces"] = [
+                {"x1": int(f["x1"]), "y1": int(f["y1"]),
+                 "x2": int(f["x2"]), "y2": int(f["y2"]),
+                 "conf": round(float(f.get("conf") or 0), 2)}
+                for f in (faces_list or [])]
+            data["faces_ok"] = bool(self._faces_ok)
+        with self.lock:
+            self.latest_data = data
 
 
 # ---------------------------------------------------------------------------
@@ -953,6 +1492,32 @@ class LiveAnalysisManager:
         s.last_poll = time.time()
         with s.lock:
             return {"jpeg": s.latest, "seq": s.seq, "layer": s.layer,
+                    "note": s.note}
+
+    def any_alive(self) -> bool:
+        """True while at least one session thread is actually running.
+        local_producers reads this to yield the CPU during analysis;
+        thread state (not a bookkeeping set) means an idle-timed-out
+        session releases the pause automatically."""
+        with self._lock:
+            return any(s.is_alive() for s in self._sessions.values())
+
+    def data(self, cam_id: str) -> dict | None:
+        """Same idle-clock refresh as frame(), but returns the JSON snapshot
+        used by the canvas-overlay renderer instead of the annotated JPEG."""
+        with self._lock:
+            s = self._sessions.get(cam_id)
+            if s is None:
+                err = self._errors.pop(cam_id, None)
+                return {"error": err} if err else None
+            if not s.is_alive():
+                self._sessions.pop(cam_id, None)
+                self._remember_error_locked(cam_id, s.err
+                                            or "session ended unexpectedly")
+                return {"error": self._errors.pop(cam_id, None)}
+        s.last_poll = time.time()
+        with s.lock:
+            return {"data": s.latest_data, "seq": s.seq, "layer": s.layer,
                     "note": s.note}
 
     def stop(self, cam_id: str) -> bool:
