@@ -128,6 +128,9 @@ for (const slot of GRID_SLOTS) {
         <div class="city" data-cam-area>${escapeHtml(slot.display_area)}</div>
       </div>
       <div class="tile-head-right">
+        <button class="analyze-btn" data-analyze
+                title="Live advanced analysis - pick one layer for this camera"
+                style="cursor:pointer;border:1px solid #334155;background:#1e293b;color:#e2e8f0;border-radius:6px;padding:2px 8px;font-size:13px">🔬</button>
         <span class="activity-badge act-unknown" data-activity>
           <span class="dot"></span><span data-activity-text>-/10</span>
         </span>
@@ -196,8 +199,18 @@ for (const slot of GRID_SLOTS) {
     { active_hls: slot.placeholder_hls, active_embed: slot.placeholder_embed,
       active_page: slot.placeholder_page },
     slot);
-  tile.querySelector("[data-analyze]").addEventListener("click", () =>
-    openAnalysisPicker(tileState[slot.slot_id]));
+  // Per-tile 🔬 advanced-analysis button (restored on top of 27bced9 baseline).
+  // The 27bced9 commit removed the button from the tile template but left this
+  // event-binding line intact; the resulting null.addEventListener() threw and
+  // aborted the tile-render loop after the first tile - hence the "only 1
+  // camera appears" symptom. The template now carries the button back, and
+  // the null-guard here prevents any future template drift from breaking the
+  // whole grid the same way.
+  const _analyzeBtn = tile.querySelector("[data-analyze]");
+  if (_analyzeBtn) {
+    _analyzeBtn.addEventListener("click", () =>
+      openAnalysisPicker(tileState[slot.slot_id]));
+  }
 }
 
 // ---------- 1b0. Private-backend probe (fix 2) --------------------------------
