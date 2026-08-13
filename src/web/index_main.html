@@ -47,9 +47,57 @@
     main[data-active-tab="search"]    > [data-tab]:not([data-tab="search"]),
     main[data-active-tab="quality"]   > [data-tab]:not([data-tab="quality"]),
     main[data-active-tab="rl"]        > [data-tab]:not([data-tab="rl"]),
+    main[data-active-tab="advanced"]  > [data-tab]:not([data-tab="advanced"]),
     main[data-active-tab="snapshots"] > [data-tab]:not([data-tab="snapshots"]) {
       display: none !important;
     }
+
+    /* Advanced Analysis tab (2026-08-13): the operator picks one of the four
+       grid cameras + one of the seven analysis layers, and the heavy live
+       session runs in place inside this tab. Only one session at a time -
+       the four grid tiles keep showing the ModelViewProducer's annotated
+       frames + Activity Index badges, unencumbered by advanced analyses. */
+    .adv-wrap { max-width: 1200px; margin: 0 auto; padding: 4px 0 20px; }
+    .adv-wrap h2 { margin: 0 0 6px; }
+    .adv-wrap .sub { color: #8b909a; font-size: 13px; margin-bottom: 16px; }
+    .adv-step { background: #171a21; border: 1px solid #232733; border-radius: 10px;
+                padding: 16px 18px; margin-top: 12px; }
+    .adv-step h3 { margin: 0 0 12px; font-size: 15px; color: #cbd5e1; }
+    .adv-cams { display: grid; grid-template-columns: repeat(auto-fill,minmax(220px,1fr));
+                gap: 10px; }
+    .adv-cams button { background: #1e293b; color: #e2e8f0; border: 1px solid #334155;
+                border-radius: 8px; padding: 12px 14px; text-align: left; cursor: pointer;
+                font-size: 13px; }
+    .adv-cams button:hover { background: #263449; border-color: #4b5563; }
+    .adv-cams button .name { font-weight: 600; font-size: 14px; display: block;
+                margin-bottom: 4px; }
+    .adv-cams button .slot { color: #8b909a; font-size: 11px; text-transform: uppercase;
+                letter-spacing: 0.05em; }
+    .adv-layers { display: grid; grid-template-columns: repeat(auto-fill,minmax(180px,1fr));
+                gap: 8px; }
+    .adv-layers button { background: #1e293b; color: #e2e8f0; border: 1px solid #334155;
+                border-radius: 8px; padding: 10px 12px; cursor: pointer; font-size: 13px; }
+    .adv-layers button:hover { background: #263449; border-color: #4b5563; }
+    .adv-picked-cam { color: #94a3b8; font-size: 12px; margin: -4px 0 12px;
+                padding: 6px 10px; background: #0f172a; border-radius: 6px;
+                border: 1px solid #232733; }
+    .adv-back, .adv-stop { background: none; border: 1px solid #334155; color: #94a3b8;
+                border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 12px;
+                margin-top: 12px; }
+    .adv-back:hover, .adv-stop:hover { color: #e2e8f0; border-color: #64748b; }
+    .adv-stop { background: rgba(239,68,68,0.15); color: #fca5a5; border-color: rgba(239,68,68,0.4);
+                margin-top: 0; }
+    .adv-header { display: flex; justify-content: space-between; align-items: center;
+                margin-bottom: 12px; }
+    .adv-header h3 { margin: 0; }
+    .adv-viewport { position: relative; background: #000; border-radius: 8px;
+                overflow: hidden; aspect-ratio: 16/9; }
+    .adv-viewport img { width: 100%; height: 100%; object-fit: contain; display: block; }
+    .adv-viewport canvas { position: absolute; inset: 0; width: 100%; height: 100%;
+                pointer-events: none; }
+    .adv-status { color: #94a3b8; font-size: 12px; margin-top: 10px;
+                font-family: monospace; min-height: 18px; }
+    .adv-status.err { color: #fca5a5; }
 
     /* Live-analysis canvas overlay: kept on TOP of the tile's <video> so
        the HLS stream continues at native fps while the analysis paints
@@ -618,6 +666,7 @@
        subscriptions keep running); tabs only control visibility. -->
   <nav class="tabbar" id="tabbar">
     <button data-tab-btn="analysis" class="on">Analysis</button>
+    <button data-tab-btn="advanced">Advanced Analysis</button>
     <button data-tab-btn="search">Search</button>
     <button data-tab-btn="quality">Model quality</button>
     <button data-tab-btn="rl">Reinforcement learning</button>
@@ -1135,6 +1184,53 @@ alerting one, else the largest person in view">
       </div>
       <div class="snap-grid" id="snap-grid"></div>
     </div>
+
+    <!-- Advanced Analysis tab: three-step flow (camera -> layer -> run).
+         Only ONE session runs across the whole grid (MAX_SESSIONS=1 in
+         live_analysis.py). The four grid tiles are unaffected; they keep
+         showing the ModelViewProducer's annotated frames + Activity Index
+         badges. Populated by the initAdvancedAnalysis IIFE in app.js. -->
+    <section class="adv-wrap" data-tab="advanced">
+      <h2>Advanced Analysis</h2>
+      <div class="sub">Choose one of your four picked cameras + one analysis
+        layer. The heavy live analysis runs on your laptop; only one at a
+        time is supported so the CPU can produce smooth results.</div>
+
+      <div class="adv-step" data-adv-step="cam">
+        <h3>1. Pick a camera</h3>
+        <div class="adv-cams" id="adv-cams">
+          <div style="color:#94a3b8;font-size:12px">waiting for the notebook's
+            picker to write local_grid.json...</div>
+        </div>
+      </div>
+
+      <div class="adv-step" data-adv-step="layer" style="display:none">
+        <h3>2. Pick an analysis</h3>
+        <div class="adv-picked-cam" id="adv-picked-cam"></div>
+        <div class="adv-layers">
+          <button data-adv-layer="paths">Paths &amp; speeds</button>
+          <button data-adv-layer="pose">Pose &amp; skeleton</button>
+          <button data-adv-layer="gestures">Hand gestures</button>
+          <button data-adv-layer="body">Body anomalies</button>
+          <button data-adv-layer="faces">Face detection</button>
+          <button data-adv-layer="heat">Heat vision</button>
+          <button data-adv-layer="line">Line crossing</button>
+        </div>
+        <button class="adv-back" data-adv-back="cam">&larr; back to cameras</button>
+      </div>
+
+      <div class="adv-step" data-adv-step="run" style="display:none">
+        <div class="adv-header">
+          <h3 id="adv-run-title">Running...</h3>
+          <button class="adv-stop" data-adv-stop>&#9632; stop &amp; back</button>
+        </div>
+        <div class="adv-viewport">
+          <img id="adv-frame" alt="live analyzed frame" />
+          <canvas id="adv-canvas"></canvas>
+        </div>
+        <div class="adv-status" id="adv-status"></div>
+      </div>
+    </section>
   </main>
 
   <!-- firebase-config.js is gitignored per-clone; see docs/firebase_setup.md -->
@@ -1142,7 +1238,7 @@ alerting one, else the largest person in view">
        so the browser doesn't serve a stale ES-module from disk cache. -->
   <script type="module" src="./firebase-config.js?v=44"></script>
   <script type="module" src="./cameras.js?v=44"></script>
-  <script type="module" src="./app.js?v=54"></script>
+  <script type="module" src="./app.js?v=55"></script>
 
   <!-- Search UI. INLINE and NON-MODULE on purpose: it wires POST /api/search
        on this same server, has no Firebase dependency, and must keep working

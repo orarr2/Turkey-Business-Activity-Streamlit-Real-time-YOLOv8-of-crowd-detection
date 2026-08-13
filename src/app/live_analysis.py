@@ -73,7 +73,14 @@ LAYER_TITLES = {
     "line":     "Line crossing",
 }
 
-MAX_SESSIONS = 4          # one per grid tile - the fix 2 cap
+MAX_SESSIONS = 1          # Advanced Analysis is a single-session tab (2026-08-13):
+                          # the operator picks ONE camera + ONE analysis layer at
+                          # a time inside the new Advanced Analysis tab. The four
+                          # grid tiles no longer host per-tile 🔬 sessions - they
+                          # show the ModelViewProducer's annotated frames +
+                          # Activity Index badges instead. Switching camera or
+                          # layer in the Advanced tab tears down the previous
+                          # session and starts a fresh one.
 IDLE_STOP_S = 60.0        # no client poll this long -> session shuts down
 TICK_TARGET_S = 0.8       # pacing floor between inference ticks
 LIVE_IMGSZ = 640

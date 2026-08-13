@@ -167,9 +167,6 @@ for (const slot of GRID_SLOTS) {
         <div class="city" data-cam-area>${escapeHtml(slot.display_area)}</div>
       </div>
       <div class="tile-head-right">
-        ${TWIN_MODE ? "" : `<button class="analyze-btn" data-analyze
-                title="Live analysis - pick one layer for this camera"
-                style="cursor:pointer;border:1px solid #334155;background:#1e293b;color:#e2e8f0;border-radius:6px;padding:2px 8px;font-size:13px">🔬</button>`}
         <span class="activity-badge act-unknown" data-activity>
           <span class="dot"></span><span data-activity-text>-/10</span>
         </span>
@@ -238,13 +235,11 @@ for (const slot of GRID_SLOTS) {
     { active_hls: slot.placeholder_hls, active_embed: slot.placeholder_embed,
       active_page: slot.placeholder_page },
     slot);
-  // The 🔬 Live Analysis button only exists in main mode (see the
-  // TWIN_MODE ternary in the template above). In twin mode the button
-  // is not rendered, so querySelector returns null - guard so we don't
-  // crash the for-loop and end up with a 1-tile grid instead of 2x2.
-  const _anBtn = tile.querySelector("[data-analyze]");
-  if (_anBtn) _anBtn.addEventListener("click", () =>
-    openAnalysisPicker(tileState[slot.slot_id]));
+  // The per-tile 🔬 Live Analysis button was removed in the 2026-08-13
+  // Advanced Analysis refactor. Advanced analyses now live in their own
+  // top-level tab where the operator picks camera + layer explicitly,
+  // one session at a time (see initAdvancedAnalysis at the bottom of
+  // this file, and MAX_SESSIONS=1 in live_analysis.py).
 }
 
 // ---------- 1b0. Private-backend probe (fix 2) --------------------------------
@@ -2848,4 +2843,212 @@ setInterval(async () => {
     const b = ev.target?.closest?.("[data-tab-btn]");
     if (b && b.dataset.tabBtn === "snapshots") loadSnaps();
   });
+})();
+
+// ---------- Advanced Analysis tab (2026-08-13) --------------------------------
+// Three-step flow inside a dedicated tab: pick camera -> pick layer -> run.
+// Only ONE session across the grid (MAX_SESSIONS=1 in live_analysis.py). The
+// four grid tiles are unaffected; they keep showing the ModelViewProducer's
+// annotated frames + Activity Index badges. Reuses the existing
+// /api/analysis/start | /frame | /stop endpoints and shows the analyzed JPEG
+// (which already has boxes/skeleton/heat drawn server-side) plus the
+// per-tick object count parsed from the X-Analysis-Meta header.
+(function initAdvancedAnalysis() {
+  const section = document.querySelector('[data-tab="advanced"]');
+  if (!section) return;
+  const camsHost = section.querySelector("#adv-cams");
+  const pickedHost = section.querySelector("#adv-picked-cam");
+  const runTitle = section.querySelector("#adv-run-title");
+  const statusEl = section.querySelector("#adv-status");
+  const frameImg = section.querySelector("#adv-frame");
+  const canvas = section.querySelector("#adv-canvas");
+  const ctx = canvas ? canvas.getContext("2d") : null;
+
+  const state = {
+    picked: null,     // slot dict {slot_id, placeholder_name, display_area}
+    layer: null,      // string
+    timer: null,
+    inflight: false,
+    failures: 0,
+    lastRestart: 0,
+    lastBlobUrl: null,
+  };
+  const overlayState = { canvas, ctx };  // shape drawAnalysisOverlay expects
+
+  function showStep(name) {
+    for (const el of section.querySelectorAll("[data-adv-step]"))
+      el.style.display = (el.dataset.advStep === name) ? "" : "none";
+  }
+
+  function populateCameras() {
+    const slots = Object.values(tileState || {});
+    if (!slots.length) {
+      camsHost.innerHTML = '<div style="color:#94a3b8;font-size:12px">' +
+        'waiting for the notebook to write local_grid.json (run the ' +
+        'picker cell, then the Section 7 dashboard cell)...</div>';
+      return;
+    }
+    camsHost.innerHTML = "";
+    for (const st of slots) {
+      const s = st.slot || {};
+      const btn = document.createElement("button");
+      btn.dataset.advCam = s.slot_id;
+      btn.innerHTML =
+        `<span class="name">${escapeHtml(s.placeholder_name || s.slot_id)}</span>` +
+        `<span class="slot">${escapeHtml(s.display_area || s.slot_id)}</span>`;
+      btn.addEventListener("click", () => onPickCam(s));
+      camsHost.appendChild(btn);
+    }
+  }
+
+  function onPickCam(slot) {
+    state.picked = slot;
+    pickedHost.textContent =
+      "Camera: " + (slot.placeholder_name || slot.slot_id) +
+      (slot.display_area ? "  (" + slot.display_area + ")" : "");
+    showStep("layer");
+  }
+
+  section.querySelectorAll("[data-adv-back]").forEach((b) => {
+    b.addEventListener("click", () => {
+      resetRun();
+      showStep("cam");
+      populateCameras();
+    });
+  });
+
+  section.querySelectorAll("[data-adv-layer]").forEach((b) => {
+    b.addEventListener("click", () => startRun(b.dataset.advLayer));
+  });
+
+  section.querySelector("[data-adv-stop]")?.addEventListener("click", stopAndBack);
+
+  function resetRun() {
+    if (state.timer) { clearInterval(state.timer); state.timer = null; }
+    state.picked = null;
+    state.layer = null;
+    state.failures = 0;
+    state.inflight = false;
+    if (ctx && canvas) ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (state.lastBlobUrl) { URL.revokeObjectURL(state.lastBlobUrl); state.lastBlobUrl = null; }
+    if (frameImg) frameImg.removeAttribute("src");
+    pickedHost.textContent = "";
+    statusEl.className = "adv-status";
+    statusEl.textContent = "";
+  }
+
+  async function stopAndBack() {
+    const cam = state.picked && state.picked.slot_id;
+    if (cam) {
+      fetch(`/api/analysis/stop?cam=${encodeURIComponent(cam)}`,
+            { method: "POST" }).catch(() => {});
+    }
+    resetRun();
+    showStep("cam");
+    populateCameras();
+  }
+
+  async function startRun(layer) {
+    if (!state.picked) return;
+    // Kill any prior session first (MAX_SESSIONS=1 - backend will 409
+    // otherwise). Fire-and-forget: even if it fails there was nothing
+    // to kill, and /start will take the slot.
+    fetch(`/api/analysis/stop?cam=${encodeURIComponent(state.picked.slot_id)}`,
+          { method: "POST" }).catch(() => {});
+    state.layer = layer;
+    showStep("run");
+    const camLabel = state.picked.placeholder_name || state.picked.slot_id;
+    runTitle.textContent = camLabel + "  ·  " + layer;
+    statusEl.className = "adv-status";
+    statusEl.textContent = "starting session on " + camLabel + " ...";
+    try {
+      const r = await fetch(
+        `/api/analysis/start?cam=${encodeURIComponent(state.picked.slot_id)}` +
+        `&layer=${encodeURIComponent(layer)}`, { method: "POST" });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        throw new Error(j.error || `HTTP ${r.status}`);
+      }
+      state.failures = 0; state.lastRestart = 0;
+      if (state.timer) clearInterval(state.timer);
+      state.timer = setInterval(poll, 1000);
+      poll();
+    } catch (e) {
+      statusEl.className = "adv-status err";
+      statusEl.textContent = "failed to start: " + e.message;
+    }
+  }
+
+  async function poll() {
+    if (state.inflight || !state.picked) return;
+    state.inflight = true;
+    try {
+      const cam = state.picked.slot_id;
+      const r = await fetch(
+        `/api/analysis/frame?cam=${encodeURIComponent(cam)}&_=${Date.now()}`,
+        { cache: "no-store" });
+      if (r.status === 200) {
+        const metaB64 = r.headers.get("X-Analysis-Meta");
+        let meta = null;
+        if (metaB64) {
+          try {
+            const bin = atob(metaB64);
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            meta = JSON.parse(new TextDecoder("utf-8").decode(bytes));
+          } catch (_) {}
+        }
+        const blob = await r.blob();
+        if (frameImg) {
+          const url = URL.createObjectURL(blob);
+          if (state.lastBlobUrl) URL.revokeObjectURL(state.lastBlobUrl);
+          state.lastBlobUrl = url;
+          frameImg.src = url;
+        }
+        state.failures = 0;
+        const seq = r.headers.get("X-Seq") || "?";
+        const layer = r.headers.get("X-Layer") || state.layer || "?";
+        const nBoxes = meta && meta.boxes ? meta.boxes.length : 0;
+        statusEl.className = "adv-status";
+        statusEl.textContent =
+          "tick #" + seq + "  ·  layer " + layer +
+          "  ·  " + nBoxes + " object" + (nBoxes === 1 ? "" : "s") + " detected";
+      } else if (r.status === 202) {
+        statusEl.className = "adv-status";
+        statusEl.textContent = "session starting, first frame not ready yet...";
+      } else if (r.status === 404 || r.status === 410) {
+        state.failures += 1;
+        statusEl.className = "adv-status err";
+        statusEl.textContent =
+          "session dropped (attempt " + state.failures +
+          "). Auto-restarting...";
+        if (Date.now() - state.lastRestart > 5000 && state.picked && state.layer) {
+          state.lastRestart = Date.now();
+          fetch(
+            `/api/analysis/start?cam=${encodeURIComponent(state.picked.slot_id)}` +
+            `&layer=${encodeURIComponent(state.layer)}`,
+            { method: "POST" }).catch(() => {});
+        }
+      } else {
+        state.failures += 1;
+      }
+    } catch (_) { state.failures += 1; }
+    finally { state.inflight = false; }
+    if (state.failures > 15) {
+      statusEl.className = "adv-status err";
+      statusEl.textContent =
+        "backend unreachable. Ensure the dashboard server is running " +
+        "(python -m app.dashboard_server or notebook Section 7).";
+    }
+  }
+
+  // Repopulate whenever the user opens the Advanced Analysis tab so
+  // stale slot dropdowns (from an earlier picker run) refresh.
+  document.getElementById("tabbar")?.addEventListener("click", (ev) => {
+    const b = ev.target?.closest?.("[data-tab-btn]");
+    if (b && b.dataset.tabBtn === "advanced") populateCameras();
+  });
+
+  // First paint if tileState is already populated at DOMContentLoaded.
+  populateCameras();
 })();
