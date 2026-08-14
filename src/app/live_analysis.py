@@ -1924,8 +1924,15 @@ class LiveSession(threading.Thread):
         # ?cam= it serves); for a local-picker slot self.cam_id is the slot
         # id, so look up by stream_key first or the measured value is
         # silently ignored and the 3.0 s default always wins.
+        # Default 0.0 (was 3.0): for the iframe path we don't route through
+        # /ytproxy, so STREAM_PDT_OFFSET is never populated for these cams -
+        # and the 3-second fixed subtraction offset `at` earlier than the
+        # actual capture wall clock, which the operator saw as boxes
+        # perpetually 3 s ahead of the moving object. When the hls.js path
+        # IS used, /ytproxy measures the real PDT offset and overwrites
+        # this default within one playlist refresh.
         pdt_off = STREAM_PDT_OFFSET.get(
-            self.stream_key, STREAM_PDT_OFFSET.get(self.cam_id, 3.0))
+            self.stream_key, STREAM_PDT_OFFSET.get(self.cam_id, 0.0))
         data: dict = {
             "seq": self.seq + 1,        # matches _publish's post-bump seq
             "layer": layer,

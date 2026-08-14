@@ -896,37 +896,32 @@ function _analysisDrawLoop(st, a) {
   } else if (st.ytPlayer && typeof st.ytPlayer.getCurrentTime === "function") {
     try {
       const ct = st.ytPlayer.getCurrentTime();
+      const dur = typeof st.ytPlayer.getDuration === "function"
+        ? st.ytPlayer.getDuration() : 0;
       if (typeof ct === "number" && isFinite(ct) && ct > 0) {
-        // Two live pipelines run in parallel: (1) YouTube feeds the
-        // iframe from its own live edge with ~4-6s player-side buffer;
-        // (2) our server grabs frames with yt-dlp and inferences them,
-        // so `tick.at` (frame capture wall clock) is typically 2-3 s
-        // behind live. The DIFFERENCE (iframe lag minus server lag) is
-        // the visual offset between where the box is drawn and where
-        // the object is on screen - what the operator reported as a
-        // 0.5-1s "box-vs-object" drift. seekTo doesn't help on YT live
-        // streams without DVR (they clamp back to live edge), so instead
-        // we shift the "video clock" BACKWARDS by the estimated iframe
-        // lag so the draw loop selects the OLDER tick that actually
-        // matches the moment on screen. `boxDelayS` is the tunable knob;
-        // the operator can nudge it live with [ / ] (see initTuneKeys).
-        const first = buf[0];
-        const newest = buf[buf.length - 1];
         const nowWall = Date.now() / 1000;
-        const serverAge = Math.max(0, nowWall - (newest?.at || nowWall));
-        const iframeLag = _ytIframeLagS();
-        const boxDelayS = Math.max(0, iframeLag - serverAge);
-        // Re-pin on first sight, or if the iframe stalled/seeked hard
-        // enough that our ct-based projection has drifted well beyond
-        // the intended delay.
-        const projected = a._ytPin
-          ? a._ytPin.at + (ct - a._ytPin.ct) : null;
-        if (!a._ytPin || (projected != null
-              && Math.abs(projected - ((first?.at || nowWall) - boxDelayS))
-                 > Math.max(6, iframeLag + 3))) {
-          a._ytPin = { ct, at: (newest?.at || nowWall) - boxDelayS };
+        // Preferred (auto): YouTube live with DVR reports its own live-
+        // edge lag as getDuration()-getCurrentTime(). That IS the exact
+        // number of seconds the iframe is playing BEHIND real-time. The
+        // server publishes tick.at as wall-clock too, so alignment is
+        // direct: vidT = nowWall - iframeLagS. The draw loop then picks
+        // the OLDER tick whose `at` matches the on-screen moment and
+        // lerps between it and its successor for smooth motion. No
+        // tuning needed on any DVR-enabled YouTube stream (the default).
+        const dvrLag = dur - ct;
+        if (dur > 1 && dvrLag > 0.2 && dvrLag < 60) {
+          vidT = nowWall - dvrLag;
+        } else {
+          // No DVR: use the operator-tunable lag knob as a coarse
+          // fallback. `[` / `]` shift it live.
+          const newest = buf[buf.length - 1];
+          const serverAge = Math.max(0, nowWall - (newest?.at || nowWall));
+          const iframeLag = _ytIframeLagS();
+          const boxDelayS = Math.max(0, iframeLag - serverAge);
+          vidT = (newest?.at || nowWall) - boxDelayS
+                 + (ct - (a._ytPin?.ct || ct));
+          if (!a._ytPin) a._ytPin = { ct, at: vidT };
         }
-        vidT = a._ytPin.at + (ct - a._ytPin.ct);
       }
     } catch (_) { /* getCurrentTime rejects before ready */ }
   }
