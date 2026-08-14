@@ -840,10 +840,35 @@ function _analysisDrawLoop(st, a) {
   const buf = a.tickBuf;
   if (!buf.length) return;
   let merged = buf[buf.length - 1];
+  // Video clock in wall-clock seconds. Two paths:
+  // (1) hls.js: playingDate is PDT and IS wall clock, use directly.
+  // (2) YouTube iframe: getCurrentTime() is DVR seconds - pin it to the
+  //     first server tick's `at` once, then `at + (nowCT - pinCT)` gives
+  //     us a wall-clock proxy. The player runs at 1s per real second, so
+  //     the pin holds for hours; a big drift (state change / seek) is
+  //     detected by monitoring the CT-vs-wall skew and re-pinning.
   const hls = st.currentHlsInstance;
   const pd = hls && hls.playingDate;
+  let vidT = null;
   if (pd instanceof Date && !isNaN(pd)) {
-    const vidT = pd.getTime() / 1000;
+    vidT = pd.getTime() / 1000;
+  } else if (st.ytPlayer && typeof st.ytPlayer.getCurrentTime === "function") {
+    try {
+      const ct = st.ytPlayer.getCurrentTime();
+      if (typeof ct === "number" && isFinite(ct) && ct > 0) {
+        const nowWall = Date.now() / 1000;
+        const first = buf[0];
+        if (!a._ytPin || Math.abs(
+              (a._ytPin.at + (ct - a._ytPin.ct)) - nowWall) > 8) {
+          // First tick, or the player was seeked/re-buffered: re-pin
+          // against the newest tick that predates wall-clock.
+          a._ytPin = { ct, at: (first && first.at) || nowWall - 5 };
+        }
+        vidT = a._ytPin.at + (ct - a._ytPin.ct);
+      }
+    } catch (_) { /* getCurrentTime rejects before ready */ }
+  }
+  if (vidT != null) {
     // Newest tick at or before the video clock...
     let i = buf.length - 1;
     while (i > 0 && (buf[i].at || 0) > vidT + 0.25) i--;
@@ -933,6 +958,22 @@ function _syncAnalysisBgVisibility(st) {
     const t = v.currentTime;
     playing = (a._lastVidT !== undefined) && (t > a._lastVidT + 0.05);
     a._lastVidT = t;
+  } else if (st.ytPlayer) {
+    // YouTube iframe: no <video> we can inspect (cross-origin), so trust
+    // the IFrame API. PLAYING(1) OR BUFFERING(3) mean pixels are moving;
+    // getCurrentTime advancing between calls confirms it under load.
+    try {
+      const state = st.ytPlayer.getPlayerState();
+      const ct = st.ytPlayer.getCurrentTime();
+      if (state === 1 || state === 3) {
+        playing = (a._lastYtCt !== undefined) && (ct > a._lastYtCt + 0.05);
+        // If we have no delta yet (first tick), trust the state.
+        if (a._lastYtCt === undefined) playing = true;
+        a._lastYtCt = ct;
+      } else {
+        a._lastYtCt = undefined;
+      }
+    } catch (_) {}
   } else {
     a._lastVidT = undefined;
   }

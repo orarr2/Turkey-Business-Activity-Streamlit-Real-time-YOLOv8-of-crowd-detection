@@ -70,18 +70,18 @@ try {
   if (r.ok) {
     const j = await r.json();
     if (Array.isArray(j?.slots) && j.slots.length) {
-      // YouTube-backed picks play through the local /ytproxy HLS relay
-      // instead of a YouTube iframe: a muted <video autoplay> is exempt
-      // from Chrome's iframe-autoplay blocking, so the tile starts by
-      // itself and stays smooth. The embed is KEPT as attachHls's
-      // fallback for when the proxy can't serve (e.g. statically hosted
-      // web/ with no dashboard_server behind it).
-      GRID_SLOTS = j.slots.map((s) =>
-        (s.cam_id && s.placeholder_embed
-         && /youtube(-nocookie)?\.com\/embed/.test(s.placeholder_embed))
-          ? { ...s, placeholder_hls:
-                "/ytproxy?cam=" + encodeURIComponent(s.cam_id) }
-          : s);
+      // YouTube picks play through the NATIVE YouTube iframe (YT.Player) -
+      // reverted 2026-08-15 after the operator confirmed hls.js via the
+      // local /ytproxy relay lags visibly vs. youtube.com itself: the
+      // extra Python-relay hop, hls.js lowLatencyMode churn, and MSE
+      // appends competing with the canvas draw on the main thread stack
+      // together into stutters no tuning erased. YouTube's own decoder,
+      // JIT-buffered by their own CDN, is what "runs like YouTube"
+      // literally means. Overlay alignment now uses YT IFrame API's
+      // getCurrentTime as the video clock (see _analysisDrawLoop's
+      // ytClockEpoch branch). For non-YouTube picks (tvkur / IBB) hls.js
+      // stays - they have no iframe alternative.
+      GRID_SLOTS = j.slots;
       LOCAL_MODE = true;
     }
   }
