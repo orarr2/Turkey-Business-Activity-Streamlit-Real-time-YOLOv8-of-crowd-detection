@@ -357,7 +357,8 @@ def frame_uncertainty(meta: dict) -> float:
 
 def sample_frame(store: ReviewStore,
                  snapshots_root: str | Path = SNAPSHOTS_ROOT,
-                 seed: int | None = None) -> dict | None:
+                 seed: int | None = None,
+                 allowed_cams: set | None = None) -> dict | None:
     """Pick the un-reviewed frame the model is LEAST sure about and return
     its metadata packaged for the canvas UI:
 
@@ -393,6 +394,13 @@ def sample_frame(store: ReviewStore,
     for rel in rels:
         if store.is_frame_reviewed(rel):
             continue
+        # Optional camera-universe filter (the MAIN edition passes its
+        # picked slots + their catalog ids so the sampler can never serve
+        # a frame pool-synced from the VM's Turkey grid).
+        if allowed_cams is not None:
+            parts = rel.replace("\\", "/").split("/")
+            if len(parts) < 2 or parts[1] not in allowed_cams:
+                continue
         meta = load_metadata(rel, snapshots_root)
         if not meta:
             continue

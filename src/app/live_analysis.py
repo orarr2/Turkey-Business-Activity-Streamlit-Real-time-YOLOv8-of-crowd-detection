@@ -1802,7 +1802,12 @@ class LiveSession(threading.Thread):
                         pass
             js_boxes.append(jb)
         cap_ts = getattr(self, "_last_frame_ts", None) or time.time()
-        pdt_off = STREAM_PDT_OFFSET.get(self.cam_id, 3.0)
+        # The ytproxy measures the offset under the CATALOG id (that is the
+        # ?cam= it serves); for a local-picker slot self.cam_id is the slot
+        # id, so look up by stream_key first or the measured value is
+        # silently ignored and the 3.0 s default always wins.
+        pdt_off = STREAM_PDT_OFFSET.get(
+            self.stream_key, STREAM_PDT_OFFSET.get(self.cam_id, 3.0))
         data: dict = {
             "seq": self.seq + 1,        # matches _publish's post-bump seq
             "layer": layer,

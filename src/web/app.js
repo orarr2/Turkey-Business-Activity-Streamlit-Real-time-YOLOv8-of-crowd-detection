@@ -961,6 +961,15 @@ async function pollAnalysisFrame(st) {
               + `&layer=${encodeURIComponent(a.layer)}`,
               { method: "POST" }).catch(() => {});
       }
+    } else if (r.status === 410) {
+      // Session CRASHED server-side: surface the recorded reason instead
+      // of burying it under a generic "unreachable" after blind retries.
+      let reason = "";
+      try { reason = (await r.json()).error || ""; } catch (_) {}
+      a.status.style.display = "";
+      a.status.textContent = "analysis ended"
+        + (reason ? ` - ${reason}` : "") + " - pick a layer to restart";
+      a.failures += 1;
     } else {
       a.failures += 1;
     }

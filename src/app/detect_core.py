@@ -104,6 +104,10 @@ def _open_cap(url_or_path: str) -> "cv2.VideoCapture":
 # call site in detect_with_boxes. RLock so a locked caller may re-enter.
 _PREDICT_LOCK = threading.RLock()
 
+# Torch checkpoints loaded on demand when a static-shape OpenVINO engine
+# rejects an explicit imgsz (keyed by the .pt path; see detect_with_boxes).
+_TORCH_FALLBACK: dict = {}
+
 CLASSES_OF_INTEREST = {
     "person": 0,
     "bicycle": 1,
@@ -160,6 +164,11 @@ def load_model(weights: str = "yolov8s.pt"):
         _ov_dir = str(weights)[:-3] + "_openvino_model"
         if _os.path.isdir(_ov_dir):
             model = YOLO(_ov_dir)
+            # Remember the torch checkpoint so detect_with_boxes can fall
+            # back to it when a caller asks for an imgsz the static engine
+            # was not exported for (e.g. the calibration cells' 960 on a
+            # 640 engine).
+            model._pt_fallback_path = str(weights)
             print(f"detect: OpenVINO engine loaded ({_ov_dir}) - "
                   f"adapter overlay skipped (torch-only)")
             return model
@@ -1391,7 +1400,25 @@ def detect_with_boxes(model, frame, conf: float = 0.35,
         # OpenVINO does not. The lock costs microseconds next to the
         # ~0.7s forward pass.
         with _PREDICT_LOCK:
-            res = model.predict(frame, **kwargs)[0]
+            try:
+                res = model.predict(frame, **kwargs)[0]
+            except RuntimeError as e:
+                # A static-shape OpenVINO engine rejects any imgsz other
+                # than the one it was exported with. Retry the call on the
+                # sibling torch checkpoint (loaded once, cached) so
+                # explicit-imgsz callers - the calibration cells, per-cam
+                # imgsz overrides - work instead of crashing the run.
+                ptp = getattr(model, "_pt_fallback_path", None)
+                if not ptp or "compatible" not in str(e):
+                    raise
+                fb = _TORCH_FALLBACK.get(ptp)
+                if fb is None:
+                    from ultralytics import YOLO as _YOLO
+                    fb = _TORCH_FALLBACK[ptp] = _YOLO(ptp)
+                    print(f"detect: OpenVINO engine rejected "
+                          f"imgsz={kwargs.get('imgsz')} - torch fallback "
+                          f"({ptp}) for non-native sizes")
+                res = fb.predict(frame, **kwargs)[0]
     xyxy = res.boxes.xyxy.cpu().numpy()
     cls_ids = res.boxes.cls.cpu().numpy().astype(int)
     confs = res.boxes.conf.cpu().numpy()

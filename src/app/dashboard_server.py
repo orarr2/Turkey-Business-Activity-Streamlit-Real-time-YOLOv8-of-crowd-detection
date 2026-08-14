@@ -346,6 +346,12 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         super().end_headers()
 
     def log_message(self, fmt: str, *args) -> None:
+        # Under a Jupyter kernel this access log lands inside the notebook
+        # cell's output area AND gets saved into the .ipynb (hundreds of
+        # "GET /snapshots/..." lines per run bloated the file). Terminal
+        # runs (serve.py) keep the log; notebook runs stay quiet.
+        if "ipykernel" in sys.modules:
+            return
         sys.stdout.write("  " + (fmt % args) + "\n")
 
     def do_GET(self) -> None:
@@ -1341,7 +1347,10 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json(200, s)
                 return
             from app.labels import sample_frame
-            s = sample_frame(_review_store(), SNAPSHOTS_DIR)
+            scope = (q.get("scope") or [""])[0].strip()
+            allowed = self._local_pick_ids() if scope == "local" else None
+            s = sample_frame(_review_store(), SNAPSHOTS_DIR,
+                             allowed_cams=(allowed or None))
             if s is None:
                 self._send_json(200, {"done": True,
                                       "message": "no un-reviewed frames yet"})

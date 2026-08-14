@@ -77,6 +77,10 @@ MAX_VEHICLES_PER_TICK = 3
 # Give up on a track after this many failed read attempts; a vehicle
 # that stayed unreadable for 6 close-range ticks is angled/blurred.
 MAX_TRIES_PER_TRACK = 6
+# Minimum Laplacian variance of the plate crop before OCR is attempted -
+# below this the crop is motion-smeared (night exposure) and any read
+# would be a hallucination. Skipped crops refund their try.
+PLATE_SHARPNESS_MIN = 45.0
 
 PLATE_VEHICLE_CLASSES = {"car", "bus", "truck", "motorcycle"}
 
@@ -227,6 +231,14 @@ def attach_plates(det_model, ocr: _OvOcr, frame, tracker,
         if crop.size == 0:
             continue
         entry = reads.setdefault(tid, {"text": "", "conf": 0.0, "tries": 0})
+        # Closest-approach: while the vehicle still GROWS on screen every
+        # tick is a better shot than the last; once it shrinks below 85%
+        # of its own peak width the best frame has already passed - stop
+        # spending the try budget on frames that can only be worse.
+        _w_max = entry.get("w_max", 0)
+        entry["w_max"] = max(_w_max, bw)
+        if not entry.get("text") and _w_max and bw < 0.85 * _w_max:
+            continue
         entry["tries"] += 1
         with _PREDICT_LOCK:
             res = det_model.predict(crop, imgsz=256, conf=PLATE_CONF,
@@ -240,6 +252,15 @@ def attach_plates(det_model, ocr: _OvOcr, frame, tracker,
             continue
         plate = crop[max(0, py1):py2, max(0, px1):px2]
         if plate.size == 0:
+            continue
+        # Motion-blur gate: OCR on a smeared night plate can only
+        # hallucinate. Laplacian variance is a cheap sharpness proxy;
+        # below the floor, skip the OCR and REFUND the try - the next
+        # tick may catch the same plate sharp (per-tick cost stays
+        # bounded by MAX_VEHICLES_PER_TICK either way).
+        _g = cv2.cvtColor(plate, cv2.COLOR_BGR2GRAY)
+        if float(cv2.Laplacian(_g, cv2.CV_64F).var()) < PLATE_SHARPNESS_MIN:
+            entry["tries"] -= 1
             continue
         text, conf = ocr.read(plate)
         # Best-read-wins: a later attempt only replaces the stored read

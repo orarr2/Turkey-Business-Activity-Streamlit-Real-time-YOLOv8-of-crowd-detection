@@ -905,7 +905,8 @@
     async function loadNext() {
       _resetEditor();
       try {
-        const r = await fetch("/api/review-frame", { cache: "no-store" });
+        const r = await fetch("/api/review-frame?scope=local",
+                              { cache: "no-store" });
         const data = await r.json();
         if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
         if (data.done) {
@@ -1181,6 +1182,28 @@
   })();
   </script>
 
+  <script>
+  // Model-quality header line - same /api/model-metrics contract as the VM
+  // edition (header_line), refreshed every 10 s. Only the local backend
+  // answers the endpoint; on the hosted copy the line goes stale-grey.
+  (function initModelMetrics() {
+    const el = document.getElementById("model-metrics-line");
+    if (!el) return;
+    async function refresh() {
+      try {
+        const r = await fetch("/api/model-metrics", { cache: "no-store" });
+        if (!r.ok) { el.classList.add("stale"); return; }
+        const data = await r.json();
+        el.classList.remove("stale");
+        el.textContent = data.header_line || "Model: -";
+      } catch (_) {
+        el.classList.add("stale");
+      }
+    }
+    refresh();
+    setInterval(refresh, 10000);
+  })();
+  </script>
 
   <script>
   (function initTabs() {
