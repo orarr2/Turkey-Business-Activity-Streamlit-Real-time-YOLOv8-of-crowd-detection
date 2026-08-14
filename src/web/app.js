@@ -357,6 +357,45 @@ const DRAWABLE_LAYERS = { line: "✏ Draw line",
                           parking: "✏ Draw spots" };
 const ANALYSIS_POLL_MS = 500;
 
+// ---- YouTube iframe lag (operator-tunable) ---------------------------------
+// YouTube's live iframe plays several seconds BEHIND the actual live edge
+// (typically 4-6s of player-side buffer). Our server yt-dlp grabs frames
+// with a much smaller lag (~2s). The difference is what the operator sees
+// as "the box is 0.5-1s ahead of where the object actually is on screen".
+// We compensate on the client by picking an OLDER buffered tick when
+// drawing over the iframe. The exact iframe lag varies per YouTube stream,
+// per network, and even per session, so the operator tunes it live with
+// the bracket keys: `[` shifts boxes EARLIER (increase lag), `]` shifts
+// LATER (decrease lag). Setting persists in localStorage.
+const YT_LAG_KEY = "ytIframeLagS";
+const YT_LAG_DEFAULT_S = 4.5;
+function _ytIframeLagS() {
+  const v = parseFloat(localStorage.getItem(YT_LAG_KEY));
+  if (!isFinite(v) || v < 0 || v > 25) return YT_LAG_DEFAULT_S;
+  return v;
+}
+function _ytIframeLagBump(deltaS) {
+  const now = _ytIframeLagS();
+  const next = Math.max(0, Math.min(20, now + deltaS));
+  localStorage.setItem(YT_LAG_KEY, String(next.toFixed(2)));
+  // Force every active session to re-pin on the next tick.
+  for (const st of Object.values(tileState || {})) {
+    if (st && st.analysis) st.analysis._ytPin = null;
+  }
+  return next;
+}
+window.addEventListener("keydown", (e) => {
+  if (e.target && (e.target.tagName === "INPUT"
+                   || e.target.tagName === "TEXTAREA"
+                   || e.target.isContentEditable)) return;
+  let msg = null;
+  if (e.key === "[") msg = `iframe lag ${_ytIframeLagBump(0.25).toFixed(2)}s`
+                         + " - boxes SHIFT EARLIER (use if boxes are AHEAD)";
+  else if (e.key === "]") msg = `iframe lag ${_ytIframeLagBump(-0.25).toFixed(2)}s`
+                              + " - boxes SHIFT LATER (use if boxes are BEHIND)";
+  if (msg && typeof showCrossToast === "function") showCrossToast(msg);
+});
+
 const analysisPanel = document.createElement("div");
 analysisPanel.style.cssText =
   "display:none;position:fixed;inset:0;z-index:60;background:rgba(2,6,23,.72);" +
@@ -858,13 +897,34 @@ function _analysisDrawLoop(st, a) {
     try {
       const ct = st.ytPlayer.getCurrentTime();
       if (typeof ct === "number" && isFinite(ct) && ct > 0) {
-        const nowWall = Date.now() / 1000;
+        // Two live pipelines run in parallel: (1) YouTube feeds the
+        // iframe from its own live edge with ~4-6s player-side buffer;
+        // (2) our server grabs frames with yt-dlp and inferences them,
+        // so `tick.at` (frame capture wall clock) is typically 2-3 s
+        // behind live. The DIFFERENCE (iframe lag minus server lag) is
+        // the visual offset between where the box is drawn and where
+        // the object is on screen - what the operator reported as a
+        // 0.5-1s "box-vs-object" drift. seekTo doesn't help on YT live
+        // streams without DVR (they clamp back to live edge), so instead
+        // we shift the "video clock" BACKWARDS by the estimated iframe
+        // lag so the draw loop selects the OLDER tick that actually
+        // matches the moment on screen. `boxDelayS` is the tunable knob;
+        // the operator can nudge it live with [ / ] (see initTuneKeys).
         const first = buf[0];
-        if (!a._ytPin || Math.abs(
-              (a._ytPin.at + (ct - a._ytPin.ct)) - nowWall) > 8) {
-          // First tick, or the player was seeked/re-buffered: re-pin
-          // against the newest tick that predates wall-clock.
-          a._ytPin = { ct, at: (first && first.at) || nowWall - 5 };
+        const newest = buf[buf.length - 1];
+        const nowWall = Date.now() / 1000;
+        const serverAge = Math.max(0, nowWall - (newest?.at || nowWall));
+        const iframeLag = _ytIframeLagS();
+        const boxDelayS = Math.max(0, iframeLag - serverAge);
+        // Re-pin on first sight, or if the iframe stalled/seeked hard
+        // enough that our ct-based projection has drifted well beyond
+        // the intended delay.
+        const projected = a._ytPin
+          ? a._ytPin.at + (ct - a._ytPin.ct) : null;
+        if (!a._ytPin || (projected != null
+              && Math.abs(projected - ((first?.at || nowWall) - boxDelayS))
+                 > Math.max(6, iframeLag + 3))) {
+          a._ytPin = { ct, at: (newest?.at || nowWall) - boxDelayS };
         }
         vidT = a._ytPin.at + (ct - a._ytPin.ct);
       }
@@ -1035,59 +1095,12 @@ async function pollAnalysisFrame(st) {
         }
         a.tickBuf.push(d);
         if (a.tickBuf.length > 24) a.tickBuf.shift();
-        // ---- YouTube iframe <-> server clock sync ------------------------
-        // Two independent live pipelines: YouTube's own CDN feeds the iframe
-        // ~5s behind their live edge; our server grabs frames with yt-dlp
-        // and runs YOLO, publishing tick.at as the frame CAPTURE wall clock
-        // (~2-4s behind live). They are not synchronized, so a box drawn on
-        // top of the iframe visibly lags/leads the object it belongs to by
-        // whatever their difference is - that is exactly the "1-second
-        // offset" the operator sees. The fix is a one-time seek that HOLDS
-        // the iframe at the same wall clock the server processed, plus
-        // micro-correction if the two clocks drift beyond a small dead
-        // band. Guarded so the seek runs only on the YT iframe path (hls.js
-        // has playingDate = PDT = already in wall clock, no seek needed).
-        if (st.ytPlayer
-            && typeof st.ytPlayer.seekTo === "function"
-            && typeof st.ytPlayer.getCurrentTime === "function") {
-          try {
-            const state = st.ytPlayer.getPlayerState();
-            const ct = st.ytPlayer.getCurrentTime();
-            if ((state === 1 || state === 3)
-                && typeof ct === "number" && ct > 5) {
-              const serverAgeS = Date.now() / 1000 - (d.at || 0);
-              if (serverAgeS > 0.5 && serverAgeS < 40) {
-                // Initial sync: seek iframe back to (currentTime -
-                // serverAgeS + 0.4). The +0.4 keeps us 400 ms behind the
-                // exact server frame so subsequent ticks fall INSIDE the
-                // interpolation bracket instead of clipping the extrapolate
-                // branch on every new tick.
-                if (!a._ytSynced) {
-                  const target = Math.max(0.5, ct - serverAgeS + 0.4);
-                  st.ytPlayer.seekTo(target, true);
-                  a._ytSynced = { at: Date.now() };
-                  a._ytPin = null;                // re-pin from next tick
-                } else {
-                  // Micro-correction: if the running pin says vidT is off
-                  // from tick.at by more than 1.5s (network jitter, YT
-                  // rebuffer, tab throttled), nudge the iframe back into
-                  // alignment. Never nudge more often than every 20s so
-                  // Chrome doesn't rate-limit the seek.
-                  const now = Date.now() / 1000;
-                  const vidT = a._ytPin
-                    ? a._ytPin.at + (ct - a._ytPin.ct) : null;
-                  const drift = vidT != null ? vidT - (d.at || vidT) : 0;
-                  if (Math.abs(drift) > 1.5
-                      && now - (a._ytSynced.lastFix || 0) > 20) {
-                    st.ytPlayer.seekTo(Math.max(0.5, ct - drift), true);
-                    a._ytSynced.lastFix = now;
-                    a._ytPin = null;
-                  }
-                }
-              }
-            }
-          } catch (_) { /* player not ready this instant */ }
-        }
+        // Old seek-based sync removed 2026-08-15: YouTube live streams
+        // without DVR clamp seekTo back to the live edge, so seeking never
+        // held. Alignment is now done in _analysisDrawLoop by shifting
+        // vidT backward by the operator-tunable iframe-lag estimate.
+        // A first tick just resets the pin so the new offset takes effect.
+        if (st.ytPlayer) a._ytPin = null;
         // Skip the JPEG round-trip while the smooth video is confirmed
         // playing (the bg is hidden then and the bytes would be wasted).
         if (a.bg && a.bg.style.display !== "none") _refreshAnalysisBg(a);
