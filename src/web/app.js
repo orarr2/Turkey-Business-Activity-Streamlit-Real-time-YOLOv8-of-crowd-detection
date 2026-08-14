@@ -519,6 +519,8 @@ function beginTileAnalysis(st, cam, layer) {
     // (stream + accumulators kept) - just relabel; the poller runs on.
     st.analysis.layer = layer;
     st.analysis.tickBuf.length = 0;   // old-layer ticks are stale now
+    // Layer switch keeps the iframe playing; existing YT<->server pin
+    // still valid. No re-sync needed.
     const tag = st.videoWrap.querySelector(".analysis-live-tag");
     if (tag) tag.textContent = `LIVE ANALYSIS · ${_layerLabel[layer] || layer}`;
     const lb = st.videoWrap.querySelector(".analysis-drawline");
@@ -1033,6 +1035,59 @@ async function pollAnalysisFrame(st) {
         }
         a.tickBuf.push(d);
         if (a.tickBuf.length > 24) a.tickBuf.shift();
+        // ---- YouTube iframe <-> server clock sync ------------------------
+        // Two independent live pipelines: YouTube's own CDN feeds the iframe
+        // ~5s behind their live edge; our server grabs frames with yt-dlp
+        // and runs YOLO, publishing tick.at as the frame CAPTURE wall clock
+        // (~2-4s behind live). They are not synchronized, so a box drawn on
+        // top of the iframe visibly lags/leads the object it belongs to by
+        // whatever their difference is - that is exactly the "1-second
+        // offset" the operator sees. The fix is a one-time seek that HOLDS
+        // the iframe at the same wall clock the server processed, plus
+        // micro-correction if the two clocks drift beyond a small dead
+        // band. Guarded so the seek runs only on the YT iframe path (hls.js
+        // has playingDate = PDT = already in wall clock, no seek needed).
+        if (st.ytPlayer
+            && typeof st.ytPlayer.seekTo === "function"
+            && typeof st.ytPlayer.getCurrentTime === "function") {
+          try {
+            const state = st.ytPlayer.getPlayerState();
+            const ct = st.ytPlayer.getCurrentTime();
+            if ((state === 1 || state === 3)
+                && typeof ct === "number" && ct > 5) {
+              const serverAgeS = Date.now() / 1000 - (d.at || 0);
+              if (serverAgeS > 0.5 && serverAgeS < 40) {
+                // Initial sync: seek iframe back to (currentTime -
+                // serverAgeS + 0.4). The +0.4 keeps us 400 ms behind the
+                // exact server frame so subsequent ticks fall INSIDE the
+                // interpolation bracket instead of clipping the extrapolate
+                // branch on every new tick.
+                if (!a._ytSynced) {
+                  const target = Math.max(0.5, ct - serverAgeS + 0.4);
+                  st.ytPlayer.seekTo(target, true);
+                  a._ytSynced = { at: Date.now() };
+                  a._ytPin = null;                // re-pin from next tick
+                } else {
+                  // Micro-correction: if the running pin says vidT is off
+                  // from tick.at by more than 1.5s (network jitter, YT
+                  // rebuffer, tab throttled), nudge the iframe back into
+                  // alignment. Never nudge more often than every 20s so
+                  // Chrome doesn't rate-limit the seek.
+                  const now = Date.now() / 1000;
+                  const vidT = a._ytPin
+                    ? a._ytPin.at + (ct - a._ytPin.ct) : null;
+                  const drift = vidT != null ? vidT - (d.at || vidT) : 0;
+                  if (Math.abs(drift) > 1.5
+                      && now - (a._ytSynced.lastFix || 0) > 20) {
+                    st.ytPlayer.seekTo(Math.max(0.5, ct - drift), true);
+                    a._ytSynced.lastFix = now;
+                    a._ytPin = null;
+                  }
+                }
+              }
+            }
+          } catch (_) { /* player not ready this instant */ }
+        }
         // Skip the JPEG round-trip while the smooth video is confirmed
         // playing (the bg is hidden then and the bytes would be wasted).
         if (a.bg && a.bg.style.display !== "none") _refreshAnalysisBg(a);
