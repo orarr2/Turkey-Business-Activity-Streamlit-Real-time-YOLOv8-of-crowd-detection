@@ -343,7 +343,7 @@ const ANALYSIS_LAYER_DEFS = [
   ["heat",     "Heat signature"],
   ["paths",    "Paths & speeds"],
   ["pose",     "Pose & skeleton"],
-  ["gestures", "Hand gestures"],
+  ["gestures", "Static postures"],
   ["body",     "Body anomalies"],
   ["faces",    "Face detection"],
   ["line",     "Line crossing"],
@@ -642,7 +642,16 @@ function beginTileAnalysis(st, cam, layer) {
 // instead of jumping once a second onto pixels the object already left.
 function _analysisDrawLoop(st, a) {
   if (!st.analysis || st.analysis !== a) return;   // stopped or restarted
+  // ~15fps, not 60: four tiles at 60fps of canvas work measurably janked
+  // the main thread that hls.js needs for MSE segment appends - the
+  // videos decayed to ~0.7x realtime and never caught up (the operator's
+  // "stuck video"). 15fps keeps box motion visually smooth at a quarter
+  // of the main-thread cost. requestAnimationFrame still paces us to
+  // the display, we just skip frames until 66ms have passed.
   requestAnimationFrame(() => _analysisDrawLoop(st, a));
+  const nowMs = performance.now();
+  if (a._lastDrawMs && nowMs - a._lastDrawMs < 66) return;
+  a._lastDrawMs = nowMs;
   if (a.canvas.style.display === "none") return;   // JPEG mode covers it
   const buf = a.tickBuf;
   if (!buf.length) return;
@@ -761,10 +770,21 @@ async function pollAnalysisFrame(st) {
 // velocity times that, so boxes ride along with the traffic between YOLO
 // updates instead of sitting on vacated pixels.
 function _drawAnalysisOverlay(canvas, d, dtExtra = 0) {
-  const parent = canvas.parentElement;
-  const rect = parent.getBoundingClientRect();
-  const cw = Math.max(1, Math.round(rect.width));
-  const ch = Math.max(1, Math.round(rect.height));
+  // getBoundingClientRect forces layout - at 15fps x 4 tiles that is
+  // still 60 forced layouts/s. Cache the measurement for 1.5s; tile
+  // sizes only change on window resroll/zoom, and a stale size for a
+  // second costs one slightly-misscaled frame, not a jank storm.
+  const nowMs = performance.now();
+  let m = canvas._sizeCache;
+  if (!m || nowMs - m.t > 1500) {
+    const rect = canvas.parentElement.getBoundingClientRect();
+    m = canvas._sizeCache = {
+      t: nowMs,
+      cw: Math.max(1, Math.round(rect.width)),
+      ch: Math.max(1, Math.round(rect.height)),
+    };
+  }
+  const cw = m.cw, ch = m.ch;
   if (canvas.width !== cw)  canvas.width = cw;
   if (canvas.height !== ch) canvas.height = ch;
   const ctx = canvas.getContext("2d");
@@ -785,12 +805,19 @@ function _drawAnalysisOverlay(canvas, d, dtExtra = 0) {
       const octx = off.getContext("2d");
       const gh = d.heat.length, gw = d.heat[0].length;
       const cellW = cw / gw, cellH = ch / gh;
-      let peak = 0;
-      for (const row of d.heat) for (const v of row) if (v > peak) peak = v;
+      // p99 normalization instead of max: one nuclear cell (a bus stop)
+      // used to flatten every other cell to invisible - percentile
+      // clipping is the standard colormap fix.
+      const vals = [];
+      for (const row of d.heat) for (const v of row) if (v > 0) vals.push(v);
+      vals.sort((a, b) => a - b);
+      const peak = vals.length
+        ? vals[Math.min(vals.length - 1, Math.floor(vals.length * 0.99))]
+        : 0;
       if (peak > 0) {
         for (let gy = 0; gy < gh; gy++) {
           for (let gx = 0; gx < gw; gx++) {
-            const v = d.heat[gy][gx] / peak;
+            const v = Math.min(1, d.heat[gy][gx] / peak);
             if (v < 0.05) continue;
             const alpha = Math.min(0.65, v * 0.7);
             octx.fillStyle = _heatColor(v, alpha);
@@ -923,8 +950,8 @@ function _drawAnalysisOverlay(canvas, d, dtExtra = 0) {
     let color = b.cls === "person"
       ? "rgba(74,222,128,0.95)" : "rgba(251,146,60,0.95)";
     let label = `${b.cls} ${Math.round((b.conf || 0) * 100)}%`;
-    if (d.layer === "paths" && b.kmh)
-      label += ` · ${b.kmh} km/h`;
+    if (d.layer === "paths" && b.tier)
+      label += ` · ${b.tier}`;
     if (d.layer === "gestures" && b.gestures)
       label = `#${b.tid} ${b.gestures.join("+")}`;
     if (d.layer === "body" && b.flag) {
@@ -939,13 +966,28 @@ function _drawAnalysisOverlay(canvas, d, dtExtra = 0) {
     }
     ctx.lineWidth = 2;
     ctx.strokeStyle = color;
+    if (b.coast) ctx.setLineDash([6, 5]);   // coasting on prediction only
     ctx.strokeRect(x, y, w, h);
+    ctx.setLineDash([]);
     if (b.kps) _drawSkeleton(ctx, b.kps, sx, sy, ox, oy);
     const tw = ctx.measureText(label).width + 8;
     ctx.fillStyle = "rgba(15,23,42,0.85)";
     ctx.fillRect(x, Math.max(0, y - 16), tw, 16);
     ctx.fillStyle = "#f8fafc";
     ctx.fillText(label, x + 4, Math.max(12, y - 4));
+  }
+
+  // Operating-envelope note: what the layer can physically see right
+  // now ("7 people, skeletons on 2 (>=96px only)") - silent emptiness
+  // used to read as breakage.
+  if (d.envelope) {
+    ctx.font = "11px system-ui, sans-serif";
+    const tw = ctx.measureText(d.envelope).width + 14;
+    ctx.fillStyle = "rgba(15,23,42,0.8)";
+    ctx.fillRect(8, 8, tw, 20);
+    ctx.fillStyle = "#94a3b8";
+    ctx.fillText(d.envelope, 15, 22);
+    ctx.font = "12px system-ui, sans-serif";
   }
 
   // Gesture session tally (bottom-left chip, mirrors the JPEG caption).

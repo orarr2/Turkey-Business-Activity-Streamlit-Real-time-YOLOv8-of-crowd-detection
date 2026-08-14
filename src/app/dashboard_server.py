@@ -188,17 +188,16 @@ class _VisualSearchState:
                     except Exception as e:
                         print(f"visual-search: review-frames bootstrap skipped "
                               f"({type(e).__name__}: {e})")
-                # Per-object extraction of the review-frames pool. Needs no
-                # YOLO (boxes ship in the frame metadata), so it runs even
-                # when the model failed to load above.
-                try:
-                    from app.frame_crops import refresh as _fc_refresh
-                    summary = _fc_refresh(self.embedder, SNAPSHOTS_DIR)
-                    if summary.get("frames_touched"):
-                        print(f"visual-search: review-crops refresh {summary}")
-                except Exception as e:
-                    print(f"visual-search: review-crops refresh failed "
-                          f"({type(e).__name__}: {e}) - continuing")
+                # NOTE: the per-object extraction + OSNet embedding of the
+                # review-frames backlog (frame_crops.refresh) used to run
+                # HERE, synchronously, at boot. With days of pool-sync
+                # backlog that is MINUTES of onnxruntime grinding - and
+                # py-spy caught it running head-to-head with OpenVINO
+                # inference while an operator watched a live layer,
+                # stretching 0.7s ticks to 6-12s. It now runs in the
+                # background refresh loop, which yields while any live
+                # analysis session is active. Search results simply
+                # backfill a few minutes later on a fresh boot.
                 self._ready = True
             return self
 
@@ -1789,6 +1788,24 @@ def _warm_visual_search_async() -> None:
         while True:
             _time.sleep(120)
             try:
+                # Yield to live analysis: the OSNet embedding sweep runs
+                # onnxruntime's own thread pool for minutes at a time and
+                # was caught (py-spy) competing with OpenVINO inference
+                # for the 4 cores while an operator was actively watching
+                # a layer. Crops queue up and embed when analysis stops.
+                from app.live_analysis import MANAGER as _MGR
+                if _MGR.any_alive():
+                    continue
+                # Extraction first (was the boot-time blocker, now idle-
+                # only), then embedding of whatever is new.
+                try:
+                    from app.frame_crops import refresh as _fc_refresh
+                    fc = _fc_refresh(st.embedder, SNAPSHOTS_DIR)
+                    if fc.get("frames_touched"):
+                        print(f"  * review-crops refresh {fc} (background)")
+                except Exception as e:
+                    print(f"  ! review-crops refresh failed: "
+                          f"{type(e).__name__}: {e}")
                 with st.refresh_lock:
                     n = st.index.refresh()
                 if n:
@@ -1840,21 +1857,26 @@ def bind(port: int, directory: Path | None = None) -> http.server.ThreadingHTTPS
             slots = grid.get("slots") or []
             if not slots:
                 return
-            # Load our own yolo26m directly so producers boot INSIDE this
-            # process (same PID as _analysis_start/_analysis_stop) - the
-            # shared local_producers.PAUSED_SLOT_IDS set only works when
-            # the producer loop lives in the same PID that adds/removes.
-            # An earlier version waited on _VISUAL_SEARCH.get(), whose
-            # review-pool bootstrap can block for minutes on disk I/O and
-            # left the producers unstarted.
-            from app.detect_core import load_model as _load_model
-            weights = "yolo26m.pt"
-            model_path = ROOT.parent / weights   # <project>/src/yolo26m.pt
-            if not model_path.is_file():
-                model_path = ROOT / weights
-            _local_model = _load_model(str(model_path))
+            # ONE model for the whole process: producers share the
+            # visual-search model (yolov8s / its OpenVINO engine) instead
+            # of loading a second yolo26m engine. On the 8GB laptop the
+            # two-engine setup measurably exhausted RAM (88% used, 1GB
+            # free) and pushed inference into pagefile thrash - ticks
+            # ballooned to 15s. Wait for the warmup to finish loading,
+            # bounded so a broken warmup doesn't hang the hook forever.
+            import time as _t
+            _model = None
+            for _ in range(300):
+                _model = _VISUAL_SEARCH.model
+                if _model is not None:
+                    break
+                _t.sleep(1)
+            if _model is None:
+                print("  ! local_producers not started: model not loaded "
+                      "within 5 min")
+                return
             from app.local_producers import start_all as _start_all
-            _start_all(slots, _local_model,
+            _start_all(slots, _model,
                        model_view_interval_s=8, review_interval_s=60)
             print(f"local_producers running: {len(slots)} slots -> "
                   f"web/snapshots/model_view/local_*.jpg (~8s per round)")

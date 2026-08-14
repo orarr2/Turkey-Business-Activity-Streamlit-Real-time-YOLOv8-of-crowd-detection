@@ -12,6 +12,9 @@ venv/
 # Model weights (downloaded/exported on demand)
 *.pt
 *.onnx
+# OpenVINO engine exports - derived artifacts, re-created with
+# YOLO(<weights>).export(format="openvino", imgsz=640)
+*_openvino_model/
 
 # Collected data / outputs
 data/

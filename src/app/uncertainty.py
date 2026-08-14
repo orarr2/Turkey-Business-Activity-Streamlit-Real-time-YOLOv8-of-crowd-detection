@@ -58,7 +58,11 @@ def _predict_boxes(model, frame, imgsz: int | None) -> list[dict]:
     kwargs = {"conf": FLIP_PREDICT_CONF, "verbose": False}
     if imgsz:
         kwargs["imgsz"] = imgsz
-    res = model.predict(frame, **kwargs)[0]
+    # Shares the live model with sessions/producers - must hold the
+    # process-wide predict lock (OpenVINO InferRequest is not reentrant).
+    from app.detect_core import _PREDICT_LOCK
+    with _PREDICT_LOCK:
+        res = model.predict(frame, **kwargs)[0]
     names = getattr(model, "names", {}) or {}
     out: list[dict] = []
     for bx in res.boxes:

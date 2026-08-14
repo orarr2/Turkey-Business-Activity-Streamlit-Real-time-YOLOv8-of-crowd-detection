@@ -77,6 +77,27 @@ DISPLAY_MIN_CONF = 0.40
 DISPLAY_MAX_MISSES = 1     # allow 1-tick coasting through brief occlusion
 DISPLAY_CLASS_BLACKLIST = {"train", "boat", "airplane"}
 
+# Live-analysis detector envelope (2026-08 industry pass):
+# - LIVE_CLASSES excludes COCO train(6)/boat/airplane at the DETECTOR so
+#   a wall can never become a train pre-NMS (street scenes only; the
+#   collector's counting path keeps its own class set untouched).
+# - The model floor drops to 0.12 and the per-class gates are scaled by
+#   LIVE_GATE_SCALE so gate-hugging blurred pedestrians survive into the
+#   tracker, whose ByteTrack-style second stage may extend existing
+#   tracks with them (never mint new ones); DISPLAY_MIN_CONF still rules
+#   what the operator sees.
+# - agnostic NMS collapses car/truck double-boxes on one vehicle.
+LIVE_CLASSES = [0, 1, 2, 3, 5, 7]
+LIVE_CONF_FLOOR = 0.12
+LIVE_GATE_SCALE = 0.7
+# Night profile: mean-gray below NIGHT_LUMA turns on CLAHE (the classical
+# enhancer with the most consistent night-detection gains) ahead of
+# inference. Checked with hysteresis so a passing headlight doesn't
+# flip the profile every tick.
+NIGHT_LUMA_ON = 65.0
+NIGHT_LUMA_OFF = 80.0
+HEAT_HALF_LIFE_S = 180.0   # dwell-heat half-life (recent-activity view)
+
 # cam_id -> seconds between wall clock and the stream's PROGRAM-DATE-TIME
 # live edge, measured by dashboard_server's /ytproxy manifest handler on
 # every playlist refresh. Lets _publish_data stamp each tick with the
@@ -150,11 +171,19 @@ def resolve_cam(cam_id: str, grid_path: Path | None = None) -> dict:
 def _cam_from_slot(slot: dict) -> dict:
     cam_id = slot["slot_id"]
     name = slot.get("placeholder_name") or cam_id
+    # When the picker recorded which catalog camera backs this slot,
+    # carry it as stream_id: the session then resolves + pools its
+    # stream under the SAME key the producers use, so one camera never
+    # runs two decoders (that duplication measurably starved the CPU).
+    extra = {}
+    if slot.get("cam_id"):
+        extra["stream_id"] = slot["cam_id"]
     emb = slot.get("placeholder_embed") or ""
     m = re.search(r"/embed/([\w-]{11})", emb)
     if m:
         return {"id": cam_id, "name": name, "kind": "youtube",
-                "url": f"https://www.youtube.com/watch?v={m.group(1)}"}
+                "url": f"https://www.youtube.com/watch?v={m.group(1)}",
+                **extra}
     hls = slot.get("placeholder_hls") or ""
     m = re.match(r"^/tvkur/([^/]+)/", hls)
     if m:
@@ -255,23 +284,44 @@ def update_crossings(side_state: dict, tracks, frame_shape, line: list,
         b = tr.boxes[-1]
         fx = (b["x1"] + b["x2"]) / 2.0
         fy = b["y2"]
-        side = _line_side(fx / W, fy / H, line)
+        nx, ny = fx / W, fy / H
+        side = _line_side(nx, ny, line)
         prev = side_state.get(tr.tid)
+        prev_side = prev[0] if isinstance(prev, tuple) else prev
+        prev_pt = prev[1] if isinstance(prev, tuple) else None
         # Landing exactly on the line is ambiguous: don't classify it as
         # either side, and don't reset the last known side either - a
         # track that jitters neg -> 0 -> neg should count zero crossings.
         if side == 0:
             continue
-        side_state[tr.tid] = side
-        if prev is None or prev == 0:
+        side_state[tr.tid] = (side, (nx, ny))
+        if prev_side is None or prev_side == 0:
             continue
         direction = None
-        if prev < 0 and side > 0:
+        if prev_side < 0 and side > 0:
             direction = "in"
-        elif prev > 0 and side < 0:
+        elif prev_side > 0 and side < 0:
             direction = "out"
         if not direction:
             continue
+        # Industry crossing test (Ultralytics ObjectCounter pattern): a
+        # sign flip alone also fires when a track jumps laterally past
+        # the line's INFINITE extension. Require the finite movement
+        # segment to actually intersect the finite counting line.
+        if prev_pt is not None and not _segments_intersect(
+                prev_pt, (nx, ny),
+                (line[0][0], line[0][1]), (line[1][0], line[1][1])):
+            continue
+        # Eligibility gates: a 1-tick-old track or a sub-jitter hop must
+        # not count (sparse-tick anti-double-count per DeepStream /
+        # supervision practice - re-cast as displacement + age because a
+        # confirmation tick costs seconds here).
+        if getattr(tr, "hits", 99) < 2:
+            continue
+        if prev_pt is not None:
+            disp = ((nx - prev_pt[0]) ** 2 + (ny - prev_pt[1]) ** 2) ** 0.5
+            if disp < 0.01:
+                continue
         if last_cross_ts is not None:
             prev_ts = last_cross_ts.get(tr.tid)
             if prev_ts is not None and (now - prev_ts) < cooldown_s:
@@ -680,6 +730,95 @@ def draw_line_layer(img, line: list, cross: dict):
 # The live session.
 # ---------------------------------------------------------------------------
 
+def _segments_intersect(p1, p2, q1, q2) -> bool:
+    """True when finite segments p1-p2 and q1-q2 properly intersect.
+    Standard orientation test; collinear grazing counts as a miss (a
+    foot point sliding ALONG the line is not a crossing)."""
+    def orient(a, b, c):
+        v = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+        return 0 if abs(v) < 1e-12 else (1 if v > 0 else -1)
+    o1 = orient(p1, p2, q1)
+    o2 = orient(p1, p2, q2)
+    o3 = orient(q1, q2, p1)
+    o4 = orient(q1, q2, p2)
+    return o1 != o2 and o3 != o4 and 0 not in (o1, o2, o3, o4)
+
+
+def _clip_poly_by_halfplane(poly, a, b):
+    """Sutherland-Hodgman step: keep the part of `poly` left of a->b."""
+    def side(p):
+        return ((b[0] - a[0]) * (p[1] - a[1])
+                - (b[1] - a[1]) * (p[0] - a[0]))
+    out = []
+    n = len(poly)
+    for i in range(n):
+        cur, nxt = poly[i], poly[(i + 1) % n]
+        sc, sn = side(cur), side(nxt)
+        if sc >= 0:
+            out.append(cur)
+        if (sc >= 0) != (sn >= 0):
+            t = sc / (sc - sn)
+            out.append((cur[0] + t * (nxt[0] - cur[0]),
+                        cur[1] + t * (nxt[1] - cur[1])))
+    return out
+
+
+def _poly_area(poly) -> float:
+    n = len(poly)
+    if n < 3:
+        return 0.0
+    s = 0.0
+    for i in range(n):
+        x1, y1 = poly[i]
+        x2, y2 = poly[(i + 1) % n]
+        s += x1 * y2 - x2 * y1
+    return abs(s) / 2.0
+
+
+def box_overlap_over_spot(box_norm, spot_pts) -> float:
+    """area(box INTERSECT spot) / area(spot), all in normalized coords.
+
+    The industry association metric for parking (IoU/overlap thresholds
+    0.15-0.5 in the PKLot/Frigate/Roboflow lineage) - a vehicle CENTER
+    inside a polygon is how a shopfront ends up 'occupied' by a passing
+    bike; substantial areal overlap is much harder to fake."""
+    spot = [(float(p[0]), float(p[1])) for p in spot_pts]
+    x1, y1, x2, y2 = box_norm
+    # Clip the SPOT by the box's four half-planes (box is convex).
+    for a, b in (((x1, y1), (x2, y1)), ((x2, y1), (x2, y2)),
+                 ((x2, y2), (x1, y2)), ((x1, y2), (x1, y1))):
+        spot = _clip_poly_by_halfplane(spot, a, b)
+        if not spot:
+            return 0.0
+    denom = _poly_area([(float(p[0]), float(p[1])) for p in spot_pts])
+    return (_poly_area(spot) / denom) if denom > 1e-9 else 0.0
+
+
+def _static_postures(kps: list) -> list:
+    """Single-frame postures provable from COCO-17 keypoints.
+
+    hand_raised: a wrist confidently above its OWN shoulder line (and
+    above the nose when the nose is confident) with the elbow between
+    them - the classroom/audience "hand-raiser" geometry. Sequence
+    gestures (waving etc.) are not attempted: they need >=4-10 fps.
+    """
+    def ok(i):
+        return (i < len(kps) and kps[i] and len(kps[i]) >= 3
+                and kps[i][2] >= 0.35)
+    out = []
+    NOSE, LSH, RSH, LEL, REL, LWR, RWR = 0, 5, 6, 7, 8, 9, 10
+    for wr, el, sh in ((LWR, LEL, LSH), (RWR, REL, RSH)):
+        if not (ok(wr) and ok(el) and ok(sh)):
+            continue
+        wrist_above_shoulder = kps[wr][1] < kps[sh][1] - 4
+        above_nose = (not ok(NOSE)) or kps[wr][1] < kps[NOSE][1] + 6
+        elbow_between = kps[el][1] < kps[sh][1] + 10
+        if wrist_above_shoulder and above_nose and elbow_between:
+            out.append("hand_raised")
+            break
+    return out
+
+
 def _pt_in_poly(x: float, y: float, pts: list) -> bool:
     """Ray-casting point-in-polygon on normalized coords."""
     inside = False
@@ -745,7 +884,9 @@ class _InferBatcher(threading.Thread):
                         [r["frame"] for r in batch],
                         imgsz=LIVE_IMGSZ,
                         per_class_conf_list=[r["gates"] for r in batch],
-                        conf_list=[r["conf"] for r in batch])
+                        conf_list=[r["conf"] for r in batch],
+                        classes=LIVE_CLASSES,
+                        agnostic_nms=True)
                 for r, (_counts, boxes) in zip(batch, outs):
                     r["out"] = boxes
             except Exception as e:  # noqa: BLE001 - deliver, don't die
@@ -888,6 +1029,18 @@ class LiveSession(threading.Thread):
         self.cam = cam
         self.cam_id = cam["id"]
         self.cam_name = cam.get("name", cam["id"])
+        # Stream identity for resolve-cache + shared reader pool. When the
+        # slot maps to a catalog camera this is the catalog id (shared
+        # with local_producers -> ONE reader per physical camera); the
+        # session's own cam_id stays the slot id for zones/lines/API.
+        from app.cameras import CAMERAS as _CAMS
+        sid = cam.get("stream_id")
+        if sid and sid in _CAMS:
+            self.stream_key = sid
+            self.stream_cam = {"id": sid, **_CAMS[sid]}
+        else:
+            self.stream_key = self.cam_id
+            self.stream_cam = cam
         self.model = model
         self.layer = layer            # mutated by the manager on switch
         self.created = time.time()
@@ -981,7 +1134,7 @@ class LiveSession(threading.Thread):
         from app.detect_core import (HEADER_HOSTS, grab_frame,
                                      invalidate_stream, resolve_stream)
         try:
-            url = resolve_stream(self.cam)
+            url = resolve_stream(self.stream_cam)
         except Exception:
             self._fail += 1
             return None
@@ -993,13 +1146,13 @@ class LiveSession(threading.Thread):
             if frame is None:
                 self._fail += 1
                 if self._fail % GRAB_FAIL_REFRESH == 0:
-                    invalidate_stream(self.cam_id)
+                    invalidate_stream(self.stream_key)
             else:
                 self._fail = 0
                 self._last_frame_ts = time.time()
             return frame
         try:
-            r = get_shared_reader(self.cam, self.cam_id)
+            r = get_shared_reader(self.stream_cam, self.stream_key)
         except Exception:
             self._fail += 1
             return None
@@ -1016,19 +1169,47 @@ class LiveSession(threading.Thread):
             self._fail += 1
             if self._fail % GRAB_FAIL_REFRESH == 0:
                 # Expired manifest / rotated token: force a fresh resolve.
-                invalidate_stream(self.cam_id)
+                invalidate_stream(self.stream_key)
         else:
             self._fail = 0
             self._last_frame_ts = r.latest_ts
         return frame
 
+    def _night_profile(self, frame) -> bool:
+        """True when the night profile is active for this frame. Mean gray
+        with ON/OFF hysteresis; recomputed cheaply on a 4x-decimated view."""
+        import cv2
+        g = cv2.cvtColor(frame[::4, ::4], cv2.COLOR_BGR2GRAY)
+        luma = float(g.mean())
+        prev = getattr(self, "_night_on", False)
+        if prev and luma > NIGHT_LUMA_OFF:
+            self._night_on = False
+        elif not prev and luma < NIGHT_LUMA_ON:
+            self._night_on = True
+        return getattr(self, "_night_on", False)
+
     def _infer(self, frame) -> list[dict]:
+        import cv2
         from app.detect_core import DEFAULT_PER_CLASS_CONF, filter_boxes_roi
+        # Night profile: CLAHE on the L channel lifts dark pedestrians
+        # into the detector's working range (the most consistently
+        # effective classical enhancer in the night-CCTV literature).
+        if self._night_profile(frame):
+            lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+            l_ch, a_ch, b_ch = cv2.split(lab)
+            clahe = getattr(self, "_clahe", None)
+            if clahe is None:
+                clahe = self._clahe = cv2.createCLAHE(
+                    clipLimit=2.5, tileGridSize=(8, 8))
+            frame = cv2.cvtColor(
+                cv2.merge((clahe.apply(l_ch), a_ch, b_ch)),
+                cv2.COLOR_LAB2BGR)
         gates = dict(self.cam.get("per_class_conf") or DEFAULT_PER_CLASS_CONF)
+        gates = {k: max(LIVE_CONF_FLOOR, v * LIVE_GATE_SCALE)
+                 for k, v in gates.items()}
         # All sessions funnel through the batcher: concurrent ticks share
         # one batched forward pass instead of queueing on INFER_LOCK.
-        boxes = BATCHER.infer(self.model, frame,
-                              self.cam.get("conf", 0.30), gates)
+        boxes = BATCHER.infer(self.model, frame, LIVE_CONF_FLOOR, gates)
         if (self.cam.get("roi") or self.cam.get("roi_exclude")
                 or self.cam.get("roi_exclude_class")):
             boxes = filter_boxes_roi(boxes, frame.shape, self.cam.get("roi"),
@@ -1048,12 +1229,15 @@ class LiveSession(threading.Thread):
         if not self._faces_ok:
             return []
         out = _faces.detect_faces(frame)
-        # Night frames made the raw detector spray hundreds of noise
-        # rects (measured 440 on one tick) - a conf floor, a minimum
-        # size and a hard cap keep both the render and the JSON sane.
+        # Industry envelope (AWS floor 40px, Azure 36px, YuNet's own
+        # shipped threshold 0.9): conf >= 0.9 and face >= 24px, hard cap
+        # 32. Night frames once sprayed 440 sub-threshold noise rects;
+        # under this gate the honest common case on far-field night
+        # street cams is ZERO faces - which the overlay states instead
+        # of drawing speculation.
         out = [f for f in out
-               if float(f.get("conf") or 0) >= 0.6
-               and (f["x2"] - f["x1"]) >= 8 and (f["y2"] - f["y1"]) >= 8]
+               if float(f.get("conf") or 0) >= 0.9
+               and (f["x2"] - f["x1"]) >= 24 and (f["y2"] - f["y1"]) >= 24]
         out.sort(key=lambda f: -float(f.get("conf") or 0))
         return out[:32]
 
@@ -1135,6 +1319,15 @@ class LiveSession(threading.Thread):
         self._last_tick = now
         if self.heat_since is None:
             self.heat_since = now
+        # Half-life decay before banking the new tick: the heatmap reads
+        # as RECENT activity (industry "decay factor" / windowed-view
+        # pattern) instead of an ever-brightening all-time integral in
+        # which one busy corner eventually crushes the whole colormap.
+        if w > 0:
+            decay = 0.5 ** (w / HEAT_HALF_LIFE_S)
+            for row in self.heat:
+                for gx in range(len(row)):
+                    row[gx] *= decay
         bump_heat(self.heat, boxes, frame_shape, w)
         self._maybe_reload_line(now)
         self._maybe_reload_zones(now)
@@ -1238,8 +1431,13 @@ class LiveSession(threading.Thread):
                              dwell_s=float(z.get("dwell_s")
                                            or DEFAULT_LOITER_DWELL_S))
                 loiter.append((zi, entry))
+        if not hasattr(self, "_zone_streak"):
+            self._zone_streak: dict[tuple, int] = {}
+            self._zone_last_seen: dict[tuple, float] = {}
+            self._spot_state: dict[int, dict] = {}
         dwell_by_tid: dict[int, float] = {}
         active: set[tuple] = set()
+        spot_cand: dict[int, str] = {}   # zone_idx -> vehicle cls this tick
         for tr in (self.tracker.open if self.tracker else []):
             if tr.misses > DISPLAY_MAX_MISSES or tr.hits < DISPLAY_MIN_HITS:
                 continue
@@ -1251,6 +1449,16 @@ class LiveSession(threading.Thread):
                     if _pt_in_poly(cx, by, e["points"]):
                         key = (tr.tid, zi)
                         active.add(key)
+                        self._zone_last_seen[key] = now_t
+                        streak = self._zone_streak.get(key, 0) + 1
+                        self._zone_streak[key] = streak
+                        # Entry debounce (Frigate inertia / Bosch
+                        # debounce): the dwell clock arms only on the
+                        # SECOND consecutive tick inside - one grazing
+                        # tick never starts a loitering countdown.
+                        if streak < 2:
+                            e["count"] += 1
+                            continue
                         dw = now_t - self._zone_since.setdefault(key, now_t)
                         e["count"] += 1
                         e["max_dwell"] = max(e["max_dwell"], dw)
@@ -1259,17 +1467,68 @@ class LiveSession(threading.Thread):
                         dwell_by_tid[tr.tid] = max(
                             dwell_by_tid.get(tr.tid, 0.0), dw)
             if tr.cls in _VEHICLE_CLASSES and parking:
-                cx = ((b["x1"] + b["x2"]) / 2) / W
-                cy = ((b["y1"] + b["y2"]) / 2) / H
+                # Industry association: substantial AREA overlap with the
+                # spot (>=30% of the spot covered), argmax spot per
+                # vehicle - never the center-point test that let passing
+                # traffic "occupy" a shopfront. Plus a stationarity gate:
+                # only a vehicle that has been near-still for a while
+                # can PARK (displacement under ~35% of its own diagonal
+                # over a 45s+ track).
+                bn = (b["x1"] / W, b["y1"] / H, b["x2"] / W, b["y2"] / H)
+                span = tr.times[-1] - tr.times[0]
+                c0 = ((tr.boxes[0]["x1"] + tr.boxes[0]["x2"]) / 2,
+                      (tr.boxes[0]["y1"] + tr.boxes[0]["y2"]) / 2)
+                c1 = ((b["x1"] + b["x2"]) / 2, (b["y1"] + b["y2"]) / 2)
+                disp = ((c1[0] - c0[0]) ** 2 + (c1[1] - c0[1]) ** 2) ** 0.5
+                diag = ((b["x2"] - b["x1"]) ** 2
+                        + (b["y2"] - b["y1"]) ** 2) ** 0.5
+                stationary = span >= 45 and disp < 0.35 * max(diag, 1)
+                if not stationary:
+                    continue
+                best_zi, best_ov = None, 0.0
                 for zi, e in parking:
-                    if not e["occupied"] and _pt_in_poly(cx, cy,
-                                                         e["points"]):
-                        e["occupied"] = True
-                        e["cls"] = tr.cls
-        # Drop clocks of tracks that left their zone (or died) so a
-        # RETURN starts a fresh dwell instead of resuming the old one.
-        self._zone_since = {k: v for k, v in self._zone_since.items()
-                            if k in active}
+                    ov = box_overlap_over_spot(bn, e["points"])
+                    if ov > best_ov:
+                        best_zi, best_ov = zi, ov
+                if best_zi is not None and best_ov >= 0.30:
+                    spot_cand[best_zi] = tr.cls
+        # Per-spot asymmetric hysteresis: 2 consecutive positive ticks to
+        # flip OCCUPIED, 4 consecutive negatives to flip back - night
+        # detector flicker must not toggle a spot, and a missed
+        # detection is weak evidence of vacancy.
+        for zi, e in parking:
+            st = self._spot_state.setdefault(
+                zi, {"occ": False, "pos": 0, "neg": 0, "cls": None,
+                     "ever": False})
+            if zi in spot_cand:
+                st["pos"] += 1
+                st["neg"] = 0
+                st["cls"] = spot_cand[zi]
+                st["ever"] = True
+                if st["pos"] >= 2:
+                    st["occ"] = True
+            else:
+                st["neg"] += 1
+                st["pos"] = 0
+                if st["neg"] >= 4:
+                    st["occ"] = False
+            e["occupied"] = st["occ"]
+            e["cls"] = st["cls"] if st["occ"] else None
+            e["seen_vehicle"] = st["ever"]
+        # Loiter clocks survive a short track loss (grace) so one missed
+        # tick doesn't reset a 25s dwell; a real exit (grace expired)
+        # clears the clock and the streak.
+        GRACE_S = 12.0
+        for key in list(self._zone_since.keys()):
+            if key not in active and \
+                    now_t - self._zone_last_seen.get(key, 0) > GRACE_S:
+                self._zone_since.pop(key, None)
+                self._zone_streak.pop(key, None)
+                self._zone_last_seen.pop(key, None)
+        for key in list(self._zone_streak.keys()):
+            if key not in active and \
+                    now_t - self._zone_last_seen.get(key, 0) > GRACE_S:
+                self._zone_streak.pop(key, None)
         result = ([e for _, e in loiter], [e for _, e in parking],
                   dwell_by_tid)
         self._zone_cache_key = key
@@ -1328,6 +1587,11 @@ class LiveSession(threading.Thread):
                 "vx": round(float(tr.vx), 1),
                 "vy": round(float(tr.vy), 1),
             }
+            if tr.misses:
+                # Coasting through a missed detection - the client draws
+                # it dashed so a box gliding on prediction alone is
+                # visually distinct from an observed one.
+                jb["coast"] = tr.misses
             # Layer-specific extras ride on each box so the canvas can
             # draw the REAL layer, not just generic rectangles - this
             # was the "analysis is not logically right" gap: trails,
@@ -1338,29 +1602,44 @@ class LiveSession(threading.Thread):
                     [int((b["x1"] + b["x2"]) / 2),
                      int((b["y1"] + b["y2"]) / 2)]
                     for b in tr.boxes[-12:]]
-                try:
-                    from app.behavior import track_stats
-                    row = track_stats(tr.cls, tr.boxes, tr.times,
-                                      frame_shape)
-                    if row.get("kmh_est"):
-                        jb["kmh"] = row["kmh_est"]
-                except Exception:
-                    pass
+                # Relative speed tiers instead of km/h: without a
+                # ground-plane calibration a km/h number is a guess with
+                # 20-30% scale error baked in (dimension-prior variance),
+                # and it printed absurdities like 0.1 km/h on parked
+                # bikes. Speed in BODY LENGTHS per second is
+                # perspective-robust and honest.
+                spd = (tr.vx ** 2 + tr.vy ** 2) ** 0.5
+                diag = ((last["x2"] - last["x1"]) ** 2
+                        + (last["y2"] - last["y1"]) ** 2) ** 0.5
+                blps = spd / max(diag, 1.0)
+                if blps < 0.05 and tr.hits >= 3:
+                    jb["tier"] = "static"
+                elif blps < 0.25:
+                    jb["tier"] = "slow"
+                elif blps < 0.8:
+                    jb["tier"] = "moving"
+                else:
+                    jb["tier"] = "fast"
             elif layer in ("pose", "gestures", "body"):
                 kps = last.get("kps")
-                if kps:
+                # COCO keypoints are only annotated for medium+ people;
+                # below ~96px box height skeletons are guesswork, so the
+                # envelope gate simply withholds them (the note in the
+                # payload tells the operator how many were gated).
+                if kps and (jb["y2"] - jb["y1"]) >= 96:
                     jb["kps"] = [[int(k[0]), int(k[1]), round(k[2], 2)]
                                  for k in kps]
-                if layer == "gestures" and tr.cls == "person":
-                    try:
-                        from app.gestures import detect_gestures
-                        kseq = [b.get("kps") for b in tr.boxes[-16:]]
-                        if any(kseq):
-                            g = detect_gestures(kseq)
-                            if g:
-                                jb["gestures"] = g
-                    except Exception:
-                        pass
+                if layer == "gestures" and tr.cls == "person" \
+                        and jb.get("kps"):
+                    # Static single-frame postures. Sequence-based hand
+                    # gestures are PHYSICALLY absent at 0.2-1 fps (a 1-2
+                    # Hz wave aliases to noise below ~4 fps), so the
+                    # layer detects what one frame can prove: a raised
+                    # hand (wrist above shoulder with confident arm
+                    # keypoints) - the analytic vendors actually ship.
+                    g = _static_postures(jb["kps"])
+                    if g:
+                        jb["gestures"] = g
                 if layer == "body" and tr.cls == "person":
                     try:
                         from app.behavior import track_stats
@@ -1370,14 +1649,38 @@ class LiveSession(threading.Thread):
                         kseq = [b.get("kps") for b in tr.boxes[-16:]]
                         row.update(label_track(row, frame_shape,
                                                kseq if any(kseq) else None))
-                        if (row.get("label") in BODY_ANOMALY_LABELS
-                                or row.get("pose_flags")):
-                            jb["flag"] = row.get("label") or ""
-                            jb["alert"] = bool(row.get("alert"))
-                            flags = [f for f in (row.get("pose_flags") or [])
-                                     if f and f != row.get("label")]
-                            if flags:
-                                jb["flags"] = flags
+                        label = row.get("label") \
+                            if (row.get("label") in BODY_ANOMALY_LABELS
+                                or row.get("pose_flags")) else None
+                        # Persistence (the production false-alarm gate):
+                        # a flag must repeat on 2 consecutive ticks for
+                        # the SAME track before the operator sees it -
+                        # at ~1s ticks the actual fall transition is
+                        # unobservable anyway; the persistent lying /
+                        # erratic STATE is what we can honestly claim.
+                        if not hasattr(self, "_body_streak"):
+                            self._body_streak = {}
+                        if label:
+                            key = (tr.tid, label)
+                            n = self._body_streak.get(key, 0) + 1
+                            self._body_streak = {
+                                k: v for k, v in self._body_streak.items()
+                                if k[0] != tr.tid or k == key}
+                            self._body_streak[key] = n
+                            if n >= 2:
+                                jb["flag"] = label
+                                jb["alert"] = bool(row.get("alert"))
+                                flags = [f for f in
+                                         (row.get("pose_flags") or [])
+                                         if f and f != label]
+                                if flags:
+                                    jb["flags"] = flags
+                        else:
+                            if hasattr(self, "_body_streak"):
+                                self._body_streak = {
+                                    k: v for k, v
+                                    in self._body_streak.items()
+                                    if k[0] != tr.tid}
                     except Exception:
                         pass
             js_boxes.append(jb)
@@ -1427,6 +1730,21 @@ class LiveSession(threading.Thread):
                  "conf": round(float(f.get("conf") or 0), 2)}
                 for f in (faces_list or [])]
             data["faces_ok"] = bool(self._faces_ok)
+        # Operating-envelope note per pose-family layer: how many people
+        # were in scene vs how many passed the size gates, so an empty
+        # overlay reads as an honest "out of range", not a failure.
+        if layer in ("pose", "gestures", "body", "faces"):
+            persons = [b for b in js_boxes if b["cls"] == "person"]
+            with_kps = [b for b in persons if b.get("kps")]
+            if layer == "faces":
+                data["envelope"] = (
+                    f"{len(persons)} people · {len(faces_list or [])} "
+                    f"faces >=24px @conf .9 (far-field night cams are "
+                    f"usually below face range)")
+            else:
+                data["envelope"] = (
+                    f"{len(persons)} people · skeletons on "
+                    f"{len(with_kps)} (>=96px only)")
         with self.lock:
             self.latest_data = data
 

@@ -129,7 +129,12 @@ def attach_keypoints_crops(model, frame, boxes: list[dict],
         offsets.append((b, x1, y1))
     if not crops:
         return 0
-    results = model.predict(crops, imgsz=imgsz, conf=conf, verbose=False)
+    # Serialized behind the process-wide predict lock: concurrent
+    # predict() on a shared model instance permanently wedges OpenVINO's
+    # InferRequest (see detect_core._PREDICT_LOCK).
+    from app.detect_core import _PREDICT_LOCK
+    with _PREDICT_LOCK:
+        results = model.predict(crops, imgsz=imgsz, conf=conf, verbose=False)
     matched = 0
     for (b, ox, oy), res in zip(offsets, results):
         if res.boxes is None or res.keypoints is None or len(res.boxes) == 0:

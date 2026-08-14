@@ -9,6 +9,7 @@ import os
 import re
 import ssl
 import tempfile
+import threading
 import time
 import urllib.request
 
@@ -39,8 +40,29 @@ os.environ.setdefault(
     "OPENCV_FFMPEG_CAPTURE_OPTIONS",
     (f"stimeout;{_STREAM_OPEN_TIMEOUT_MS * 1000}"      # microseconds
      f"|rw_timeout;{_STREAM_READ_TIMEOUT_MS * 1000}"
-     "|reconnect;1|reconnect_streamed;1|reconnect_delay_max;5"),
+     "|reconnect;1|reconnect_streamed;1|reconnect_delay_max;5"
+     # Single-threaded H.264 decode per capture: with four persistent
+     # 1080p readers, ffmpeg's default per-stream thread pool (cores)
+     # oversubscribed the 4-core laptop so badly that OpenVINO inference
+     # stretched from 0.66s (isolated) to 6-12s inside the server
+     # process. One decode thread per stream keeps 25fps comfortably
+     # and leaves the cores to the model.
+     "|threads;1"),
 )
+
+# Same oversubscription control for the compute libraries: OpenVINO owns
+# the heavy math; torch only does pre/post-processing here, and cv2's own
+# parallel ops (CLAHE, resize) are short - neither deserves a full pool
+# that preempts the inference threads.
+try:
+    cv2.setNumThreads(2)
+except Exception:
+    pass
+try:
+    import torch as _torch
+    _torch.set_num_threads(1)
+except Exception:
+    pass
 
 
 def _open_cap(url_or_path: str) -> "cv2.VideoCapture":
@@ -78,6 +100,10 @@ def _open_cap(url_or_path: str) -> "cv2.VideoCapture":
 # + rail). `train` was added after a metro train crossing the frame went
 # unlabeled - the model classifies it as class 6, but without id 6 in the
 # `classes=` filter YOLO silently drops it before we ever see the box.
+# Serializes every model.predict in this process - see the comment at the
+# call site in detect_with_boxes. RLock so a locked caller may re-enter.
+_PREDICT_LOCK = threading.RLock()
+
 CLASSES_OF_INTEREST = {
     "person": 0,
     "bicycle": 1,
@@ -119,6 +145,24 @@ def load_model(weights: str = "yolov8s.pt"):
     means the base weights run untouched, bit-identical (plan D6).
     """
     from ultralytics import YOLO
+
+    # Prefer a sibling OpenVINO export when one exists: on the Intel CPUs
+    # this project actually runs on it cuts inference time by ~2-3x for
+    # bit-comparable outputs (Ultralytics' documented OpenVINO gain),
+    # which is the difference between 1 and 3 usable analysis ticks per
+    # second-scale interval. Export once with:
+    #   YOLO("src/yolo26m.pt").export(format="openvino", imgsz=640)
+    # The RL adapter overlay only applies to torch checkpoints, so when
+    # the OpenVINO path is taken the adapter (none is promoted anyway)
+    # is skipped with a log line rather than a crash.
+    if str(weights).endswith(".pt"):
+        import os as _os
+        _ov_dir = str(weights)[:-3] + "_openvino_model"
+        if _os.path.isdir(_ov_dir):
+            model = YOLO(_ov_dir)
+            print(f"detect: OpenVINO engine loaded ({_ov_dir}) - "
+                  f"adapter overlay skipped (torch-only)")
+            return model
 
     model = YOLO(weights)
     try:
@@ -654,7 +698,9 @@ def grab_frame(stream_url: str):
 def detect_with_boxes_batch(model, frames, conf: float = 0.35,
                             imgsz: int | None = None,
                             per_class_conf_list=None,
-                            conf_list=None):
+                            conf_list=None,
+                            classes: list | None = None,
+                            agnostic_nms: bool = False):
     """Batched detect_with_boxes: ONE model forward over N frames.
 
     On the CPU-only laptop a batch-of-4 forward costs ~2.5x a single frame
@@ -677,13 +723,15 @@ def detect_with_boxes_batch(model, frames, conf: float = 0.35,
     for g, c in zip(gates_list, confs):
         floors.append(min(g.values()) if g else c)
     model_gate = max(0.001, min(floors))
-    kwargs = dict(conf=model_gate,
-                  classes=list(CLASSES_OF_INTEREST.values()), verbose=False)
-    if imgsz:
-        kwargs["imgsz"] = imgsz
-    results = model.predict(frames, **kwargs)
+    # Sequential per-frame inference, deliberately: OpenVINO's static
+    # batch-1 engine is the FAST configuration on CPU (a dynamic-shape
+    # export measured ~4x slower per frame), and torch's cross-frame
+    # batching gain was modest. The batcher still coalesces sessions -
+    # one INFER_LOCK hold, synchronized rounds - it just walks the
+    # frames one forward pass at a time.
     return [detect_with_boxes(model, frames[i], conf=confs[i], imgsz=imgsz,
-                              per_class_conf=gates_list[i], _res=results[i])
+                              per_class_conf=gates_list[i],
+                              classes=classes, agnostic_nms=agnostic_nms)
             for i in range(len(frames))]
 
 
@@ -1285,6 +1333,8 @@ def detect_with_boxes(model, frame, conf: float = 0.35,
                       person_min_height_px: int | None = DEFAULT_PERSON_MIN_HEIGHT_PX,
                       person_max_width_frac: float | None = DEFAULT_PERSON_MAX_WIDTH_FRAC,
                       rider_iou: float | None = DEFAULT_RIDER_IOU,
+                      classes: list | None = None,
+                      agnostic_nms: bool = False,
                       _res=None,
                       ) -> tuple[dict, list[dict]]:
     """Like detect_and_count but also returns per-detection boxes.
@@ -1321,13 +1371,27 @@ def detect_with_boxes(model, frame, conf: float = 0.35,
         model_gate = max(0.001, min(min(per_cls_gate.values()), conf))
 
     kwargs = dict(conf=model_gate,
-                  classes=list(CLASSES_OF_INTEREST.values()), verbose=False)
+                  classes=(classes if classes is not None
+                           else list(CLASSES_OF_INTEREST.values())),
+                  agnostic_nms=agnostic_nms, verbose=False)
     if imgsz:
         kwargs["imgsz"] = imgsz
     # _res lets detect_with_boxes_batch run ONE batched forward pass over
     # several frames and reuse this function purely for the per-frame
     # post-filtering (per-class gates, person plausibility, rider rescue).
-    res = _res if _res is not None else model.predict(frame, **kwargs)[0]
+    if _res is not None:
+        res = _res
+    else:
+        # ONE predict at a time, process-wide. A YOLO() instance shares a
+        # single predictor (and, under OpenVINO, a single InferRequest);
+        # concurrent predict() calls from different threads - sessions,
+        # producers, warmup, search - deadlocked the OV request PERMANENTLY
+        # (py-spy: batcher parked inside openvino infer forever, all four
+        # sessions starved behind it). torch merely tolerated the race;
+        # OpenVINO does not. The lock costs microseconds next to the
+        # ~0.7s forward pass.
+        with _PREDICT_LOCK:
+            res = model.predict(frame, **kwargs)[0]
     xyxy = res.boxes.xyxy.cpu().numpy()
     cls_ids = res.boxes.cls.cpu().numpy().astype(int)
     confs = res.boxes.conf.cpu().numpy()
