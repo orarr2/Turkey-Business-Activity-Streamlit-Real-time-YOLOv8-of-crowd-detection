@@ -733,7 +733,10 @@ if real_len and speeds:
 
 Honest error band ±30-50 % (vehicle not always parallel to the image plane).
 The report shows this only when the camera has enough statistical mass
-(≥ 5 samples AND ≥ 10 % of rounds carrying one).
+(≥ 5 samples AND ≥ 10 % of rounds carrying one). On the live JPEG the
+km/h chip renders only at ≥ 8 km/h with ≥ 5 sightings — below that the
+sampled-tick ruler sits inside its own noise band (audit 2026-08-14:
+moving bikes chipped "2.3 km/h"), and a wrong number is worse than none.
 
 On the live canvas the same layer labels every track with a speed TIER
 instead of km/h, computed in body-lengths per second —
@@ -796,8 +799,15 @@ runs three tiers per track and returns exactly one label:
 1. **Pose flags from the skeleton** (`pose_flags_of`): the shoulder-mid ↔
    hip-mid line — its angle from vertical; > `FALL_TORSO_DEG = 60°` for ≥
    `POSE_FLAG_MIN_FRAMES = 2` frames → `fall_suspect`.
-2. **Course reversals** (`heading_turns`): how many > 90 ° reversals across
-   the trajectory; ≥ 3 → `erratic`.
+2. **Course reversals** (`heading_turns`): how many > 100 ° reversals
+   across the trajectory; ≥ 3 → `erratic`. Two jitter guards (audit
+   2026-08-14, after 4-6 false ERRATIC alerts per tick on a seated
+   group): a significant step must cover ≥ 35 % of the OBJECT's own
+   diagonal (`TURN_MIN_BODY_FRAC` - box jitter scales with box size, so
+   a frame-relative floor alone is not enough), and `erratic` requires
+   `moving_frac` ≥ 0.30 on a non-stationary track - a near-still person
+   cannot zigzag. Mounted riders (person box ≥ 45 % inside a vehicle
+   box) are excluded from behavior verdicts entirely.
 3. **Pure kinematics**: mean speed, moving fraction, net displacement over
    path — yields `running` / `walking` / `standing` / `dwelling` / `driving`
    / `parked` / `normal`.
@@ -885,12 +895,20 @@ from `data/zones/<cam>.json` every 5 s, same contract as the line.
 
 ### 5.9 Parking occupancy — `parking`
 
-Polygons of kind `parking`: a spot is `occupied` when any confirmed
-vehicle-class track's foot point is inside it. The event fires only on the
+Polygons of kind `parking`: a spot is `occupied` when a stationary
+vehicle-class track covers ≥ 30 % of it (asymmetric hysteresis: 2 positive
+ticks to flip occupied, 4 to flip free). The event fires only on the
 occupied/free FLIP — state changes are information, steady state is
 wallpaper. Occupancy + loiter dwell are computed once per tick and shared
 between the JPEG render and the JSON publish (cached on the frame's
 capture stamp).
+
+**Trackerless probe** (audit 2026-08-14: spots visibly full of parked
+scooters read "0/2 occupied" because parked two-wheelers at night never
+clear the tracker's confirmation gates): every 12 s the parking layer
+re-detects each spot on a 2x-upscaled crop of the spot itself
+(`_parking_probe`, imgsz 320, vehicle classes only); a fresh hit feeds
+the same per-spot hysteresis as a track candidate.
 
 ### 5.10 License plates (LPR) — `plates` + `app/plates.py`
 
@@ -910,10 +928,17 @@ Two separated stages plus a per-track cache:
 
 A read is accepted at OCR conf ≥ 0.45 with ≥ 4 characters; each TRACK
 keeps its best read and re-tries until conf ≥ 0.70 or the try budget runs
-out — best-of-N across frames, never one arbitrary frame. Detection and
-OCR are separate verdicts: the layer envelope always reports the honest
-funnel — "N vehicles · M in plate range (≥ 96 px) · K read". A first
-successful read fires a hot-trail event with the text.
+out — best-of-N across frames, never one arbitrary frame. Two 2026-08-14
+additions: a **sharpness gate** (Laplacian variance ≥ 45 on the plate
+crop, else the OCR is skipped and the try refunded — a motion-smeared
+night plate can only hallucinate) with a **closest-approach** preference
+(no budget spent once an unread vehicle shrinks below 85 % of its own
+peak width), and a **static retry**: an exhausted-but-unread track gets a
+fresh try budget every 120 s, so a parked vehicle's legible plate is not
+doomed by the session's first six ticks. Detection and OCR are separate
+verdicts: the layer envelope always reports the honest funnel — "N
+vehicles · M in plate range (≥ 96 px) · K read". A first successful read
+fires a hot-trail event with the text.
 
 ### 5.11 The hot trail, saving, and the Investigation tab
 

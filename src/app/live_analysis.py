@@ -119,6 +119,15 @@ JPEG_QUALITY = 80
 TRACK_KEEP = 48           # per-track box history cap (live runs are open-ended)
 TRAIL_MAX_PTS = 40
 GRAB_FAIL_REFRESH = 3     # consecutive grab failures before re-resolving
+# Parking-spot probe: parked two-wheelers at night rarely clear the
+# tracker's confirmation gates (audit 2026-08-14: spots visibly full read
+# "0/2 occupied"), so the parking layer additionally re-detects each spot
+# on a 2x-upscaled crop of the spot itself every PARKING_PROBE_EVERY_S.
+# A fresh hit feeds the same per-spot hysteresis as a track candidate.
+PARKING_PROBE_EVERY_S = 12.0
+PARKING_PROBE_FRESH_S = 30.0
+PARKING_PROBE_CONF = 0.30
+
 # Default counting line for cameras without a configured "line" (the local
 # picker's cameras): horizontal, at 62% height - the sidewalk band on a
 # typical street view. Same normalized [[x,y],[x,y]] convention as
@@ -520,6 +529,10 @@ def draw_paths_layer(img, tracks, last_boxes: list[dict],
     from app.behavior import _TRAIL_COLORS
     from app.detect_core import draw_boxes
     for tr in tracks:
+        # A track in miss state has no current match - its trail floating
+        # over vacated pixels reads as ghost spaghetti. Draw matched only.
+        if tr.misses:
+            continue
         color = _TRAIL_COLORS[(tr.tid - 1) % len(_TRAIL_COLORS)]
         pts = [(int((b["x1"] + b["x2"]) / 2), int((b["y1"] + b["y2"]) / 2))
                for b in tr.boxes[-TRAIL_MAX_PTS:]]
@@ -530,7 +543,12 @@ def draw_paths_layer(img, tracks, last_boxes: list[dict],
     img = draw_boxes(img, last_boxes)
     for b in last_boxes:
         s = stats_by_id.get(b.get("track_id"))
-        if s and s.get("kmh_est"):
+        # km/h honesty gate (audit 2026-08-14: moving bikes chipped
+        # "2.3 km/h"): below ~8 km/h the class-length ruler at sampled
+        # ticks is inside its own noise band, and a short track has no
+        # statistical mass - show nothing rather than a wrong number.
+        if (s and s.get("kmh_est") and s["kmh_est"] >= 8
+                and int(s.get("sightings") or 0) >= 5):
             _chip(img, b, f"{s['kmh_est']} km/h", (90, 90, 90))
     note = (f"Paths & speeds - {len(last_boxes)} tracked now"
             if last_boxes else "Paths & speeds - nothing tracked yet")
@@ -1090,6 +1108,30 @@ def get_shared_reader(cam: dict, cam_id: str):
         return r
 
 
+def _rider_person_tids(tracks) -> set:
+    """Person tracks that are RIDING a two-wheeler: their box overlaps a
+    vehicle track's box by most of its own area. Behavior verdicts
+    (walking / crouching / erratic) are meaningless for a mounted rider -
+    audit 2026-08-14 caught a rider labeled "WALKING crouching"."""
+    out: set = set()
+    veh = [t.boxes[-1] for t in tracks
+           if t.cls in _VEHICLE_CLASSES and not t.misses]
+    if not veh:
+        return out
+    for t in tracks:
+        if t.cls != "person" or t.misses:
+            continue
+        p = t.boxes[-1]
+        pa = max(1.0, (p["x2"] - p["x1"]) * (p["y2"] - p["y1"]))
+        for v in veh:
+            ix = min(p["x2"], v["x2"]) - max(p["x1"], v["x1"])
+            iy = min(p["y2"], v["y2"]) - max(p["y1"], v["y1"])
+            if ix > 0 and iy > 0 and (ix * iy) / pa >= 0.45:
+                out.add(t.tid)
+                break
+    return out
+
+
 class LiveSession(threading.Thread):
     """One camera's live analysis: stream -> detect -> track -> layer."""
 
@@ -1182,6 +1224,8 @@ class LiveSession(threading.Thread):
                     self._pose_pass(frame, boxes)
                 if layer == "plates":
                     self._plates_pass(frame)
+                if layer == "parking":
+                    self._parking_probe(frame)
                 faces_list: list[dict] = []
                 if layer == "faces":
                     faces_list = self._faces_pass(frame)
@@ -1459,16 +1503,26 @@ class LiveSession(threading.Thread):
     def _render(self, frame, faces_list: list[dict], layer: str):
         img = frame.copy()
         open_now = list(self.tracker.open)
-        visible = [tr.boxes[-1] for tr in open_now if not tr.misses]
+        # Same display gates as the canvas JSON path - the JPEG fallback
+        # used to draw every open track (0.16-conf ghosts included).
+        visible = [tr.boxes[-1] for tr in open_now
+                   if not tr.misses
+                   and tr.hits >= (1 if layer == "paths"
+                                   else DISPLAY_MIN_HITS)
+                   and max(float(b.get("conf") or 0)
+                           for b in tr.boxes[-2:]) >= DISPLAY_MIN_CONF
+                   and tr.cls not in DISPLAY_CLASS_BLACKLIST]
         stats_by_id: dict[int, dict] = {}
         if layer in ("paths", "gestures", "body"):
             from app.behavior import track_stats
+            riders = _rider_person_tids(open_now)
             for tr in open_now:
                 if tr.misses:
                     continue
                 row = track_stats(tr.cls, tr.boxes, tr.times, frame.shape)
                 row["id"] = tr.tid
-                if layer in ("gestures", "body"):
+                if (layer in ("gestures", "body")
+                        and not (tr.cls == "person" and tr.tid in riders)):
                     from app.behavior_labels import label_track
                     from app.gestures import detect_gestures
                     kseq = [b.get("kps") for b in tr.boxes[-16:]]
@@ -1504,6 +1558,58 @@ class LiveSession(threading.Thread):
             return draw_zones_layer(img, lo if layer == "loiter" else pk,
                                     layer)
         return img
+
+    def _parking_probe(self, frame) -> None:
+        """Trackerless occupancy assist (parking layer only): re-detect
+        vehicles inside each parking polygon on a 2x-upscaled crop of the
+        spot. A parked scooter that never becomes a confirmed track still
+        shows up here; fresh hits feed _zone_stats' per-spot hysteresis
+        exactly like track candidates."""
+        now = time.time()
+        if now < getattr(self, "_park_probe_next", 0):
+            return
+        self._park_probe_next = now + PARKING_PROBE_EVERY_S
+        zones = [(zi, z) for zi, z in enumerate(self.zones or [])
+                 if z.get("kind") == "parking"]
+        if not zones:
+            return
+        import cv2
+        from app.detect_core import (CLASSES_OF_INTEREST, NAME_BY_ID,
+                                     _PREDICT_LOCK)
+        H, W = frame.shape[:2]
+        veh_ids = [v for k, v in CLASSES_OF_INTEREST.items()
+                   if k in _VEHICLE_CLASSES]
+        hits: dict = {}
+        for zi, z in zones:
+            xs = [p[0] for p in z["points"]]
+            ys = [p[1] for p in z["points"]]
+            x1 = max(0, int(min(xs) * W) - 12)
+            x2 = min(W, int(max(xs) * W) + 12)
+            y1 = max(0, int(min(ys) * H) - 12)
+            y2 = min(H, int(max(ys) * H) + 12)
+            crop = frame[y1:y2, x1:x2]
+            if crop.size == 0 or min(crop.shape[:2]) < 16:
+                continue
+            crop2 = cv2.resize(crop, (crop.shape[1] * 2, crop.shape[0] * 2),
+                               interpolation=cv2.INTER_CUBIC)
+            try:
+                with _PREDICT_LOCK:
+                    res = self.model.predict(
+                        crop2, imgsz=320, conf=PARKING_PROBE_CONF,
+                        classes=veh_ids, verbose=False)[0]
+            except Exception:
+                continue
+            if res.boxes is None:
+                continue
+            for bb, ci in zip(res.boxes.xyxy.tolist(),
+                              res.boxes.cls.tolist()):
+                # center: crop2 coords /2 back to crop, then + crop origin
+                cx = x1 + (bb[0] + bb[2]) / 4.0
+                cy = y1 + (bb[1] + bb[3]) / 4.0
+                if _pt_in_poly(cx / W, cy / H, z["points"]):
+                    hits[zi] = NAME_BY_ID.get(int(ci), "vehicle")
+                    break
+        self._park_probe = {"ts": now, "hits": hits}
 
     def _zone_stats(self, frame_shape):
         """Occupancy + dwell for loiter zones, occupancy for parking spots,
@@ -1594,6 +1700,14 @@ class LiveSession(threading.Thread):
                         best_zi, best_ov = zi, ov
                 if best_zi is not None and best_ov >= 0.30:
                     spot_cand[best_zi] = tr.cls
+        # Trackerless probe assist (_parking_probe): a fresh probe hit
+        # counts as a candidate for the spot exactly like a track - this
+        # is what lets a parked scooter with no confirmed track occupy
+        # its spot.
+        pp = getattr(self, "_park_probe", None)
+        if pp and now_t - pp.get("ts", 0) <= PARKING_PROBE_FRESH_S:
+            for zi_p, cls_p in (pp.get("hits") or {}).items():
+                spot_cand.setdefault(zi_p, cls_p)
         # Per-spot asymmetric hysteresis: 2 consecutive positive ticks to
         # flip OCCUPIED, 4 consecutive negatives to flip back - night
         # detector flicker must not toggle a spot, and a missed
@@ -1676,6 +1790,9 @@ class LiveSession(threading.Thread):
         # layer exists for. First-tick display there; everything else
         # keeps the flicker-suppressing 2-hit gate.
         min_hits = 1 if layer == "paths" else DISPLAY_MIN_HITS
+        riders_pub = (_rider_person_tids(self.tracker.open)
+                      if self.tracker and layer in ("body", "gestures")
+                      else set())
         for tr in (self.tracker.open if self.tracker else []):
             last = tr.boxes[-1]
             conf = max(float(b.get("conf") or 0) for b in tr.boxes[-2:])
@@ -1757,7 +1874,8 @@ class LiveSession(threading.Thread):
                     g = _static_postures(jb["kps"])
                     if g:
                         jb["gestures"] = g
-                if layer == "body" and tr.cls == "person":
+                if (layer == "body" and tr.cls == "person"
+                        and tr.tid not in riders_pub):
                     try:
                         from app.behavior import track_stats
                         from app.behavior_labels import label_track

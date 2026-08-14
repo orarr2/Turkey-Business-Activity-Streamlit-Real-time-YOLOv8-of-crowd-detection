@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 
 # Weights: bare names resolve against the process CWD (the project root,
 # same convention as the detection/pose weights). Both are gitignored
@@ -81,6 +82,10 @@ MAX_TRIES_PER_TRACK = 6
 # below this the crop is motion-smeared (night exposure) and any read
 # would be a hallucination. Skipped crops refund their try.
 PLATE_SHARPNESS_MIN = 45.0
+# An exhausted-but-unread track gets a fresh try budget this often. A
+# parked vehicle's track lives for hours; without the reset its only
+# chances were the session's first few ticks.
+STATIC_RETRY_S = 120.0
 
 PLATE_VEHICLE_CLASSES = {"car", "bus", "truck", "motorcycle"}
 
@@ -211,9 +216,21 @@ def attach_plates(det_model, ocr: _OvOcr, frame, tracker,
         # Keep re-reading an already-read track until the read is GOOD
         # (>=0.70) or the try budget runs out - the best read across all
         # attempts wins, so one lucky sharp frame upgrades a marginal one.
-        if entry and (entry.get("conf", 0) >= 0.70
-                      or entry.get("tries", 0) >= MAX_TRIES_PER_TRACK):
+        if entry and entry.get("conf", 0) >= 0.70:
             continue
+        if entry and entry.get("tries", 0) >= MAX_TRIES_PER_TRACK:
+            if entry.get("text"):
+                continue
+            # Long-lived UNREAD track (a parked vehicle): the first budget
+            # was spent on whatever frames the session opened with (audit
+            # 2026-08-14: a legible parked-scooter plate stayed unread all
+            # night). Grant a fresh budget every STATIC_RETRY_S - light
+            # and occlusion change.
+            t0 = entry.setdefault("t_giveup", time.time())
+            if time.time() - t0 < STATIC_RETRY_S:
+                continue
+            entry["tries"] = 0
+            entry.pop("t_giveup", None)
         candidates.append((bw, tr.tid, b))
     # Cache hygiene: forget tracks the tracker itself dropped.
     for tid in [t for t in reads if t not in open_tids]:

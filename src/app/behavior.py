@@ -140,9 +140,15 @@ def track_stats(cls: str | None, boxes: list[dict], times: list[float],
         f"{min(GRID_H - 1, int(fy / H * GRID_H))}"
         for fx, fy in feet if 0 <= fx <= W and 0 <= fy <= H})
 
+    diags = [((b["x2"] - b["x1"]) ** 2 + (b["y2"] - b["y1"]) ** 2) ** 0.5
+             for b in boxes]
     return {
         "cls": cls,
         "sightings": len(boxes),
+        # Mean box diagonal - the object's own size on screen. Consumers
+        # (behavior_labels.heading_turns) use it to scale jitter floors to
+        # the OBJECT instead of the frame.
+        "bbox_diag_px": round(sum(diags) / len(diags), 1) if diags else 0.0,
         "t_first": round(times[0], 2),
         "t_last": round(times[-1], 2),
         "path": [[round(t, 2), round(fx / W, 3), round(fy / H, 3)]

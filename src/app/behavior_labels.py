@@ -52,6 +52,13 @@ ERRATIC_TURN_DEG = 100.0
 # Steps shorter than this fraction of the diagonal carry no reliable
 # heading (box jitter) and are skipped by the turn counter.
 TURN_MIN_STEP_FRAC = 0.008
+# ...and regardless of the frame, a significant step must cover at least
+# this fraction of the OBJECT's own diagonal - box jitter scales with box
+# size, and a close-range person's wobble is many frame-pixels.
+TURN_MIN_BODY_FRAC = 0.35
+# Erratic additionally requires the track to actually MOVE: a near-still
+# individual cannot zigzag, whatever its jitter says.
+ERRATIC_MIN_MOVING_FRAC = 0.30
 
 # ---- pose thresholds ---------------------------------------------------------
 # Legs shorter than this multiple of the torso = folded legs = crouching.
@@ -126,14 +133,24 @@ def pose_flags_of(kps: list) -> list[str]:
 
 def heading_turns(path: list, frame_shape,
                   min_step_frac: float = TURN_MIN_STEP_FRAC,
-                  turn_deg: float = ERRATIC_TURN_DEG) -> int:
+                  turn_deg: float = ERRATIC_TURN_DEG,
+                  body_diag_px: float | None = None) -> int:
     """Count sharp course reversals along a track_stats `path`
     ([[t, nx, ny], ...] normalized). Jitter-sized steps carry no heading
-    and are skipped rather than counted as turns."""
+    and are skipped rather than counted as turns.
+
+    `body_diag_px` scales the jitter floor to the OBJECT: detection
+    jitter grows with box size, so a frame-relative floor alone let a
+    close-range seated person's box wobble read as "course reversals"
+    (audit 2026-08-14: 4-6 false ERRATIC alerts per tick on a seated
+    group). A significant step must now also cover >= 35% of the
+    object's own diagonal."""
     H, W = frame_shape[:2]
     diag = (H * H + W * W) ** 0.5 or 1.0
     pts = [(nx * W, ny * H) for _t, nx, ny in path]
     min_step = min_step_frac * diag
+    if body_diag_px:
+        min_step = max(min_step, TURN_MIN_BODY_FRAC * float(body_diag_px))
     headings: list[float] = []
     for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
         dx, dy = x1 - x0, y1 - y0
@@ -180,7 +197,8 @@ def label_track(row: dict, frame_shape, kps_seq: list | None = None) -> dict:
 
     pose_flags = _sustained_pose_flags(kps_seq) if kps_seq else []
 
-    turns = heading_turns(row.get("path") or [], frame_shape)
+    turns = heading_turns(row.get("path") or [], frame_shape,
+                          body_diag_px=row.get("bbox_diag_px"))
     mean_speed = float(row.get("mean_speed_px_s") or 0.0)
     moving_frac = float(row.get("moving_frac") or 0.0)
     net = float(row.get("net_disp_px") or 0.0)
@@ -189,10 +207,13 @@ def label_track(row: dict, frame_shape, kps_seq: list | None = None) -> dict:
         label = "fall_suspect"
         reasons.append(f"torso past {FALL_TORSO_DEG:.0f}deg from vertical "
                        f"in >={POSE_FLAG_MIN_FRAMES} frames")
-    elif turns >= ERRATIC_MIN_TURNS:
+    elif (turns >= ERRATIC_MIN_TURNS
+          and moving_frac >= ERRATIC_MIN_MOVING_FRAC
+          and not row.get("stationary")):
         label = "erratic"
         reasons.append(f"{turns} course reversals > "
-                       f"{ERRATIC_TURN_DEG:.0f}deg (>= {ERRATIC_MIN_TURNS})")
+                       f"{ERRATIC_TURN_DEG:.0f}deg (>= {ERRATIC_MIN_TURNS}), "
+                       f"moving {moving_frac:.0%}")
     elif (not is_vehicle
           and mean_speed >= RUN_SPEED_DIAG_FRAC * diag):
         label = "running"
