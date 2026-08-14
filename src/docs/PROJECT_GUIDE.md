@@ -696,17 +696,24 @@ sessions and four playing videos: a new tick per camera every ~12-15 s; a
 single session alone: ~1-2 s per tick. The video never drops — only the
 overlay cadence stretches.
 
-**Why boxes glide instead of freezing between ticks:** every published box
-carries its tracker velocity (vx, vy px/s, EMA-smoothed), and every tick is
-stamped `at` in the video's own clock (wall clock minus the HLS playlist's
-live-edge offset, re-measured on every playlist refresh). The client's
-15 fps canvas loop picks the buffered tick matching the video's
-`playingDate` and extrapolates each box along its velocity with a
-saturating dt (tau = 5 s) — between ticks boxes keep moving along their
-measured direction; on the next tick they snap to truth. Display gates
-keep the overlay honest: a track appears after 2 consecutive hits at
-conf >= 0.40, disappears after 1 missed tick; train/boat/airplane are
-suppressed (street scenes produce them only as false positives).
+**Why boxes stay glued to objects between ticks (2026-08-15 rewrite):**
+the player runs a few seconds behind the live edge, so the analysis
+tick AFTER the frame the operator is watching usually already exists in
+the buffer. The 15 fps canvas loop picks the two ticks that bracket the
+video's `playingDate` and does a TRUE per-track linear interpolation
+between their real box positions — no prediction, no snap: the box
+rides the object's actual measured path (keypoints lerp joint-by-joint
+too). Only past the newest tick does the loop fall back to
+extrapolation along the tracker velocity (vx, vy px/s, EMA-smoothed;
+every tick is stamped `at` in the video's own clock — wall clock minus
+the HLS playlist's live-edge offset, re-measured per refresh); the
+extrapolation window scales adaptively to ~1.3× the SESSION'S measured
+tick interval (EMA), and past that window boxes GRACEFULLY FADE (alpha
+1 → 0.35 over ~0.7× the window) instead of freezing bright — a stale
+box that quietly dims is honest, a frozen bright one lies. Display
+gates keep the overlay honest: a track appears after 2 consecutive hits
+at conf >= 0.40, disappears after 1 missed tick; train/boat/airplane
+are suppressed (street scenes produce them only as false positives).
 
 **Camera resolution for the picked tile:** `resolve_cam` first looks up
 `cam_id` in the registry (`app/cameras.py`); if that misses, it reads
