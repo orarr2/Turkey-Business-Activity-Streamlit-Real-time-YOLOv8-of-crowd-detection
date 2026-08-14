@@ -569,6 +569,32 @@ function beginTileAnalysis(st, cam, layer) {
     }
     return;
   }
+  // Deliberate "delayed playback" mode (operator ask 2026-08-15,
+  // "professional CV standard"): the iframe is held ~20 s BEHIND
+  // YouTube's live edge for the duration of the analysis session. The
+  // server keeps analyzing at real-time from the yt-dlp grab, so by the
+  // time the iframe plays a given frame the server has processed it
+  // long ago and the corresponding tick already sits in the buffer.
+  // The client's DVR-based alignment (getDuration - getCurrentTime)
+  // then picks the exact matching tick and lerps between its bracket
+  // for smooth on-frame boxes. Cost: the video shown is 20 s stale -
+  // the operator explicitly OK'd this trade to get accurate overlays.
+  const ANALYSIS_HOLD_BEHIND_S = 20;
+  if (st.ytPlayer && !st._analysisHoldSeek) {
+    const tryHold = () => {
+      try {
+        const ct = st.ytPlayer.getCurrentTime();
+        if (typeof ct === "number" && ct > ANALYSIS_HOLD_BEHIND_S + 2) {
+          st.ytPlayer.seekTo(ct - ANALYSIS_HOLD_BEHIND_S, true);
+          st._analysisHoldSeek = { at: Date.now() };
+        } else {
+          // Player not fully warm yet (ct too low); retry shortly.
+          setTimeout(tryHold, 400);
+        }
+      } catch (_) { setTimeout(tryHold, 400); }
+    };
+    tryHold();
+  }
   // Canvas-overlay mode: keep the iframe playing at native fps, draw
   // YOLO boxes / heat / line on a transparent canvas above it. The old
   // design tore down the video and replaced it with an analyzed-JPEG
@@ -1108,7 +1134,9 @@ async function pollAnalysisFrame(st) {
           }
         }
         a.tickBuf.push(d);
-        if (a.tickBuf.length > 24) a.tickBuf.shift();
+        // 60 ticks x ~12s = ~12 minutes of history, deep enough that a
+        // 20 s hold-back seek always finds bracket ticks around vidT.
+        if (a.tickBuf.length > 60) a.tickBuf.shift();
         // Old seek-based sync removed 2026-08-15: YouTube live streams
         // without DVR clamp seekTo back to the live edge, so seeking never
         // held. Alignment is now done in _analysisDrawLoop by shifting
@@ -1940,6 +1968,12 @@ function mountYouTubePlayer(st, hostId, vid) {
         // PLAYING (1) - re-pin only when measurably behind (or unknowable,
         // e.g. the very first PLAYING before progressState exists); a player
         // already at the head must not be re-seeked on every state change.
+        // Don't fight our own hold-back seek: when an analysis session
+        // deliberately parked the player 20 s behind live for overlay
+        // alignment, snapping back to live edge here would undo the
+        // sync every state change (Chrome buffers, tab visibility flip,
+        // network hiccup).
+        if (st._analysisHoldSeek) return;
         if (e.data === 2) {
           _seekLive(e.target);
         } else if (e.data === 1) {
