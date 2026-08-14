@@ -1412,7 +1412,7 @@ Nothing here writes to Firestore - it's a plain HTML page that reads from it.
 
 `_yt_embed(vid)` בונה URL של embed של YouTube עם autoplay + mute + playsinline + enablejsapi. `_local_grid_slot(i, cam_id)` מייצר את הרשומה של slot אחד: שולף את המצלמה מ-`CAMERAS[cam_id]`, בונה `where` מהעיר והמדינה, ומנסה למלא אחד משלושה שדות פוטנציאליים: `placeholder_hls` (זרם HLS ישיר), `placeholder_embed` (embed של YouTube), `placeholder_page` (fallback: פשוט קישור לדף המקור). לפי `kind` של המצלמה: אם `youtube` - חילוץ vid מ-URL עם regex `_YOUTUBE_RE` והכנסת iframe embed; אם `webcamera24` - `resolve_webcamera24` מחזיר את ה-master playlist ואז מנסים לחלץ tvkur id או youtube vid; אם `hls` - אם ה-URL הוא tvkur ("tvkur/{id}/..."), משתמש ב-proxy מקומי `/tvkur/{id}/master.m3u8` (מסביב לבעיית CORS/geo של IBB); אחרת ה-URL הישיר. אם `SELECTED_CAMS` קיים, כותב `web/local_grid.json` עם המצלמות המסודרות; אחרת - מוחק את הקובץ אם קיים (כך שהדשבורד יחזור ל-VM grid).
 
-חלק שרת: משתמש ב-`DashboardHandler` מ-`app.dashboard_server`. מפעיל sweep על פורטים 8000-8020, בוחר את הראשון הפנוי, ומריץ `ThreadingHTTPServer` בת'רד רקע (`daemon=True`). שומר את השרת ב-`sys.modules['__main__']._dash_server` כדי שריצות חוזרות של אותו kernel יזהו את השרת הקיים ולא יפתחו חדש. פותח `dash_url = http://localhost:{PORT}/?mode=main` בדפדפן פעם אחת (‏`_dash_browser_opened` guard).
+חלק שרת: משתמש ב-`DashboardHandler` מ-`app.dashboard_server`. בודק אם פורט 8000 פנוי: אם תפוס - מניח שדשבורד כבר רץ ומשתמש בו; אם פנוי - מריץ `ThreadingHTTPServer` בת'רד רקע (`daemon=True`). שומר את השרת ב-`sys.modules['__main__']._dash_server` כדי שריצות חוזרות של אותו kernel יזהו את השרת הקיים ולא יפתחו חדש. פותח `dash_url = http://localhost:8000/` בדפדפן פעם אחת (‏`_dash_browser_opened` guard). שים לב: התא מריץ את ה-handler ישירות ולא את `dashboard_server.bind()` - ולכן יצרני הרקע של האריחים (model-view/review/pool-sync) לא רצים בזרימת המחברת; היסטוריית הגרף נכתבת בכל זאת על ידי כותב-הגיבוי שבתוך סשן הניתוח החי (דגימה כל 30 שניות בזמן שסשן פעיל).
 
 מציג `IFrame(dash_url, width='100%', height=640)` בתא של Jupyter - זה מטמיע את הדשבורד ישירות במחברת.
 
@@ -1426,6 +1426,23 @@ Dashboard grid -> YOUR 4 picked cameras (turkey): ['Sarachane Square', ...]
 Dashboard server started at http://localhost:8000/?mode=main
 ```
 אז HTML קטן עם קישור לדשבורד, ואז IFrame של הדשבורד עצמו (‏640px גובה) מוטמע במחברת עם live video tiles.
+
+**עשר שכבות הניתוח החי (כפתור 🔬 על כל אריח):** מכאן והלאה הדשבורד הוא
+הבמה של הניתוח בזמן אמת. הווידאו ממשיך לנגן במלואו, והשכבה מצוירת על
+קנבס שקוף מעליו; כל תיבה מתפרסמת עם וקטור מהירות וזמן בשעון הווידאו,
+והדפדפן מחצין אותה בין טיקים כך שהתיבות גולשות עם התנועה. השכבות:
+`paths` (מסלולים + דרגות מהירות באורכי-גוף/שנייה - נרמול חסין-מרחק),
+`pose` (שלדים ב-top-down: קרופ פר-אדם ≥96px אל yolov8n-pose),
+`gestures` (יד מורמת/שתי ידיים/נפנוף - זמניים, על היסטוריית שלדים),
+`body` (פסקי דין התנהגותיים; מצייר רק running/erratic/fall_suspect),
+`faces` (‏YuNet נפרד לגמרי מ-YOLO - בלי שום ערבוב מחלקות),
+`line` (חציית קו על נקודת הרגל + צינון 2s), ‏`loiter` (שעוני שיהוי
+בפוליגונים שציירת), `parking` (היפוכי תפוס/פנוי), `plates` (שני שלבים:
+גלאי לוחית + OCR גנרי 0-9/A-Z עם best-of-N פר-track), ‏`heat` (גריד
+48x27 של נקודות רגל עם דעיכת חצי-חיים 180s). כל שכבה מזינה את פס
+האירועים החם מתחת לווידאו; 💾 על אירוע שומר את הפריים המתויג המלא לטאב
+Investigation. ההסבר המלא, מנגנון-אחר-מנגנון עם כל הספים והנימוקים:
+‏PROJECT_GUIDE_HE פרק 5 ("10 שכבות הניתוח החי").
 
 </div>
 

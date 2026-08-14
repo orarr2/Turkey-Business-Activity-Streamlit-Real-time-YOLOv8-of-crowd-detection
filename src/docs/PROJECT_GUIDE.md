@@ -16,7 +16,7 @@ cross-references work in both directions.
 2. [Architecture — where each piece runs](#2-architecture--where-each-piece-runs)
 3. [The VM — deep dive](#3-the-vm--deep-dive)
 4. [VM commands cheatsheet](#4-vm-commands-cheatsheet)
-5. [The 7 live analysis layers](#5-the-7-live-analysis-layers)
+5. [The 10 live analysis layers](#5-the-10-live-analysis-layers)
 6. [The deep-window analysis (`behavior.analyze_window`)](#6-the-deep-window-analysis-behavioranalyze_window)
 7. [The notebook — offline analytics](#7-the-notebook--offline-analytics)
 8. [Model choice + parameters](#8-model-choice--parameters)
@@ -654,36 +654,59 @@ Then delete the VM from the Console.
 
 ---
 
-## 5. The 7 live analysis layers
+## 5. The 10 live analysis layers
 
-Since fix 2 (2026-08), any dashboard tile can morph in place into a live
-stream of analyzed frames on the exact camera it is playing. Click 🔬, pick
-a layer, the server spins up a `LiveSession` and pushes analyzed JPEGs at
-~1/s; the client renders them inside the tile. Up to 4 sessions in the grid
-(one per tile). Switching a layer on a running tile MUTATES the session —
-the stream, the tracker, and every accumulator (heat, counters, gesture
-tallies) survive the switch. The VM is not involved; everything runs in
-`app/live_analysis.py` on the operator machine.
+Since fix 2 (2026-08), any dashboard tile can run a live analysis on the
+exact camera it is playing. Click 🔬, pick a layer, the server spins up a
+`LiveSession`; since the live-analysis rehab (2026-08-14) the tile KEEPS
+playing its full-rate video and the analysis is drawn on a transparent
+canvas layered above it, fed by `GET /api/analysis/data` (overlay JSON,
+polled every 500 ms). The server-annotated JPEG (`/api/analysis/frame`)
+remains as the fallback view when the video element is not provably
+advancing. Up to 4 sessions in the grid (one per tile). Switching a layer
+on a running tile MUTATES the session — the stream, the tracker, and every
+accumulator (heat, counters, gesture tallies) survive the switch. The VM
+is not involved; everything runs in `app/live_analysis.py` on the operator
+machine, on the shared `yolov8s` engine (the notebook's own sections use
+`yolo26m`; the live engine deliberately reuses the already-loaded search
+model instead of holding a second engine in RAM).
 
-**Shared pipeline (`LiveSession.run`, every tick ≈ TICK_TARGET_S = 0.8 s):**
+**Shared pipeline (`LiveSession.run`, tick floor TICK_TARGET_S = 0.8 s):**
 
 ```python
-frame = self._grab()                              # (a) fetch frame
+frame = self._grab()                              # (a) shared live-edge reader
 if frame is None: continue
-boxes = self._infer(frame)                        # (b) YOLO + gates/ROI
-self.tracker.update(boxes, now)                   # (c) BurstTracker
+boxes = self._infer(frame)                        # (b) YOLO + gates/ROI (batcher)
+self.tracker.update(boxes, now)                   # (c) BurstTracker (BYTE-style)
 if layer in ("pose", "gestures", "body"):
     self._pose_pass(frame, boxes)                 # (d) top-down pose, ONLY when needed
+if layer == "plates":
+    self._plates_pass(frame, boxes)               # (d') plate detect + OCR, cached per track
 faces_list = self._faces_pass(frame) if layer == "faces" else []
-self._accumulate(frame.shape, boxes, now)         # (e) heat + line counters
-img = self._render(frame, faces_list, layer)      # (f) draw the layer
-self._publish(img)                                # (g) JPEG for the client
+self._accumulate(frame.shape, boxes, now)         # (e) heat + line + zone clocks
+img = self._render(frame, faces_list, layer)      # (f) JPEG fallback render
+self._publish_data(...)                           # (g) overlay JSON + JPEG + events
 ```
 
 `INFER_LOCK` serializes every model call in this process (Ultralytics
-`predict` is not thread-safe on a shared model). On CPU: one active session
-runs at 1-2 fps, four concurrent at 0.3-0.5 fps each — degrading gracefully
-instead of thrashing.
+`predict` is not thread-safe on a shared model); an inference batcher
+coalesces concurrent sessions' frames (collect window 0.10 s). Honest
+cadence, measured 2026-08-14 on the operator laptop with four concurrent
+sessions and four playing videos: a new tick per camera every ~12-15 s; a
+single session alone: ~1-2 s per tick. The video never drops — only the
+overlay cadence stretches.
+
+**Why boxes glide instead of freezing between ticks:** every published box
+carries its tracker velocity (vx, vy px/s, EMA-smoothed), and every tick is
+stamped `at` in the video's own clock (wall clock minus the HLS playlist's
+live-edge offset, re-measured on every playlist refresh). The client's
+15 fps canvas loop picks the buffered tick matching the video's
+`playingDate` and extrapolates each box along its velocity with a
+saturating dt (tau = 5 s) — between ticks boxes keep moving along their
+measured direction; on the next tick they snap to truth. Display gates
+keep the overlay honest: a track appears after 2 consecutive hits at
+conf >= 0.40, disappears after 1 missed tick; train/boat/airplane are
+suppressed (street scenes produce them only as false positives).
 
 **Camera resolution for the picked tile:** `resolve_cam` first looks up
 `cam_id` in the registry (`app/cameras.py`); if that misses, it reads
@@ -711,6 +734,15 @@ if real_len and speeds:
 Honest error band ±30-50 % (vehicle not always parallel to the image plane).
 The report shows this only when the camera has enough statistical mass
 (≥ 5 samples AND ≥ 10 % of rounds carrying one).
+
+On the live canvas the same layer labels every track with a speed TIER
+instead of km/h, computed in body-lengths per second —
+`blps = speed_px_s / bbox_diagonal_px` — because px/s depends on distance
+to camera and dividing by the object's own apparent size is the only
+calibration-free normalization a single street view offers. Tiers:
+`static` < 0.05 (only after ≥ 3 hits and ≥ 4 s of track age, so a newborn
+track is never branded static), `slow` < 0.25, `moving` < 0.8, `fast`
+≥ 0.8 (fires a hot-trail event).
 
 ### 5.2 Pose & skeleton — `draw_pose_layer`
 
@@ -831,8 +863,72 @@ def update_crossings(side_state, tracks, frame_shape, line, cross):
 ```
 
 `side == 0` (landing exactly on the line) is deliberately skipped — it is
-ambiguous and would double-count jitter around the boundary. The caption
-shows "IN x / OUT y (session total)".
+ambiguous and would double-count jitter around the boundary. A per-track
+2 s cooldown (`CROSSING_COOLDOWN_S`) additionally swallows a foot point
+trembling across the boundary. Every crossing appends a JSONL row
+(`data/crossings/<cam>.jsonl`, last 50 kept) plus a padded crop snapshot
+for the crossings strip, and the line JSON is re-read every 5 s so a
+redraw takes effect on a running session. Cameras without a saved line
+fall back to `DEFAULT_LINE = [[0.10, 0.62], [0.90, 0.62]]` — the sidewalk
+band of a typical street view.
+
+### 5.8 Zone & loitering — `loiter`
+
+User-drawn polygons on the tile (kind `loiter`, dwell threshold 5-3600 s;
+defaults 300 s person / 900 s vehicle, per-camera overridable — "how long
+is suspicious" is a property of the PLACE, a bench square tolerates 15
+minutes, an ATM lobby does not). A confirmed track whose FOOT POINT sits
+inside a polygon starts that zone's clock; the presence streak tolerates a
+single missed tick; crossing the threshold flips the zone into alert and
+fires a hot-trail event on the edge (not continuously). Zones hot-reload
+from `data/zones/<cam>.json` every 5 s, same contract as the line.
+
+### 5.9 Parking occupancy — `parking`
+
+Polygons of kind `parking`: a spot is `occupied` when any confirmed
+vehicle-class track's foot point is inside it. The event fires only on the
+occupied/free FLIP — state changes are information, steady state is
+wallpaper. Occupancy + loiter dwell are computed once per tick and shared
+between the JPEG render and the JSON publish (cached on the frame's
+capture stamp).
+
+### 5.10 License plates (LPR) — `plates` + `app/plates.py`
+
+Two separated stages plus a per-track cache:
+
+1. **Plate detection** — a dedicated `yolov8n-plate` detector (OpenVINO
+   engine preferred) looks for plate boxes ONLY inside vehicle boxes wide
+   enough to physically carry a readable plate: vehicle ≥ 96 px wide
+   (motorcycles ≥ 72), plate box ≥ 32 px wide, conf 0.30, at most 3
+   vehicles per tick, widest first, and at most 6 OCR attempts per track.
+2. **OCR** — the plate crop (2x cubic-upscaled when < 128 px wide) runs
+   through `plate_ocr_global.onnx`, a CTC recognizer with a 9-slot,
+   country-agnostic alphabet `0-9 A-Z _`. No per-country grammar, by
+   design: the same reader serves Turkish, US, Japanese and Thai plates'
+   Latin/digit content, and out-of-alphabet script (Thai/Japanese glyphs)
+   is reported as unreadable rather than hallucinated into digits.
+
+A read is accepted at OCR conf ≥ 0.45 with ≥ 4 characters; each TRACK
+keeps its best read and re-tries until conf ≥ 0.70 or the try budget runs
+out — best-of-N across frames, never one arbitrary frame. Detection and
+OCR are separate verdicts: the layer envelope always reports the honest
+funnel — "N vehicles · M in plate range (≥ 96 px) · K read". A first
+successful read fires a hot-trail event with the text.
+
+### 5.11 The hot trail, saving, and the Investigation tab
+
+Every layer feeds a per-camera event ring (50 events): plate read, line
+crossing, loiter alert, parking flip, new gesture, body flag, skeleton
+acquired, fast mover, face-count rise (≥ 30 s apart), heat hotspot
+(≥ 120 s apart). The strip under the video polls
+`GET /api/analysis/events` every 2.5 s and renders chips with thumbnails;
+chips expire by ring overflow (or 30 in the DOM). The 💾 on a chip POSTs
+`/api/analysis/event/save`: the server writes the FULL annotated frame —
+triggering box + caption bar burned into the image — to
+`web/snapshots/detections/<cam>_<id>.jpg` and appends a manifest row
+(`saved.json`, capped 500). The **Investigation tab** renders that
+manifest permanently (20 s refresh), so a saved detection survives the
+session and can be pulled up later and argued with, frame by frame.
 
 ---
 

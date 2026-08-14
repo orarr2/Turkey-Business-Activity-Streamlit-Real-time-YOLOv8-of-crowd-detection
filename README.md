@@ -552,33 +552,190 @@ behaviors without needing YOLO.
 
 The private dashboard's 🔬 button (visible only where the local server
 answers `/api/ping`) runs a **continuous live analysis on the exact
-camera whose tile was clicked**: the tile morphs in place into a stream
-of analyzed frames (client polls `GET /api/analysis/frame` at ~1 fps)
-while the other tiles keep playing normal video and the cloud VM runs
-untouched. Engine: `app/live_analysis.py`; endpoints:
-`POST /api/analysis/start?cam&layer`, `GET /api/analysis/frame?cam`,
-`POST /api/analysis/stop?cam`.
+camera whose tile was clicked**: the tile keeps playing its full-rate
+video, and a transparent canvas ABOVE the video draws the analysis in
+real time, while the other tiles stay untouched and the cloud VM is
+never involved. Engine: `app/live_analysis.py`; endpoints:
+`POST /api/analysis/start?cam&layer`, `GET /api/analysis/data?cam`
+(overlay JSON, polled every 500 ms), `GET /api/analysis/frame?cam`
+(server-annotated JPEG fallback), `GET /api/analysis/events?cam` (hot
+trail), `POST /api/analysis/stop?cam`.
 
-Semantics: **one layer per camera, up to four live analyses across the
-grid** (duplicates fine). Layers - `paths` (trails + id boxes + km/h),
-`pose` (skeletons ONLY, on people close enough - never detection boxes),
-`gestures` (skeleton + chip only for detected gestures), `body`
-(fall-detection-style view: status HUD with persons-in-view/flagged
-tallies, red box + skeleton + verdict chip on flagged people, and an
-ALERT banner while a fall/erratic flag is live), `faces` (YuNet
-rectangles), `heat` (full heat-vision: the whole frame re-rendered as a
-thermal-style colormap with the SESSION'S own dwell burning hotter -
-stylized from brightness + dwell, not a thermal sensor), `line`
-(counting line + live in/out). Every layer states an empty result
-honestly ("no gestures detected right now"). Switching layers mutates
-the running session - stream, tracker, heat grid, line counters and
-gesture history all survive, so heat -> gestures -> heat resumes the
-accumulated map.
+### The engine, in one pass
 
-Compute honesty: sessions share ONE YOLO (`yolov8s`) behind a lock; on
-an operator CPU a single session runs ~1-2 fps, four concurrent
-~0.3-0.5 fps each, frames trail the live edge by a few seconds. A
-session with no poller for 60 s shuts itself down.
+One `LiveSession` thread per camera (max 4 = the grid). Each session
+pulls decoded frames from a **shared per-camera HLS reader** pinned to
+the live edge, then runs one detector pass per tick. Every session in
+the process funnels its frame through **one shared YOLO** (`yolov8s` /
+its OpenVINO engine, the same weights the VM runs - the notebook's own
+sections use the stronger `yolo26m`, but the live engine deliberately
+reuses the already-loaded search model instead of holding a second
+40 MB engine in RAM). Detection envelope: COCO classes
+person/bicycle/car/motorcycle/bus/truck, conf floor 0.12 with per-class
+gates scaled x0.7, class-agnostic NMS, imgsz 640.
+
+Detections are threaded into tracks by `app/tracker.py` - a BYTE-style
+two-stage association (high-confidence boxes >= 0.45 match first, the
+leftovers get a second, looser pass) over a constant-velocity
+prediction, with per-track velocity smoothed by an EMA (alpha 0.6).
+Display gates keep the overlay honest: a track appears only after 2
+consecutive hits at conf >= 0.40, disappears after 1 missed tick, and
+train/boat/airplane are suppressed outright (a street scene produces
+them only as false positives).
+
+**Why boxes glide instead of freezing:** every published box carries
+its velocity (vx, vy in px/s), and every tick is stamped `at` in the
+*video's own clock* - wall clock minus the HLS playlist's live-edge
+offset, re-measured on every playlist refresh. The client's 15 fps
+canvas loop picks the buffered tick that matches the video's current
+`playingDate` and extrapolates each box along its velocity with a
+saturating dt (tau = 5 s). Between two analysis ticks the boxes keep
+moving along their measured direction; when the next tick lands they
+snap to truth. Switching layers mutates the running session in place -
+stream, tracker, heat grid, line counters and gesture history all
+survive, so heat -> gestures -> heat resumes the accumulated map.
+
+Compute honesty: ultralytics predict is not thread-safe, so every model
+call in the process serializes on one lock. Measured on the operator
+laptop (2026-08-14, four concurrent sessions + four playing videos): a
+new analysis tick lands every ~12-15 s per camera; a single session
+alone runs ~1-2 s per tick. The video itself never drops - only the
+overlay cadence stretches, and the velocity extrapolation is what keeps
+it readable. A session with no poller for 60 s shuts itself down.
+
+### The 10 layers - mechanism, thresholds, and why
+
+Every layer publishes its result per tick, emits events into the hot
+trail (below), and states an empty result honestly ("no gestures
+detected right now").
+
+1. **`paths` - trails and speed tiers.** Draws each track's last 12
+   centroids as a trail plus a speed tier. Speed is computed in
+   **body-lengths per second**: `blps = speed_px_s / bbox_diagonal_px`.
+   Tiers: `static` < 0.05 (only after >= 3 hits and >= 4 s of age, so a
+   newborn track can never be branded static), `slow` < 0.25, `moving`
+   < 0.8, `fast` >= 0.8 (fires a hot-trail event). Why body-lengths: a
+   px/s number depends on how far the object is from the camera;
+   dividing by the object's own apparent size is the only
+   calibration-free normalization a single uncalibrated street view
+   offers, and it makes a distant bike and a near pedestrian
+   comparable.
+
+2. **`pose` - skeletons, top-down.** Person boxes at least 96 px tall
+   are cropped with 25 % padding and each crop runs `yolov8n-pose` at
+   256 px, max 6 crops per tick (CPU cap). Keypoints below conf 0.30
+   are dropped; the client draws the COCO-17 skeleton (14 bones) and
+   extrapolates it with the box velocity between ticks. Why top-down:
+   full-frame pose at 640 sees ~15 px people on a wide street and
+   returns nothing; a per-person crop hands the pose model a
+   full-resolution human. The detector stays the source of truth for
+   WHO exists - pose can never add or remove a person, it only
+   decorates one.
+
+3. **`gestures` - temporal arm gestures.** From each tracked person's
+   recent keypoint history: `hand_raised` = wrist above shoulder
+   (screen-y) sustained >= 3 consecutive pose frames - one frame is
+   noise, a run is a posture; `both_hands_up` = both wrists, same
+   sustain; `wave` = a *raised* wrist crossing its elbow's x at least
+   twice (sign changes of `wrist_x - elbow_x`), with a deadband of
+   `max(2 px, 8 % of shoulder width)` so the same rule works on a 40 px
+   person and a 300 px one, anchored to the elbow so a raised hand on a
+   *walking* person does not "wave" just because the body moves.
+   Finger-level vocabulary is deliberately out of scope - fingers are
+   not in the signal at street range.
+
+4. **`body` - behavior verdicts, alert-only rendering.** Every tracked
+   person gets one verdict from trajectory + posture math
+   (`app/behavior_labels.py`): walking / standing / dwelling / driving
+   / parked are normal street life and stay quiet; the layer draws and
+   alerts ONLY on `running`, `erratic` (>= 3 sharp course reversals in
+   the window) and `fall_suspect` (torso axis > 60 degrees from
+   vertical with >= 8 px of torso, >= 2 consecutive frames). A HUD
+   counts persons-in-view / flagged; flagged people get a red box +
+   skeleton + verdict chip and a banner while the flag is live. Why
+   alert-only: a badge that fires on every pedestrian gets ignored -
+   the anomaly list is deliberately three labels long.
+
+5. **`faces` - a separate detector, never mixed.** OpenCV **YuNet**
+   (`face_detection_yunet_2023mar.onnx`, score >= 0.60, NMS 0.30) runs
+   on the full frame, then a stricter live gate keeps only faces with
+   conf >= 0.90 and >= 24 px, capped at 32. Faces are published as
+   their own array and drawn by their own code path - they are never
+   converted into "boxes", so a face can never be relabeled as a
+   vehicle and a vehicle can never appear under the Faces layer (this
+   structural separation is the fix for the old cross-layer
+   contamination bug). Detection only - no identification. If the face
+   backend is unavailable the layer says so instead of silently
+   rendering nothing.
+
+6. **`line` - crossing counter on ground contact.** The operator draws
+   a two-point line on the tile (default when none saved: horizontal at
+   62 % height - the sidewalk band of a typical street view). Each
+   tick, every confirmed track's **foot point** (bottom-center of the
+   box = where it touches the ground) is signed against the line;
+   flipping from the negative to the positive side of A->B counts as
+   "in", the reverse as "out", and a per-track 2 s cooldown swallows
+   the jitter of a foot point trembling on the line. Every crossing
+   appends a JSONL row plus a padded crop snapshot into the crossings
+   strip. The line file is re-read every 5 s, so redrawing it takes
+   effect on a running session. Why the foot point: box centers cross
+   lines when a tall object merely turns in place; ground contact is
+   the honest "physically passed it" signal.
+
+7. **`loiter` - dwell zones.** User-drawn polygons (dwell threshold
+   5-3600 s, defaults 300 s person / 900 s vehicle). A track whose foot
+   point sits inside starts a clock (streak-based, tolerant of a
+   single missed tick); crossing the threshold flips the zone into
+   alert and fires an event. Per-camera thresholds are the point: "how
+   long is suspicious" is a property of the PLACE - a bench square
+   tolerates 15 minutes, an ATM lobby does not.
+
+8. **`parking` - occupancy flips.** Polygons of kind `parking`:
+   occupied = any confirmed vehicle-class track's foot point inside.
+   Events fire only on the occupied/free FLIP, not continuously -
+   state changes are information, steady state is wallpaper.
+
+9. **`plates` - LPR, two stages + a per-track cache.** Stage 1: a
+   dedicated `yolov8n-plate` detector (OpenVINO) looks for plate boxes
+   ONLY inside vehicle boxes wide enough to physically carry a readable
+   plate (vehicle >= 96 px wide, motorcycles >= 72; plate box >= 32 px;
+   conf 0.30; at most 3 vehicles per tick, widest first). Stage 2: the
+   plate crop (2x cubic-upscaled when < 128 px) goes through
+   `plate_ocr_global.onnx` - a CTC recognizer with a 9-slot,
+   **country-agnostic alphabet `0-9 A-Z`**: no per-country grammar, so
+   Turkish, US and Japanese Latin-digit plates all read the same way,
+   and Thai/Japanese script glyphs are honestly out-of-alphabet rather
+   than hallucinated into digits. A read is accepted at OCR conf >=
+   0.45 with >= 4 characters; each TRACK caches its best read and
+   re-tries up to 6 times until conf >= 0.70 - best-of-N across frames,
+   never one arbitrary frame. Detection and OCR are separate verdicts:
+   the envelope always reports the honest funnel - "N vehicles - M in
+   plate range - K read".
+
+10. **`heat` - recent-activity ground map.** A 48x27 grid banks every
+    box's foot point each tick, weighted by the real elapsed tick time
+    (clamped to 0.2-5 s so one hiccup cannot dump minutes into a cell),
+    and the whole grid decays exponentially with a **180 s half-life**
+    before every bank - so the map answers "where has the activity been
+    in the last few minutes", not "since the session started". Render:
+    p99-normalized colormap (one stuck-hot cell cannot black out the
+    rest) burned over the frame - stylized brightness + dwell, not a
+    thermal sensor, and labeled as such. A hotspot event (grid argmax)
+    fires at most every 120 s.
+
+### The hot trail - see it, save it, argue with it
+
+Every layer feeds a per-camera event ring (50 events): plate read, line
+crossing, loiter alert, parking flip, new gesture, body flag, skeleton
+acquired, fast mover, face-count rise, heat hotspot. The strip under
+the video polls it every 2.5 s and shows each event as a chip with a
+thumbnail; chips expire by ring overflow (or after 30 in the DOM), and
+the 💾 on a chip POSTs `/api/analysis/event/save` - the server then
+writes the **full annotated frame** (box + caption burned in) to
+`web/snapshots/detections/` plus a manifest row, capped at 500. The
+**Investigation tab** is the permanent gallery over that manifest -
+saved detections survive the session and can be pulled up later to
+argue with the algorithm frame by frame.
 
 ## Window analysis - pose, behavior labels, gestures, faces, target lock
 
