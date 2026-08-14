@@ -30,6 +30,7 @@ logic stays unit-testable on any machine.
 from __future__ import annotations
 
 import os
+import threading
 
 # Weights for the pose pass. Any ultralytics *-pose checkpoint works; nano
 # matches the collector's detection tier and auto-downloads on first use.
@@ -76,22 +77,42 @@ _BONE_GROUPS = (
 SKELETON = tuple(edge for edges, _color in _BONE_GROUPS for edge in edges)
 
 _model = None
+# Lazy-load guard: two live sessions hitting the first pose tick at the
+# same time must not both construct the model (the pose pass no longer
+# runs under the batcher lock, so the init race is real).
+_LOAD_LOCK = threading.Lock()
 
 
 def load_pose_model(weights: str | None = None):
     """Load (once) and return the pose model. `POSE_WEIGHTS` env overrides
-    the default; ultralytics downloads the checkpoint on first use."""
+    the default; ultralytics downloads the checkpoint on first use.
+
+    A sibling `<stem>_openvino_model` export is preferred when present -
+    same ~2-3x CPU gain as the detection engine. Export once with:
+        YOLO("yolov8n-pose.pt").export(format="openvino", imgsz=256)
+    (256 matches the per-crop inference size below; the static engine's
+    input shape must equal the predict imgsz.)"""
     global _model
-    if _model is None:
-        from ultralytics import YOLO
-        _model = YOLO(weights or os.environ.get("POSE_WEIGHTS",
-                                                POSE_WEIGHTS_DEFAULT))
+    if _model is not None:
+        return _model
+    with _LOAD_LOCK:
+        if _model is None:
+            from ultralytics import YOLO
+            w = weights or os.environ.get("POSE_WEIGHTS",
+                                          POSE_WEIGHTS_DEFAULT)
+            if str(w).endswith(".pt"):
+                ov_dir = str(w)[:-3] + "_openvino_model"
+                if os.path.isdir(ov_dir):
+                    w = ov_dir
+                    print(f"pose: OpenVINO engine loaded ({ov_dir})")
+            _model = YOLO(w)
     return _model
 
 
 def attach_keypoints_crops(model, frame, boxes: list[dict],
                            imgsz: int = 256, pad_frac: float = 0.25,
                            min_box_h: int = 40,
+                           max_crops: int | None = None,
                            conf: float = POSE_CONF) -> int:
     """Top-down pose: one pass PER PERSON CROP instead of one full-frame
     pass. Attaches `"kps"` (frame coordinates) in place; returns matches.
@@ -105,15 +126,20 @@ def attach_keypoints_crops(model, frame, boxes: list[dict],
     exists: only its `person` boxes are cropped, and the best pose-person
     inside each crop claims that box - there is nothing else it could be.
     Boxes shorter than `min_box_h` px are skipped - below that even a
-    dedicated crop holds no limbs, only upscaling artifacts.
+    dedicated crop holds no limbs, only upscaling artifacts. `max_crops`
+    bounds the per-call cost on crowded frames: the TALLEST boxes win
+    (closest people = the ones whose skeletons are actually legible).
 
-    Cost: one small inference per person, batched into a single
-    model.predict call. Deep-window-only economics, same as the full-frame
-    variant it replaces there.
+    Cost: one small inference per person, run crop-by-crop - a static
+    batch-1 OpenVINO engine cannot take a list, and per-crop calls keep
+    torch and OpenVINO checkpoints interchangeable.
     """
     persons = [b for b in boxes
                if b.get("cls") == "person"
                and (b["y2"] - b["y1"]) >= min_box_h]
+    if max_crops is not None and len(persons) > max_crops:
+        persons = sorted(persons, key=lambda b: b["y2"] - b["y1"],
+                         reverse=True)[:max_crops]
     if not persons:
         return 0
     H, W = frame.shape[:2]
@@ -133,8 +159,11 @@ def attach_keypoints_crops(model, frame, boxes: list[dict],
     # predict() on a shared model instance permanently wedges OpenVINO's
     # InferRequest (see detect_core._PREDICT_LOCK).
     from app.detect_core import _PREDICT_LOCK
+    results = []
     with _PREDICT_LOCK:
-        results = model.predict(crops, imgsz=imgsz, conf=conf, verbose=False)
+        for crop in crops:
+            results.append(model.predict(crop, imgsz=imgsz, conf=conf,
+                                         verbose=False)[0])
     matched = 0
     for (b, ox, oy), res in zip(offsets, results):
         if res.boxes is None or res.keypoints is None or len(res.boxes) == 0:

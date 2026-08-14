@@ -20,6 +20,10 @@
              display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
     header h1 { font-size: 20px; margin: 0; }
     .sub { color: #8b909a; font-size: 13px; }
+    /* Model-quality scoreboard: sits directly under the descriptive sub-line
+       and stays visually secondary (same muted grey) but numbers pop in
+       white so the eye lands on the accuracy figure immediately. Updates
+       ~every 10 s via /api/model-metrics. */
     .model-metrics-line { margin-top: 3px; }
     .model-metrics-line b { color: #e7e9ee; font-weight: 600; }
     .model-metrics-line.stale { color: #6f7480; }
@@ -40,7 +44,7 @@
               border-color: #2e3442; font-weight: 600; }
     .tabbar button:hover { color: #e7e9ee; }
     main[data-active-tab="analysis"] > [data-tab]:not([data-tab="analysis"]),
-    main[data-active-tab="investigation"] > [data-tab]:not([data-tab="investigation"]),
+    main[data-active-tab="search"]   > [data-tab]:not([data-tab="search"]),
     main[data-active-tab="rl"]       > [data-tab]:not([data-tab="rl"]) {
       display: none !important;
     }
@@ -196,6 +200,149 @@
     table.reid td.spike { color: #ef4444; font-weight: 600; }
     table.reid td.drop  { color: #f0a35e; font-weight: 600; }
 
+    /* "estimate" tag on the re-ID section title. */
+    .est-tag { display: inline-block; margin-left: 8px; padding: 2px 8px;
+               border-radius: 999px; font-size: 11px; font-weight: 500;
+               background: rgba(139,144,154,0.15); color: #8b909a;
+               vertical-align: middle; }
+
+    /* Entity accordion in the Operational events table: click the ▸ next
+       to a row's time to see every stored sighting of the same entity
+       side-by-side, so "back after 29 min" becomes a claim the user can
+       actually check with their eyes. */
+    .row-toggle { display: inline-block; cursor: pointer;
+                  padding: 0 4px; color: #4f8cff; user-select: none; }
+    .row-toggle:hover { color: #e7e9ee; }
+    .ev-accordion td { background: #0c0e13; padding: 10px 14px;
+                       border-bottom: 1px solid #232733; }
+    .ev-strip .ev-note { color: #8b909a; font-size: 12px; margin-bottom: 8px; }
+    .ev-strip .ev-note b { color: #e7e9ee; }
+    .ev-cards { display: flex; gap: 10px; flex-wrap: wrap; }
+    .ev-card { background: #0f1115; border: 1px solid #232733;
+               border-radius: 8px; padding: 6px; width: 160px;
+               display: flex; flex-direction: column; gap: 4px; }
+    .ev-card.current { border-color: #4f8cff; box-shadow: 0 0 0 1px rgba(79,140,255,0.35); }
+    .ev-badge { font-size: 10px; color: #8b909a; text-transform: uppercase;
+                letter-spacing: 0.04em; }
+    .ev-card.current .ev-badge { color: #4f8cff; }
+    .ev-card img { display: block; width: 100%; height: 90px;
+                   object-fit: contain; background: #05070a;
+                   border-radius: 4px; border: 1px solid #232733; }
+    .ev-nosnap { height: 90px; display: flex; align-items: center;
+                 justify-content: center; color: #6f7480; font-size: 11px;
+                 border-radius: 4px; background: #05070a;
+                 border: 1px dashed #2c3140; }
+    .ev-ts { font-size: 11px; color: #e7e9ee; }
+    .ev-sim { font-size: 10px; color: #f0a35e; }
+    .ev-empty { color: #8b909a; font-size: 12px; padding: 6px 0; }
+
+    /* Search panel: a persistent query bar that stays visible across searches
+       instead of the old drop-only flow that locked users into re-uploading
+       to change anything. The three optional filters (image, class chips,
+       time range + count) let the user pose one of three questions:
+         - "find things like this photo"          (image + optional filters)
+         - "find recent cars between 18:00-22:00" (class + time, no image)
+         - "find any three recent detections"     (count + time, no image) */
+    .search-wrap { background: #171a21; border: 1px solid #232733;
+                   border-radius: 12px; padding: 16px; margin-top: 16px; }
+    .search-wrap h2 { margin: 0 0 10px; font-size: 15px; font-weight: 600; }
+    .search-wrap .sub { color: #8b909a; font-size: 12px; margin-bottom: 12px; }
+
+    .search-form { display: grid; gap: 12px;
+                   grid-template-columns: minmax(220px, 1fr) 2fr; }
+    @media (max-width: 720px) { .search-form { grid-template-columns: 1fr; } }
+    .search-form fieldset { margin: 0; padding: 10px 12px 12px;
+        background: #0c0e13; border: 1px solid #232733; border-radius: 10px; }
+    .search-form legend { color: #8b909a; font-size: 10px;
+        text-transform: uppercase; letter-spacing: 0.05em; padding: 0 6px; }
+
+    /* Compact drop zone - "optional reference photo", not the whole panel. */
+    #drop { border: 2px dashed #3a4258; border-radius: 10px;
+            padding: 18px 12px; text-align: center; cursor: pointer;
+            background: linear-gradient(180deg, rgba(79,140,255,0.03), rgba(79,140,255,0));
+            transition: border-color .15s, background .15s, transform .05s; }
+    #drop:hover { border-color: #4f8cff;
+                  background: linear-gradient(180deg, rgba(79,140,255,0.09), rgba(79,140,255,0.02)); }
+    #drop.hover { border-color: #4f8cff; background: rgba(79,140,255,0.08); transform: scale(0.998); }
+    #drop input { display: none; }
+    #drop .icon { font-size: 22px; line-height: 1; margin-bottom: 6px;
+                  color: #4f8cff; }
+    #drop .primary { font-size: 13px; color: #e7e9ee; font-weight: 500; }
+    #drop .hint { font-size: 11px; color: #8b909a; margin-top: 4px; }
+    #drop.has-file { border-style: solid; border-color: #4f8cff;
+        background: rgba(79,140,255,0.08); }
+    #drop-clear { display: none; background: none; border: 0; color: #ef4444;
+        font-size: 11px; cursor: pointer; margin-top: 4px; padding: 2px 6px; }
+    #drop.has-file + #drop-clear { display: inline-block; }
+
+    /* Class chips - clicking a class toggles it on/off. Selecting nothing
+       means "any class" (the natural default). */
+    .chip-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+    .chip { display: inline-block; padding: 3px 10px; border-radius: 999px;
+        font-size: 12px; cursor: pointer; user-select: none;
+        background: #0c0e13; color: #8b909a; border: 1px solid #2c3140; }
+    .chip.on { background: rgba(79,140,255,0.20); color: #e7e9ee;
+        border-color: #4f8cff; }
+    .chip:hover { border-color: #4f8cff; color: #e7e9ee; }
+
+    .field-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+        font-size: 12px; color: #8b909a; margin-top: 6px; }
+    .field-row label { display: flex; gap: 4px; align-items: center; }
+    .field-row input[type="datetime-local"],
+    .field-row input[type="number"] { background: #0c0e13;
+        border: 1px solid #2c3140; color: #e7e9ee; border-radius: 6px;
+        padding: 4px 6px; font-size: 12px; }
+    .field-row input[type="number"] { width: 64px; }
+
+    /* Match strictness - a labeled preset chooser hides the raw min_sim
+       number behind a name the user actually understands. */
+    .strictness-row { display: flex; gap: 6px; margin-top: 6px; }
+    .strict-btn { flex: 1; padding: 4px 8px; border-radius: 6px; font-size: 11px;
+        background: #0c0e13; color: #8b909a; border: 1px solid #2c3140;
+        cursor: pointer; }
+    .strict-btn.on { background: rgba(79,140,255,0.18); color: #e7e9ee;
+        border-color: #4f8cff; }
+    .strict-hint { color: #6f7480; font-size: 10px; margin-top: 4px; }
+
+    .search-actions { display: flex; gap: 10px; align-items: center;
+        margin-top: 14px; flex-wrap: wrap; }
+    .search-actions button { background: #4f8cff; color: #fff; border: 0;
+        border-radius: 8px; padding: 8px 18px; font-size: 13px; font-weight: 600;
+        cursor: pointer; }
+    .search-actions button.secondary { background: transparent;
+        color: #8b909a; border: 1px solid #2c3140; padding: 6px 12px;
+        font-weight: 500; }
+    .search-actions button.secondary:hover { color: #e7e9ee; border-color: #4f8cff; }
+    .search-actions button:disabled { opacity: 0.45; cursor: default; }
+    #search-status { font-size: 12px; color: #8b909a; }
+    #search-status.err { color: #ef4444; }
+    #search-preview { display: flex; gap: 12px; flex-wrap: wrap;
+                      margin-top: 12px; align-items: flex-start; }
+    #search-preview img { max-width: 320px; max-height: 220px; border-radius: 8px;
+                          border: 1px solid #232733; }
+    #search-preview .qobjs { font-size: 12px; color: #8b909a; line-height: 1.5; }
+    #search-preview .qobjs b { color: #e7e9ee; }
+    #search-results { display: grid; gap: 10px; margin-top: 12px;
+                      grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
+    #search-results .hit { background: #0c0e13; border: 1px solid #232733;
+        border-radius: 10px; padding: 6px; display: flex; flex-direction: column; gap: 4px; }
+    #search-results .hit img { width: 100%; height: 100px; object-fit: contain;
+        background: #05070a; border-radius: 6px; }
+    #search-results .hit .meta { font-size: 10px; color: #8b909a; line-height: 1.4; }
+    #search-results .simbar { height: 4px; border-radius: 3px;
+        background: #232733; overflow: hidden; }
+    #search-results .simbar i { display: block; height: 100%; background: #f0a35e; }
+    #search-results .hit.strong .simbar i { background: #36d399; }
+    #search-results .badge { display: inline-block; padding: 1px 6px;
+        border-radius: 999px; font-size: 10px; }
+    #search-results .badge.strong { background: rgba(54,211,153,0.12); color: #36d399; }
+    #search-results .badge.weak   { background: rgba(240,163,94,0.12); color: #f0a35e; }
+    #search-registry table { width: 100%; border-collapse: collapse; font-size: 12px;
+                             margin-top: 12px; }
+    #search-registry th, #search-registry td { text-align: left; padding: 5px 8px;
+                             border-bottom: 1px solid #232733; }
+    #search-registry th { color: #8b909a; font-weight: 500; font-size: 10px;
+                          text-transform: uppercase; letter-spacing: 0.04em; }
 
     /* "Model view - live": one annotated frame per slot. Compacted to a
        4-wide single row on desktop (each card is roughly HALF the width the
@@ -356,8 +503,8 @@
       <div class="sub">4 cameras · people + vehicle counts (burst-median YOLO) ·
         scene-gated anomalies (extreme load / obstruction / darkness) · streamed from Firestore</div>
       <!-- Model quality scoreboard - computed on the server from the review
-           store (local reviews included), refreshed every 10 s so an active
-           review sitting shifts the numbers in near-real-time. -->
+           store, refreshed every 10 s so an active review sitting shifts
+           the numbers in near-real-time. -->
       <div class="sub model-metrics-line" id="model-metrics-line">
         Model: loading…
       </div>
@@ -381,7 +528,7 @@
        subscriptions keep running); tabs only control visibility. -->
   <nav class="tabbar" id="tabbar">
     <button data-tab-btn="analysis" class="on">Analysis</button>
-    <button data-tab-btn="investigation">Investigation</button>
+    <button data-tab-btn="search">Search</button>
     <button data-tab-btn="rl">Reinforcement learning</button>
   </nav>
 
@@ -397,18 +544,75 @@
     <!-- 2x2 grid of camera tiles (LIVE VIDEO + counts only). Cells filled by app.js. -->
     <div class="grid" id="tiles" data-tab="analysis"></div>
 
-    <!-- Investigation tab: EVERY saved detection sample (a read plate, a
-         crossing, a loiter alert, a posture...) with its full frame -
-         the standing proof gallery, reachable whether or not an analysis
-         is running. Fed by /api/analysis/saved; the 💾 button on the
-         live strip and the proof-collector both append here. -->
-    <div class="anomaly-wrap" id="gallery-section" data-tab="investigation">
-      <h2 id="gallery-title">Detections gallery - saved samples per layer</h2>
-      <div class="sub">Every detection you saved from the live strip, plus
-        the automatic proof samples - full frame, layer, camera and time.
-        Click an image for the original.</div>
-      <div id="gallery-wrap" style="display:grid;gap:10px;margin-top:10px;
-           grid-template-columns:repeat(auto-fill, minmax(210px, 1fr))"></div>
+    <!-- Search: image-similarity OR class/time browse, in one persistent
+         panel. Backed by POST /api/search (dashboard_server.py). -->
+    <div class="search-wrap" data-tab="search">
+      <h2>Search - what has the system seen?</h2>
+      <div class="sub">Search by image, by object class, by time - or any
+        combination. Leave the photo out to browse recent detections.</div>
+      <div class="search-form">
+        <fieldset>
+          <legend>Reference photo (optional)</legend>
+          <label id="drop">
+            <input type="file" id="search-file" accept="image/*" />
+            <div class="icon">⬆</div>
+            <div class="primary">Drop or click to pick</div>
+            <div class="hint">a cropped photo of one person/vehicle
+              works best</div>
+          </label>
+          <button id="drop-clear" type="button">✕ clear photo</button>
+          <button id="search-reset" type="button" style="background:none;
+              border:0;color:#8b909a;font-size:11px;cursor:pointer;padding:2px 6px;
+              margin-top:2px">↺ reset all filters</button>
+          <div class="strictness-row">
+            <button class="strict-btn" data-strict="0.30">Loose</button>
+            <button class="strict-btn on" data-strict="0.55">Balanced</button>
+            <button class="strict-btn" data-strict="0.80">Strict</button>
+          </div>
+          <div class="strict-hint" style="line-height:1.5">
+            match strictness - only used when a photo is provided:<br>
+            <b>Loose</b> - casts the widest net: more results, expect
+            lookalike noise mixed in.<br>
+            <b>Balanced</b> - solid visual matches only; the sensible
+            default.<br>
+            <b>Strict</b> - near-identical appearance only: fewest results,
+            highest confidence it is the same object.</div>
+        </fieldset>
+        <fieldset>
+          <legend>Filters</legend>
+          <div>
+            <div style="color:#8b909a;font-size:11px">Object class
+              <span style="color:#6f7480">(pick any; none = all)</span></div>
+            <div class="chip-row" id="class-chips">
+              <span class="chip" data-cls="person">person</span>
+              <span class="chip" data-cls="car">car</span>
+              <span class="chip" data-cls="truck">truck</span>
+              <span class="chip" data-cls="bus">bus</span>
+              <span class="chip" data-cls="motorcycle">motorcycle</span>
+              <span class="chip" data-cls="bicycle">bicycle</span>
+              <span class="chip" data-cls="train">train</span>
+            </div>
+          </div>
+          <div class="field-row">
+            <label>from <input type="datetime-local" id="search-from" /></label>
+            <label>to <input type="datetime-local" id="search-to" /></label>
+            <button type="button" class="secondary" id="preset-1h">last 1h</button>
+            <button type="button" class="secondary" id="preset-24h">last 24h</button>
+            <button type="button" class="secondary" id="preset-week">last 7d</button>
+          </div>
+          <div class="field-row">
+            <label>how many results
+              <input type="number" id="search-top" value="12" min="1" max="200" /></label>
+          </div>
+        </fieldset>
+      </div>
+      <div class="search-actions">
+        <button id="search-go">Search</button>
+        <span id="search-status"></span>
+      </div>
+      <div id="search-preview" hidden></div>
+      <div id="search-results"></div>
+      <div id="search-registry"></div>
     </div>
 
     <!-- Deep-window / Window analysis removed 2026-08-12 per operator: the
@@ -453,6 +657,21 @@
     <div class="anomaly-wrap" id="anomaly-section" data-tab="analysis" hidden>
       <h2>Anomalies - last 24h (extreme crowding, blocked camera, view gone dark)</h2>
       <div id="anomaly-table-wrap"></div>
+    </div>
+
+    <!-- Re-ID summary table: aggregated per-camera state (unique / total /
+         regulars). Sits between the count-driven sections (Footfall +
+         Anomaly events) and the entity-driven ones (Operational events +
+         Review). -->
+    <div class="reid-wrap" id="reid-section" data-tab="analysis" hidden>
+      <h2>Re-identification - returning entities per camera <span class="est-tag">appearance-based estimate</span></h2>
+      <div id="reid-table-wrap"></div>
+    </div>
+
+    <!-- Operational events: loitering / parked-too-long / returning visitors -->
+    <div class="anomaly-wrap" id="events-section" data-tab="analysis" hidden>
+      <h2>Operational events - last 24h (prolonged presence, returning visitors)</h2>
+      <div id="events-table-wrap"></div>
     </div>
 
     <!-- Frame-based review UI. Canvas shows the whole frame with every
@@ -557,6 +776,46 @@
       </div>
     </div>
 
+    <!-- Learning proof: for every (camera, class) the user has ever verdicted,
+         show the baseline confidence, the direction it moved, and the current
+         value the collector is using right now. Section hides itself when the
+         review store is empty so a fresh install has zero visual noise.
+         Moved BELOW Review detections 2026-08-12 per operator request. -->
+    <div class="anomaly-wrap" id="boost-section" data-tab="rl" hidden>
+      <h2>Learning proof - how your reviews changed the model
+        <span class="est-tag">per-camera, per-class confidence</span></h2>
+      <div id="boost-table-wrap"></div>
+      <!-- The operator's "is it actually getting better?" chart: model
+           mistake-rate per tagging batch (5 frames each, chronological).
+           Data rides the /api/model-metrics poll below. -->
+      <div id="curve-wrap" hidden style="margin-top:14px">
+        <h3 style="font-size:13px;margin:0 0 6px">Is it getting better? -
+          model mistake rate per tagging batch</h3>
+        <div style="max-width:640px"><canvas id="learning-curve" height="130"></canvas></div>
+        <div class="footnote" style="margin-top:6px">
+          Each point = one batch of ~5 frames you reviewed: the share of
+          boxes you marked wrong/relabeled plus objects you added by hand.
+          A falling line means the model makes fewer mistakes on your
+          checks. Note: the queue deliberately serves the HARDEST frames,
+          so a plateau is normal - a sustained rise is the real warning.
+        </div>
+      </div>
+      <!-- Active-learning curve: one point per TRAINING RUN (train.yml),
+           candidate mAP50 on the chronological val split. Promoted runs in
+           the accent color, rejected greyed, baseline dashed. Data:
+           /api/al-curve (local) - hidden until the first run exists. -->
+      <div id="al-curve-wrap" hidden style="margin-top:14px">
+        <h3 style="font-size:13px;margin:0 0 6px">Training runs - labels vs
+          model quality (mAP50)</h3>
+        <div style="max-width:640px"><canvas id="al-curve" height="130"></canvas></div>
+        <div class="footnote" style="margin-top:6px">
+          Each point = one fine-tuning run of the detection head on your
+          reviewed frames. Colored = promoted to the collector, grey =
+          rejected by the gate. The dashed line is the untouched base
+          model on the same validation frames.
+        </div>
+      </div>
+    </div>
   </main>
 
   <!-- firebase-config.js is gitignored per-clone; see docs/firebase_setup.md -->
@@ -564,8 +823,268 @@
        so the browser doesn't serve a stale ES-module from disk cache. -->
   <script type="module" src="./firebase-config.js?v=40"></script>
   <script type="module" src="./cameras.js?v=40"></script>
-  <script type="module" src="./app.js?v=75"></script>
+  <script type="module" src="./app_vm.js?v=1"></script>
 
+  <!-- Search UI. INLINE and NON-MODULE on purpose: it wires POST /api/search
+       on this same server, has no Firebase dependency, and must keep working
+       even if firebase-app.js can't load. The panel supports three modes
+       through the same submit path:
+         (a) image mode          - photo provided, rank by similarity
+         (b) class/time browse   - no photo, filter by class/time/count
+         (c) combination         - photo + class/time filter combine -->
+  <script>
+  (function initSearch() {
+    const $ = (id) => document.getElementById(id);
+    const drop = $("drop"), fileInput = $("search-file"), goBtn = $("search-go");
+    const resetBtn = $("search-reset"), clearBtn = $("drop-clear");
+    const statusEl = $("search-status"), previewEl = $("search-preview");
+    const resultsEl = $("search-results"), registryEl = $("search-registry");
+    const chipRow = $("class-chips");
+    if (!drop || !fileInput || !goBtn) return;
+
+    const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+    // ----- reference photo (optional) --------------------------------------
+    let queryFile = null;
+    const setFile = (f) => {
+      if (!f || !f.type || !f.type.startsWith("image/")) return;
+      queryFile = f;
+      drop.classList.add("has-file");
+      drop.querySelector(".primary").textContent =
+          `${f.name} (${(f.size / 1024).toFixed(0)} KB) ready`;
+      drop.querySelector(".hint").textContent =
+          "similarity match uses this photo. clear to browse without.";
+    };
+    const clearFile = () => {
+      queryFile = null; fileInput.value = "";
+      drop.classList.remove("has-file");
+      drop.querySelector(".primary").textContent = "Drop or click to pick";
+      drop.querySelector(".hint").textContent =
+          "a cropped photo of one person/vehicle works best";
+    };
+    fileInput.addEventListener("change", () => setFile(fileInput.files[0]));
+    clearBtn.addEventListener("click", (e) => { e.preventDefault(); clearFile(); });
+    ["dragover", "dragenter"].forEach((ev) => drop.addEventListener(ev, (e) => {
+      e.preventDefault(); drop.classList.add("hover");
+    }));
+    ["dragleave", "drop"].forEach((ev) => drop.addEventListener(ev, (e) => {
+      e.preventDefault(); drop.classList.remove("hover");
+    }));
+    drop.addEventListener("drop", (e) => setFile(e.dataTransfer.files[0]));
+
+    // ----- class chips (multi-select) --------------------------------------
+    chipRow.addEventListener("click", (e) => {
+      const chip = e.target.closest(".chip");
+      if (chip) chip.classList.toggle("on");
+    });
+    const getSelectedClasses = () => [...chipRow.querySelectorAll(".chip.on")]
+        .map((c) => c.dataset.cls);
+
+    // ----- strictness preset ------------------------------------------------
+    let strictness = 0.55;
+    document.querySelectorAll(".strict-btn").forEach((b) => {
+      b.addEventListener("click", (e) => {
+        e.preventDefault();
+        document.querySelectorAll(".strict-btn").forEach((x) =>
+            x.classList.remove("on"));
+        b.classList.add("on");
+        strictness = parseFloat(b.dataset.strict);
+      });
+    });
+
+    // ----- time presets -----------------------------------------------------
+    const toLocalDT = (d) => {
+      // <input type="datetime-local"> wants YYYY-MM-DDTHH:MM in LOCAL time.
+      const pad = (n) => String(n).padStart(2, "0");
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
+             `T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    };
+    const setRange = (hours) => {
+      const now = new Date();
+      const from = new Date(now.getTime() - hours * 3600 * 1000);
+      $("search-from").value = toLocalDT(from);
+      $("search-to").value = toLocalDT(now);
+    };
+    // Track the last-clicked preset so a Search a minute later refreshes
+    // "to" to *now* — otherwise fixture crops written seconds after the
+    // preset click fall OUTSIDE the frozen [from, to] window and browse
+    // mode reports 0 results even though the pool is not empty.
+    let lastPreset = null;
+    $("preset-1h").addEventListener("click", (e) => { e.preventDefault(); setRange(1);       lastPreset = 1; });
+    $("preset-24h").addEventListener("click", (e) => { e.preventDefault(); setRange(24);     lastPreset = 24; });
+    $("preset-week").addEventListener("click", (e) => { e.preventDefault(); setRange(24 * 7); lastPreset = 24 * 7; });
+    // Any manual edit voids the preset - user typed their own bound.
+    $("search-from").addEventListener("input", () => { lastPreset = null; });
+    $("search-to").addEventListener("input",   () => { lastPreset = null; });
+    // Default to "last 24h" so the panel opens in a state that actually
+    // returns the seeded fixture crops on the very first Search click.
+    setRange(24); lastPreset = 24;
+
+    // ----- reset ------------------------------------------------------------
+    resetBtn.addEventListener("click", () => {
+      clearFile();
+      chipRow.querySelectorAll(".chip.on").forEach((c) => c.classList.remove("on"));
+      $("search-from").value = ""; $("search-to").value = "";
+      $("search-top").value = 12;
+      previewEl.hidden = true; previewEl.innerHTML = "";
+      resultsEl.innerHTML = ""; registryEl.innerHTML = "";
+      statusEl.className = ""; statusEl.textContent = "";
+      goBtn.disabled = false;
+      window.scrollTo({ top: document.querySelector(".search-wrap").offsetTop - 20,
+                        behavior: "smooth" });
+    });
+
+    // ----- submit -----------------------------------------------------------
+    goBtn.addEventListener("click", async () => {
+      goBtn.disabled = true;
+      statusEl.className = "";
+      const hasImage = !!queryFile;
+      statusEl.textContent = hasImage
+          ? "searching by image… (first search loads the model, ~10 s)"
+          : "browsing…";
+      // If the user picked a preset and then paused before Searching, refresh
+      // its "to" bound so anything written since (fixture crops, live samples)
+      // falls back inside the window.
+      if (lastPreset !== null) setRange(lastPreset);
+      try {
+        const params = new URLSearchParams({ top: $("search-top").value });
+        if (hasImage) params.set("min_sim", String(strictness));
+        const cls = getSelectedClasses();
+        if (cls.length) params.set("classes", cls.join(","));
+        // datetime-local strings are LOCAL wall-clock; the server compares
+        // epoch seconds against file mtimes. Serializing the raw string let
+        // the server read local time as UTC and shifted the window hours
+        // into the future - every recent search returned 0 results.
+        const toEpoch = (v) => v ? String(Math.floor(new Date(v).getTime() / 1000)) : "";
+        const from = toEpoch($("search-from").value), to = toEpoch($("search-to").value);
+        if (from) params.set("from", from);
+        if (to)   params.set("to", to);
+
+        const opts = hasImage
+            ? { method: "POST", body: queryFile,
+                headers: { "Content-Type": queryFile.type || "application/octet-stream" } }
+            : { method: "POST" };   // empty body = browse mode
+        const r = await fetch(`/api/search?${params}`, opts);
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+        render(data);
+        const mode = data.mode || (hasImage ? "image" : "browse");
+        const fb = data.fallback
+            ? ` · <span style="color:#f0a35e">auto-loose fallback</span>`
+            : "";
+        statusEl.innerHTML =
+          `done · ${data.snapshot_matches.length} snapshot` +
+          (mode === "image"
+              ? ` + ${data.registry_matches.length} registry matches`
+              : " results") +
+          ` · ${mode} mode · ${data.index_size} crops indexed` + fb;
+      } catch (err) {
+        statusEl.className = "err";
+        statusEl.textContent = `search failed: ${err.message}`;
+      } finally {
+        goBtn.disabled = false;
+      }
+    });
+
+    // ----- render -----------------------------------------------------------
+    function render(data) {
+      previewEl.innerHTML = "";
+      const mode = data.mode || "image";
+      if (mode === "image") {
+        previewEl.hidden = false;
+        if (data.query_preview_jpeg_b64) {
+          const img = new Image();
+          img.src = "data:image/jpeg;base64," + data.query_preview_jpeg_b64;
+          previewEl.appendChild(img);
+        }
+        const info = document.createElement("div");
+        info.className = "qobjs";
+        info.innerHTML = data.query_objects.length
+          ? "query objects:<br>" + data.query_objects.map((q) =>
+              q.cls === "image"
+                ? "<b>whole image</b> (nothing detected — treated as a ready-made crop)"
+                : `<b>${esc(q.cls)}</b> conf ${q.conf}`).join("<br>")
+          : "nothing usable found in the image";
+        previewEl.appendChild(info);
+      } else {
+        previewEl.hidden = true;
+      }
+
+      resultsEl.innerHTML = "";
+      for (const m of data.snapshot_matches) {
+        const d = document.createElement("div");
+        d.className = "hit" + (m.strong ? " strong" : "");
+        const isBrowse = mode === "browse" || m.browse_only;
+        const seenAt = m.seen_at
+            ? esc(String(m.seen_at).replace("T", " ").replace("Z", " UTC"))
+            : "";
+        const badge = isBrowse
+            ? `<span class="badge weak">${esc(m.cls)}</span>`
+            : `<span class="badge ${m.strong ? "strong" : "weak"}">
+                 ${m.strong ? "match" : "similar"} ${(m.similarity * 100).toFixed(1)}%
+               </span>`;
+        const bar = isBrowse ? "" :
+            `<div class="simbar"><i style="width:${(m.similarity * 100).toFixed(0)}%"></i></div>`;
+        d.innerHTML = `
+          <a href="${m.url}" target="_blank" rel="noopener">
+            <img src="${m.url}" loading="lazy" alt="match"/></a>
+          ${bar}
+          <div class="meta">${badge}<br>${esc(m.cls)}
+            ${seenAt ? `<br><span style="color:#6f7480">${seenAt}</span>` : ""}
+          </div>`;
+        resultsEl.appendChild(d);
+      }
+      if (!data.snapshot_matches.length) {
+        // Mode-aware empty message with a concrete next action - the old
+        // generic "widen the time range" line was misleading in image mode
+        // (there was no time filter that mattered) and useless in browse
+        // mode when the pool was simply small.
+        const empty = data.index_size === 0;
+        const noQueryObjects = mode === "image"
+            && (!data.query_objects || data.query_objects.length === 0);
+        const wholeImage = mode === "image"
+            && (data.query_objects || []).every((q) => q.cls === "image");
+        let msg;
+        if (empty) {
+          msg = "The pool is empty - the collector fills it as it samples. Try again in a few minutes.";
+        } else if (mode === "image" && noQueryObjects) {
+          msg = "No person/vehicle detected in the uploaded photo. Try a tighter crop of one object, or press <b>Loose</b> and search again.";
+        } else if (mode === "image" && wholeImage) {
+          msg = `No stored crop matches the uploaded photo above the current strictness. Try <b>Loose</b>, or crop the photo to just one person/vehicle. (${data.index_size} crops searched)`;
+        } else if (mode === "image") {
+          msg = `No stored crop is similar enough to the query above the current strictness. Try <b>Loose</b> or clear the class chips. (${data.index_size} crops searched)`;
+        } else {
+          // browse mode - the filters (class + time) are the only variables
+          msg = `No detections in this time window match those class chips. Try <b>last 24h</b> or <b>last 7d</b>, or clear the class chips. (pool: ${data.index_size} crops)`;
+        }
+        resultsEl.innerHTML =
+          `<div class="empty" style="color:#8b909a;padding:12px;font-size:12px;line-height:1.5">${msg}</div>`;
+      }
+
+      if (data.registry_matches && data.registry_matches.length) {
+        const rows = data.registry_matches.map((m) => `
+          <tr>
+            <td><span class="badge ${m.strong ? "strong" : "weak"}">
+                ${(m.similarity * 100).toFixed(1)}%</span></td>
+            <td>${esc(m.cls)}</td><td>#${m.entity_id}</td><td>${esc(m.cam_id)}</td>
+            <td>${m.sightings}</td>
+            <td>${esc(String(m.first_seen).slice(0, 16))}</td>
+            <td>${esc(String(m.last_seen).slice(0, 16))}</td>
+          </tr>`).join("");
+        registryEl.innerHTML = `
+          <table>
+            <thead><tr><th>similarity</th><th>class</th><th>entity</th>
+              <th>camera</th><th>sightings</th><th>first seen</th>
+              <th>last seen</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>`;
+      } else {
+        registryEl.innerHTML = "";
+      }
+    }
+  })();
+  </script>
 
   <style>
     /* Frame strip: every stored frame, clickable, reviewed ones badged.
@@ -975,7 +1494,7 @@
     async function loadStrip() {
       if (!stripEl) return;
       try {
-        const r = await fetch("/api/review-frames-list?scope=local", { cache: "no-store" });
+        const r = await fetch("/api/review-frames-list", { cache: "no-store" });
         if (!r.ok) return;
         const data = await r.json();
         const frames = data.frames || [];
@@ -1181,7 +1700,71 @@
   })();
   </script>
 
+  <!-- Learning proof - per-camera per-class before/after confidence, so a
+       verdict the user just cast has a visible receipt. Refreshes every
+       10 s along with the header scoreboard so the two views stay in step. -->
+  <script>
+  (function initBoostStatus() {
+    const section = document.getElementById("boost-section");
+    const wrap    = document.getElementById("boost-table-wrap");
+    if (!section || !wrap) return;
+    const esc = (s) => String(s ?? "").replace(/[&<>"]/g,
+        (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));
+    const arrow = (d) =>
+        d === "stricter" ? "▲ stricter" :
+        d === "looser"   ? "▼ looser"   : "—";
+    const fmt = (n) => Number(n).toFixed(3);
+    const signed = (n) => (n > 0 ? "+" : "") + fmt(n);
+    async function refresh() {
+      let data;
+      try {
+        const r = await fetch("/api/boost-status", { cache: "no-store" });
+        if (!r.ok) return;
+        data = await r.json();
+      } catch { return; }
+      const rows = data.rows || [];
+      section.hidden = rows.length === 0;
+      if (!rows.length) return;
+      const body = rows.map((r) => `
+        <tr>
+          <td>${esc(r.cam_id)}</td>
+          <td>${esc(r.cls)}</td>
+          <td class="delta-num">${fmt(r.baseline)}</td>
+          <td class="delta-num">${fmt(r.current)}</td>
+          <td class="${r.direction} delta-num">${signed(r.delta)}</td>
+          <td class="${r.direction}">${arrow(r.direction)}</td>
+          <td class="delta-num">${r.approved}</td>
+          <td class="delta-num">${r.rejected}</td>
+        </tr>`).join("");
+      wrap.innerHTML = `<table class="reid">
+        <thead><tr>
+          <th>Camera</th><th>Class</th><th>Baseline</th><th>Current</th>
+          <th>Δ</th><th>Direction</th>
+          <th>✔ correct</th><th>✗ wrong</th>
+        </tr></thead>
+        <tbody>${body}</tbody></table>
+        <div class="footnote" style="margin-top:8px">
+          <b>Direction, in plain words:</b>
+          <b>▼ looser</b> = the confidence bar DROPPED because you confirmed
+          real objects the model was hesitating on - it now catches more
+          like them (fixes misses).
+          <b>▲ stricter</b> = the bar ROSE because you rejected false
+          detections - lookalikes stop firing (fixes noise).<br>
+          Every "correct" verdict moves the bar down by
+          ${fmt(data.step || 0.015)}; every "wrong" moves it up. Values
+          clamped to [${fmt(data.min_conf || 0.20)},
+          ${fmt(data.max_conf || 0.60)}]. Applied to the live collector
+          within ~7 minutes of each submit.
+        </div>`;
+    }
+    refresh();
+    setInterval(refresh, 10000);
+  })();
+  </script>
 
+  <!-- Header scoreboard - Model quality metrics computed from the review
+       store. Refreshes every 10 s so a review sitting shows the numbers
+       shift in near-real-time. -->
   <script>
   (function initTabs() {
     const main = document.querySelector("main");
@@ -1201,6 +1784,63 @@
     let saved = null;
     try { saved = localStorage.getItem("dash-tab"); } catch (_) {}
     if (saved && btns.some((b) => b.dataset.tabBtn === saved)) activate(saved);
+  })();
+  </script>
+
+  <script>
+  (function initModelMetrics() {
+    const el = document.getElementById("model-metrics-line");
+    if (!el) return;
+    // Bold the numbers we care about so they pop out of the muted grey.
+    const highlight = (s) => String(s || "").replace(
+        /(\d+(?:\.\d+)?)\s*(%|reviews|classes|boxes|objects|thresholds)/g,
+        (_, n, u) => "<b>" + n + "</b>" + (u === "%" ? "" : " ") + u);
+    // "Is it getting better?" line chart - mistake rate per tagging batch.
+    let curveChart = null;
+    function renderCurve(points) {
+      const wrap = document.getElementById("curve-wrap");
+      if (!wrap || typeof Chart === "undefined") return;
+      const pts = (points || []).filter((p) => p.error_rate != null);
+      // One point is not a trend; hide until a second batch exists.
+      wrap.hidden = pts.length < 2;
+      if (pts.length < 2) return;
+      const labels = pts.map((p) => `batch ${p.batch}`);
+      const data = pts.map((p) => Math.round(p.error_rate * 100));
+      if (curveChart) {
+        curveChart.data.labels = labels;
+        curveChart.data.datasets[0].data = data;
+        curveChart.update("none");
+        return;
+      }
+      curveChart = new Chart(document.getElementById("learning-curve"), {
+        type: "line",
+        data: { labels, datasets: [{
+          label: "model mistakes among your checks (%)",
+          data, borderColor: "#f0a35e", backgroundColor: "#f0a35e33",
+          fill: true, tension: 0.25, pointRadius: 4,
+        }]},
+        options: {
+          animation: false, responsive: true,
+          scales: { y: { min: 0, max: 100,
+                         ticks: { callback: (v) => v + "%" } } },
+          plugins: { legend: { display: false } },
+        },
+      });
+    }
+    async function refresh() {
+      try {
+        const r = await fetch("/api/model-metrics", { cache: "no-store" });
+        if (!r.ok) { el.classList.add("stale"); return; }
+        const data = await r.json();
+        el.classList.remove("stale");
+        el.innerHTML = highlight(data.header_line || "Model: -");
+        renderCurve(data.curve);
+      } catch (_) {
+        el.classList.add("stale");
+      }
+    }
+    refresh();
+    setInterval(refresh, 10000);
   })();
   </script>
 </body>

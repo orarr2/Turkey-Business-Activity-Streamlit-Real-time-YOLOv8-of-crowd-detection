@@ -369,6 +369,12 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/analysis/data":
             self._analysis_data()
             return
+        if path == "/api/analysis/events":
+            self._analysis_events()
+            return
+        if path == "/api/analysis/saved":
+            self._analysis_saved()
+            return
         if path == "/api/review-sample":
             self._review_sample()
             return
@@ -452,6 +458,9 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             return
         if path == "/api/analysis/stop":
             self._analysis_stop()
+            return
+        if path == "/api/analysis/event/save":
+            self._analysis_event_save()
             return
         if path == "/api/send-report":
             self._send_report()
@@ -971,6 +980,48 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         stopped = MANAGER.stop(cam) if cam else False
         self._send_json(200, {"ok": True, "stopped": stopped})
 
+    def _analysis_events(self) -> None:
+        """GET /api/analysis/events?cam=<id> - the session's detection
+        event ring (newest first, thumbs only; full frames stay on the
+        server until an explicit save)."""
+        from urllib.parse import parse_qs, urlparse
+        q = parse_qs(urlparse(self.path).query)
+        cam = (q.get("cam") or [""])[0]
+        from app.live_analysis import MANAGER
+        evs = MANAGER.events(cam) if cam else None
+        if evs is None:
+            self._send_json(404, {"error": "no live analysis for this "
+                                           "camera"})
+            return
+        self._send_json(200, {"events": evs})
+
+    def _analysis_event_save(self) -> None:
+        """POST /api/analysis/event/save?cam=<id>&id=<event_id> - persist
+        one ring event (full frame + manifest row) for later study."""
+        from urllib.parse import parse_qs, urlparse
+        q = parse_qs(urlparse(self.path).query)
+        cam = (q.get("cam") or [""])[0]
+        eid = (q.get("id") or [""])[0]
+        from app.live_analysis import MANAGER
+        row = MANAGER.save_event(cam, eid) if cam and eid else None
+        if row is None:
+            self._send_json(404, {"error": "event not found (ring may "
+                                           "have rolled past it)"})
+            return
+        self._send_json(200, {"ok": True, "saved": row})
+
+    def _analysis_saved(self) -> None:
+        """GET /api/analysis/saved - manifest of saved detection events."""
+        import json as _json
+        from pathlib import Path
+        man = (Path(__file__).resolve().parent.parent / "web" / "snapshots"
+               / "detections" / "saved.json")
+        try:
+            items = _json.loads(man.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            items = []
+        self._send_json(200, {"items": items})
+
     def _visual_search(self) -> None:
         """POST /api/search  (or /api/visual-search - the legacy alias).
 
@@ -1300,13 +1351,50 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
             print(f"  ! review-frame failed: {type(e).__name__}: {e}")
             self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
 
-    def _review_frames_list(self) -> None:
-        """GET /api/review-frames-list -> every stored frame + review status,
-        newest first. Powers the strip that re-opens reviewed frames."""
+    @staticmethod
+    def _local_pick_ids() -> set:
+        """The MAIN edition's camera universe: the picked slots' ids plus
+        their catalog ids (frames get saved under either)."""
+        import json as _json
         try:
+            grid = _json.loads((WEB_DIR / "local_grid.json").read_text(
+                encoding="utf-8"))
+        except (OSError, ValueError):
+            return set()
+        out = set()
+        for s in grid.get("slots") or []:
+            if s.get("slot_id"):
+                out.add(s["slot_id"])
+            if s.get("cam_id"):
+                out.add(s["cam_id"])
+        return out
+
+    @staticmethod
+    def _frame_cam(f: dict) -> str:
+        cam = f.get("cam_id") or f.get("cam") or ""
+        if not cam:
+            parts = str(f.get("frame_path") or f.get("path") or "").split("/")
+            if len(parts) >= 2:
+                cam = parts[1]
+        return cam
+
+    def _review_frames_list(self) -> None:
+        """GET /api/review-frames-list[?scope=local] -> every stored frame +
+        review status, newest first. Powers the strip that re-opens
+        reviewed frames. scope=local (the MAIN edition) keeps only frames
+        from the operator's picked cameras - the VM bank's pulled frames
+        (tr_*, konya_*...) belong to the VM edition only."""
+        try:
+            from urllib.parse import parse_qs, urlparse
             from app.labels import list_frames
-            self._send_json(200, {"frames": list_frames(_review_store(),
-                                                        SNAPSHOTS_DIR)})
+            frames = list_frames(_review_store(), SNAPSHOTS_DIR)
+            q = parse_qs(urlparse(self.path).query)
+            if (q.get("scope") or [""])[0] == "local":
+                allowed = self._local_pick_ids()
+                if allowed:
+                    frames = [f for f in frames
+                              if self._frame_cam(f) in allowed]
+            self._send_json(200, {"frames": frames})
         except Exception as e:
             print(f"  ! review-frames-list failed: {type(e).__name__}: {e}")
             self._send_json(500, {"error": f"{type(e).__name__}: {e}"})

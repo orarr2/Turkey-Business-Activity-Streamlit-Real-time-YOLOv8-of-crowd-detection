@@ -385,9 +385,17 @@ def _reviewed_frame_rels(snapshots_root: Path) -> set[str]:
 
 def pull_once(snapshots_root: str | Path,
               bucket: str | None = None,
-              state_path: str | Path | None = None) -> dict:
+              state_path: str | Path | None = None,
+              should_yield=None) -> dict:
     """One reconcile pass against the public manifest. Safe to call from a
-    background thread; every failure is contained and reported in the dict."""
+    background thread; every failure is contained and reported in the dict.
+
+    `should_yield` (optional callable -> bool): checked between file
+    downloads; when it turns True the round stops cleanly and the next
+    idle round finishes the remainder. The round-START idle check alone
+    was not enough - a post-restart reconcile (hundreds of files, minutes
+    of HTTPS) that legitimately began while idle kept running into a live
+    analysis window and spiked every session's lag past 30s."""
     root = Path(snapshots_root)
     bucket = bucket or _bucket_name()
     if not bucket:
@@ -437,7 +445,14 @@ def pull_once(snapshots_root: str | Path,
 
     downloaded = removed = 0
     errors = 0
+    yielded = False
     for rel, meta in files.items():
+        if should_yield is not None and should_yield():
+            # Analysis became active mid-round: stop pulling NOW. The
+            # ledger keeps what already landed; the next idle round
+            # finishes the remainder.
+            yielded = True
+            break
         if rel not in keep:
             continue
         # Path hardening: rel comes from the network; keep it inside the pools.
@@ -477,7 +492,9 @@ def pull_once(snapshots_root: str | Path,
     # Files WE pulled earlier that are no longer wanted locally - either the
     # VM evicted them from the bank, or they aged past the local-mirror
     # window. Never touches local-only files (bootstrap fixtures etc).
-    for rel in [r for r in state if r not in keep and r != "_reid_db"]:
+    # Skipped on a yielded round: a half-applied manifest must not evict.
+    for rel in ([] if yielded else
+                [r for r in state if r not in keep and r != "_reid_db"]):
         p = root / rel
         try:
             if p.is_file():
@@ -490,7 +507,7 @@ def pull_once(snapshots_root: str | Path,
     # Re-ID registry snapshot -> data/reid.db so the search panel's registry
     # source (and the entity accordion) reflect what the VM has learned.
     rd = manifest.get("reid_db") or {}
-    if rd.get("url"):
+    if rd.get("url") and not yielded:
         known = state.get("_reid_db") or {}
         if float(known.get("mtime", -1)) != float(rd.get("mtime", -2)):
             try:
@@ -510,7 +527,7 @@ def pull_once(snapshots_root: str | Path,
     if downloaded or removed:
         _write_state(sp, state)
     return {"downloaded": downloaded, "removed": removed, "errors": errors,
-            "manifest_files": len(files)}
+            "manifest_files": len(files), "yielded": yielded}
 
 
 _PULL_THREAD: threading.Thread | None = None
@@ -534,10 +551,31 @@ def start_pull_thread(snapshots_root: str | Path,
         return False
 
     def _loop() -> None:
+        def _busy() -> bool:
+            try:
+                from app.live_analysis import MANAGER as _MGR
+                return _MGR.any_alive()
+            except Exception:
+                return False
+
         while True:
             try:
-                stats = pull_once(snapshots_root, bucket=bucket)
-                if stats.get("downloaded") or stats.get("removed"):
+                # Yield to live analysis: a pull round is network + disk
+                # + hashing work that measurably spiked the analysis lag
+                # to 30-45s every 2 minutes while an operator watched a
+                # layer. The backlog just downloads on the next idle round.
+                # _busy is ALSO checked between downloads inside pull_once:
+                # a long post-restart reconcile that started while idle
+                # must stop the moment a session comes alive.
+                if _busy():
+                    time.sleep(max(30, interval_s))
+                    continue
+                stats = pull_once(snapshots_root, bucket=bucket,
+                                  should_yield=_busy)
+                if stats.get("yielded"):
+                    print(f"pool_sync: round yielded to live analysis after "
+                          f"{stats.get('downloaded', 0)} file(s)")
+                elif stats.get("downloaded") or stats.get("removed"):
                     print(f"pool_sync: pulled {stats.get('downloaded', 0)} file(s), "
                           f"removed {stats.get('removed', 0)} "
                           f"({stats.get('manifest_files', 0)} in manifest)")

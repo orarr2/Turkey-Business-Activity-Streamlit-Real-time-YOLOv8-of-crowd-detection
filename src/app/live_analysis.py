@@ -46,7 +46,7 @@ _SRC_ROOT = Path(__file__).resolve().parent.parent
 # The seven analysis layers an operator can run live. "line" is the
 # threshold-crossing layer added in fix 2.
 LIVE_LAYERS = ("paths", "pose", "gestures", "body", "faces", "heat", "line",
-               "loiter", "parking")
+               "loiter", "parking", "plates")
 DEFAULT_LOITER_DWELL_S = 30.0
 _VEHICLE_CLASSES = ("car", "truck", "bus", "motorcycle", "bicycle")
 LAYER_TITLES = {
@@ -57,6 +57,7 @@ LAYER_TITLES = {
     "faces":    "Face detection",
     "heat":     "Heat signature",
     "line":     "Line crossing",
+    "plates":   "License plates (LPR)",
 }
 
 MAX_SESSIONS = 4          # one per grid tile - the fix 2 cap
@@ -76,6 +77,15 @@ DISPLAY_MIN_HITS = 2
 DISPLAY_MIN_CONF = 0.40
 DISPLAY_MAX_MISSES = 1     # allow 1-tick coasting through brief occlusion
 DISPLAY_CLASS_BLACKLIST = {"train", "boat", "airplane"}
+# Below this person-box height (px) skeletons are guesswork, so kps are
+# neither PUBLISHED nor COMPUTED: the pose pass crops only boxes at least
+# this tall. One constant keeps compute aligned with the display gate -
+# pose on a person whose skeleton would be hidden anyway is pure waste
+# (measured: a full 5-min window on a far-field cam ran the pose model
+# every tick with zero displayable skeletons).
+KPS_MIN_BOX_H = 96
+# Crowded-frame bound for the per-crop pose pass (tallest boxes win).
+POSE_MAX_CROPS = 6
 
 # Live-analysis detector envelope (2026-08 industry pass):
 # - LIVE_CLASSES excludes COCO train(6)/boat/airplane at the DETECTOR so
@@ -587,6 +597,39 @@ def draw_pose_layer(img, boxes: list[dict]):
     return _caption(img, [note])
 
 
+def draw_plates_layer(img, boxes: list[dict]):
+    """Vehicle boxes + plate strings ONLY. Vehicles without an accepted
+    read stay unannotated; the caption tells how many were in range."""
+    import cv2
+    from app.plates import MIN_VEHICLE_W, PLATE_VEHICLE_CLASSES
+    veh = [b for b in boxes if b.get("cls") in PLATE_VEHICLE_CLASSES]
+    read = [b for b in veh if b.get("plate")]
+    for b in read:
+        p1 = (int(b["x1"]), int(b["y1"]))
+        p2 = (int(b["x2"]), int(b["y2"]))
+        cv2.rectangle(img, p1, p2, (80, 220, 80), 2)
+        label = f"{b['plate']} {b.get('plate_conf', 0):.2f}"
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX,
+                                      0.55, 2)
+        ty = max(th + 6, p1[1] - 4)
+        cv2.rectangle(img, (p1[0], ty - th - 6), (p1[0] + tw + 8, ty + 2),
+                      (30, 30, 30), -1)
+        cv2.putText(img, label, (p1[0] + 4, ty - 3),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (120, 255, 120), 2,
+                    cv2.LINE_AA)
+    in_range = sum(1 for b in veh
+                   if (b["x2"] - b["x1"]) >= MIN_VEHICLE_W)
+    if not veh:
+        note = "License plates - no vehicles in frame"
+    elif not in_range:
+        note = (f"License plates - {len(veh)} vehicles, all too far "
+                f"for plate read (<{MIN_VEHICLE_W}px)")
+    else:
+        note = (f"License plates - {len(read)} read / {in_range} in "
+                f"range / {len(veh)} vehicles")
+    return _caption(img, [note])
+
+
 def draw_gestures_layer(img, boxes: list[dict], stats_by_id: dict,
                         session_counts: dict | None = None):
     """Skeleton + gesture chip only for people with a DETECTED gesture."""
@@ -986,6 +1029,12 @@ class _StreamReader(threading.Thread):
 _READER_POOL: dict[str, _StreamReader] = {}
 _READER_POOL_LOCK = threading.Lock()
 _READER_IDLE_STOP_S = 180.0
+# Consecutive staleness-rebuilds per camera. googlevideo occasionally
+# retires a segment-edge pool BEFORE the manifest's expire= stamp
+# (observed live: ffmpeg error -138 on every rr*.googlevideo.com edge
+# while the cached manifest URL still had hours of validity) - rebuilding
+# the reader on the SAME manifest re-knocks the same dead edges forever.
+_STALE_REBUILDS: dict[str, int] = {}
 
 
 def get_shared_reader(cam: dict, cam_id: str):
@@ -1009,11 +1058,31 @@ def get_shared_reader(cam: dict, cam_id: str):
                 r.stop()
                 _READER_POOL.pop(key, None)
         r = _READER_POOL.get(cam_id)
+        # 20s staleness bound (2 HLS segment periods): live segments land
+        # in ~5s bursts, and a 10s bound tripped on burst boundaries,
+        # needlessly rebuilding healthy readers and costing whole rounds.
         stale = (r is not None and r.latest is not None
-                 and now - r.latest_ts > 10)
+                 and now - r.latest_ts > 20)
+        if r is not None and not stale and not r.dead and r.is_alive():
+            _STALE_REBUILDS[cam_id] = 0
         if r is None or r.dead or not r.is_alive() or r.url != url or stale:
             if r is not None:
                 r.stop()
+            if stale:
+                n = _STALE_REBUILDS.get(cam_id, 0) + 1
+                _STALE_REBUILDS[cam_id] = n
+                if n >= 2:
+                    # Two staleness rebuilds in a row: the manifest's
+                    # segment edges are dead even though expire= says
+                    # valid. Force a fresh resolve so the new reader gets
+                    # a NEW edge assignment instead of the dead pool.
+                    from app.detect_core import invalidate_stream as _inv
+                    _inv(cam_id)
+                    try:
+                        url = resolve_stream(cam)
+                    except Exception:
+                        pass   # keep the old URL; the next round retries
+                    _STALE_REBUILDS[cam_id] = 0
             r = _StreamReader(url)
             r.last_used = now
             r.start()
@@ -1100,6 +1169,7 @@ class LiveSession(threading.Thread):
                     if self.stop_event.wait(2.0):
                         break
                     continue
+                self._last_frame = frame   # event thumbs crop from here
                 boxes = self._infer(frame)
                 now = time.time()
                 if self.tracker is None:
@@ -1110,6 +1180,8 @@ class LiveSession(threading.Thread):
                 layer = self.layer
                 if layer in ("pose", "gestures", "body"):
                     self._pose_pass(frame, boxes)
+                if layer == "plates":
+                    self._plates_pass(frame)
                 faces_list: list[dict] = []
                 if layer == "faces":
                     faces_list = self._faces_pass(frame)
@@ -1161,7 +1233,8 @@ class LiveSession(threading.Thread):
         frame = r.snapshot_wait(timeout=4.0)
         # A reader whose frames stopped aging forward is wedged (stalled
         # stream that still holds its last decode) - rebuild next tick.
-        if frame is not None and time.time() - r.latest_ts > 10:
+        # 20s bound matches the pool getter (HLS bursts every ~5s).
+        if frame is not None and time.time() - r.latest_ts > 20:
             r.stop()
             r.dead = True
             frame = None
@@ -1218,9 +1291,33 @@ class LiveSession(threading.Thread):
         return boxes
 
     def _pose_pass(self, frame, boxes) -> None:
+        # NOT under INFER_LOCK: the pose pass serializes on detect_core's
+        # _PREDICT_LOCK inside attach_keypoints_crops. Holding the batcher
+        # lock across it as well queued every other session's DETECTION
+        # behind this session's pose (measured: 12-20s infer waits with 4
+        # pose sessions vs ~3-6s without).
         from app.pose import attach_keypoints_crops, load_pose_model
-        with INFER_LOCK:
-            attach_keypoints_crops(load_pose_model(), frame, boxes)
+        attach_keypoints_crops(load_pose_model(), frame, boxes,
+                               min_box_h=KPS_MIN_BOX_H,
+                               max_crops=POSE_MAX_CROPS)
+
+    def _plates_pass(self, frame) -> None:
+        # Serializes on _PREDICT_LOCK inside attach_plates (same OpenVINO
+        # single-InferRequest rule as detection and pose). Per-track read
+        # cache lives on the session so a plate is OCRed once per track.
+        from app.plates import attach_plates, load_ocr, load_plate_model
+        if not hasattr(self, "_plate_reads"):
+            self._plate_reads: dict[int, dict] = {}
+        try:
+            attach_plates(load_plate_model(), load_ocr(), frame,
+                          self.tracker, self._plate_reads)
+        except Exception as e:
+            # A missing/corrupt model must degrade to an honest empty
+            # layer, not kill the session.
+            if not getattr(self, "_plates_err_once", False):
+                self._plates_err_once = True
+                print(f"live-analysis {self.cam_id}: plates pass disabled "
+                      f"({type(e).__name__}: {e})")
 
     def _faces_pass(self, frame) -> list[dict]:
         from app import faces as _faces
@@ -1447,11 +1544,16 @@ class LiveSession(threading.Thread):
                 by = b["y2"] / H            # feet, not head
                 for zi, e in loiter:
                     if _pt_in_poly(cx, by, e["points"]):
-                        key = (tr.tid, zi)
-                        active.add(key)
-                        self._zone_last_seen[key] = now_t
-                        streak = self._zone_streak.get(key, 0) + 1
-                        self._zone_streak[key] = streak
+                        # zkey, NOT key: `key` above is the per-tick cache
+                        # key stored at the end - shadowing it here made
+                        # the cache miss whenever someone stood in a zone
+                        # (render+publish recomputed, double-stepping the
+                        # entry-debounce streak).
+                        zkey = (tr.tid, zi)
+                        active.add(zkey)
+                        self._zone_last_seen[zkey] = now_t
+                        streak = self._zone_streak.get(zkey, 0) + 1
+                        self._zone_streak[zkey] = streak
                         # Entry debounce (Frigate inertia / Bosch
                         # debounce): the dwell clock arms only on the
                         # SECOND consecutive tick inside - one grazing
@@ -1459,7 +1561,7 @@ class LiveSession(threading.Thread):
                         if streak < 2:
                             e["count"] += 1
                             continue
-                        dw = now_t - self._zone_since.setdefault(key, now_t)
+                        dw = now_t - self._zone_since.setdefault(zkey, now_t)
                         e["count"] += 1
                         e["max_dwell"] = max(e["max_dwell"], dw)
                         if dw >= e["dwell_s"]:
@@ -1519,16 +1621,16 @@ class LiveSession(threading.Thread):
         # tick doesn't reset a 25s dwell; a real exit (grace expired)
         # clears the clock and the streak.
         GRACE_S = 12.0
-        for key in list(self._zone_since.keys()):
-            if key not in active and \
-                    now_t - self._zone_last_seen.get(key, 0) > GRACE_S:
-                self._zone_since.pop(key, None)
-                self._zone_streak.pop(key, None)
-                self._zone_last_seen.pop(key, None)
-        for key in list(self._zone_streak.keys()):
-            if key not in active and \
-                    now_t - self._zone_last_seen.get(key, 0) > GRACE_S:
-                self._zone_streak.pop(key, None)
+        for zkey in list(self._zone_since.keys()):
+            if zkey not in active and \
+                    now_t - self._zone_last_seen.get(zkey, 0) > GRACE_S:
+                self._zone_since.pop(zkey, None)
+                self._zone_streak.pop(zkey, None)
+                self._zone_last_seen.pop(zkey, None)
+        for zkey in list(self._zone_streak.keys()):
+            if zkey not in active and \
+                    now_t - self._zone_last_seen.get(zkey, 0) > GRACE_S:
+                self._zone_streak.pop(zkey, None)
         result = ([e for _, e in loiter], [e for _, e in parking],
                   dwell_by_tid)
         self._zone_cache_key = key
@@ -1568,10 +1670,16 @@ class LiveSession(threading.Thread):
         """
         H, W = int(frame_shape[0]), int(frame_shape[1])
         js_boxes = []
+        # Paths is the MOVERS layer: at 5-8s ticks under 4-session load a
+        # motorcycle crosses the whole view inside one or two ticks, so
+        # the 2-hit confirmation gate deleted exactly the objects the
+        # layer exists for. First-tick display there; everything else
+        # keeps the flicker-suppressing 2-hit gate.
+        min_hits = 1 if layer == "paths" else DISPLAY_MIN_HITS
         for tr in (self.tracker.open if self.tracker else []):
             last = tr.boxes[-1]
             conf = max(float(b.get("conf") or 0) for b in tr.boxes[-2:])
-            if (tr.hits < DISPLAY_MIN_HITS
+            if (tr.hits < min_hits
                     or tr.misses > DISPLAY_MAX_MISSES
                     or conf < DISPLAY_MIN_CONF
                     or (tr.cls or "?") in DISPLAY_CLASS_BLACKLIST):
@@ -1612,7 +1720,12 @@ class LiveSession(threading.Thread):
                 diag = ((last["x2"] - last["x1"]) ** 2
                         + (last["y2"] - last["y1"]) ** 2) ** 0.5
                 blps = spd / max(diag, 1.0)
-                if blps < 0.05 and tr.hits >= 3:
+                # "static" is a claim about a TRACK, not a frame: it
+                # needs 3 confirmations AND 4s of observed age, or a
+                # rider matched for two ticks at similar spots gets
+                # branded static mid-ride.
+                age = tr.times[-1] - tr.times[0] if len(tr.times) > 1 else 0
+                if blps < 0.05 and tr.hits >= 3 and age >= 4:
                     jb["tier"] = "static"
                 elif blps < 0.25:
                     jb["tier"] = "slow"
@@ -1620,13 +1733,17 @@ class LiveSession(threading.Thread):
                     jb["tier"] = "moving"
                 else:
                     jb["tier"] = "fast"
+            elif layer == "plates":
+                if last.get("plate"):
+                    jb["plate"] = last["plate"]
+                    jb["plate_conf"] = last.get("plate_conf")
             elif layer in ("pose", "gestures", "body"):
                 kps = last.get("kps")
                 # COCO keypoints are only annotated for medium+ people;
-                # below ~96px box height skeletons are guesswork, so the
+                # below KPS_MIN_BOX_H skeletons are guesswork, so the
                 # envelope gate simply withholds them (the note in the
                 # payload tells the operator how many were gated).
-                if kps and (jb["y2"] - jb["y1"]) >= 96:
+                if kps and (jb["y2"] - jb["y1"]) >= KPS_MIN_BOX_H:
                     jb["kps"] = [[int(k[0]), int(k[1]), round(k[2], 2)]
                                  for k in kps]
                 if layer == "gestures" and tr.cls == "person" \
@@ -1730,6 +1847,16 @@ class LiveSession(threading.Thread):
                  "conf": round(float(f.get("conf") or 0), 2)}
                 for f in (faces_list or [])]
             data["faces_ok"] = bool(self._faces_ok)
+        if layer == "plates":
+            from app.plates import MIN_VEHICLE_W, PLATE_VEHICLE_CLASSES
+            veh = [b for b in js_boxes if b["cls"] in PLATE_VEHICLE_CLASSES]
+            in_range = [b for b in veh
+                        if (b["x2"] - b["x1"]) >= MIN_VEHICLE_W]
+            read = [b for b in veh if b.get("plate")]
+            data["envelope"] = (
+                f"{len(veh)} vehicles · {len(in_range)} in plate range "
+                f"(>={MIN_VEHICLE_W}px wide) · {len(read)} read "
+                f"(digits+Latin; Thai script out of alphabet)")
         # Operating-envelope note per pose-family layer: how many people
         # were in scene vs how many passed the size gates, so an empty
         # overlay reads as an honest "out of range", not a failure.
@@ -1744,9 +1871,241 @@ class LiveSession(threading.Thread):
             else:
                 data["envelope"] = (
                     f"{len(persons)} people · skeletons on "
-                    f"{len(with_kps)} (>=96px only)")
+                    f"{len(with_kps)} (>={KPS_MIN_BOX_H}px only)")
+        try:
+            self._detect_events(js_boxes, layer, data, faces_list)
+        except Exception as e:  # events must never cost a tick
+            if not getattr(self, "_ev_err_once", False):
+                self._ev_err_once = True
+                print(f"live-analysis {self.cam_id}: event strip disabled "
+                      f"({type(e).__name__}: {e})")
+        try:
+            self._append_local_history(js_boxes)
+        except Exception:
+            pass   # history is best-effort; never costs a tick
         with self.lock:
             self.latest_data = data
+
+    def _append_local_history(self, js_boxes) -> None:
+        """One footfall-history sample per ~30s per camera, written by the
+        SESSION: the local producers (the usual writers of these files)
+        yield the CPU whenever an analysis session runs, so a dashboard
+        that analyzes continuously would otherwise chart nothing."""
+        now = time.time()
+        if now - getattr(self, "_hist_last", 0) < 30:
+            return
+        self._hist_last = now
+        person = sum(1 for b in js_boxes if b["cls"] == "person")
+        vehicles = sum(1 for b in js_boxes
+                       if b["cls"] in _VEHICLE_CLASSES)
+        base = _SRC_ROOT / "web" / "snapshots" / "model_view"
+        base.mkdir(parents=True, exist_ok=True)
+        hist = base / f"{self.cam_id}_history.jsonl"
+        row = json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                              time.gmtime()),
+                          "person": person, "vehicles": vehicles,
+                          "ok": True})
+        with hist.open("a", encoding="utf-8") as hf:
+            hf.write(row + "\n")
+        if hist.stat().st_size > 300_000:
+            keep = hist.read_text(encoding="utf-8").splitlines()[-2880:]
+            hist.write_text("\n".join(keep) + "\n", encoding="utf-8")
+
+    # -- detection event strip (hot feed + save/recall) --------------------
+    # Every layer publishes STATE CHANGES (a plate read, a crossing, a
+    # loiter alert firing, a spot flipping...) into a bounded ring the
+    # client renders as a rolling strip under the video. New events push
+    # old ones out; only an explicit save writes the full frame to disk.
+
+    EV_RING = 50
+
+    def _emit_event(self, layer: str, text: str, box: dict | None = None):
+        import base64
+        import cv2
+        frame = getattr(self, "_last_frame", None)
+        if frame is None:
+            return
+        H, W = frame.shape[:2]
+        # Annotate a COPY so the saved proof is self-contained: the
+        # detection box plus a caption bar (what | layer | camera | when)
+        # burn into the image itself - a bare frame in a gallery proves
+        # nothing.
+        annotated = frame.copy()
+        if box is not None:
+            cv2.rectangle(annotated,
+                          (int(box["x1"]), int(box["y1"])),
+                          (int(box["x2"]), int(box["y2"])),
+                          (80, 220, 80), 3)
+        cap = (f"{text} | {LAYER_TITLES.get(layer, layer)} | "
+               f"{self.cam_name} | {time.strftime('%H:%M:%S')}")
+        (cw_, ch_), _ = cv2.getTextSize(cap, cv2.FONT_HERSHEY_SIMPLEX,
+                                        0.6, 2)
+        cv2.rectangle(annotated, (0, H - ch_ - 16),
+                      (min(W, cw_ + 16), H), (42, 23, 15), -1)
+        cv2.putText(annotated, cap, (8, H - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (250, 245, 240), 2,
+                    cv2.LINE_AA)
+        crop = annotated
+        if box is not None:
+            bw, bh = box["x2"] - box["x1"], box["y2"] - box["y1"]
+            px, py = bw * 0.25, bh * 0.25
+            x1 = max(0, int(box["x1"] - px)); y1 = max(0, int(box["y1"] - py))
+            x2 = min(W, int(box["x2"] + px)); y2 = min(H, int(box["y2"] + py))
+            if x2 - x1 > 4 and y2 - y1 > 4:
+                crop = annotated[y1:y2, x1:x2]
+        th = 90
+        tw = max(1, min(240, int(crop.shape[1] * th / max(1, crop.shape[0]))))
+        thumb = cv2.resize(crop, (tw, th))
+        ok1, tj = cv2.imencode(".jpg", thumb, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        ok2, fj = cv2.imencode(".jpg", annotated,
+                               [cv2.IMWRITE_JPEG_QUALITY, 70])
+        if not (ok1 and ok2):
+            return
+        ts = time.time()
+        ev = {"id": str(int(ts * 1000)), "ts": ts, "layer": layer,
+              "text": text,
+              "thumb": base64.b64encode(tj.tobytes()).decode("ascii"),
+              "saved": False,
+              "_full": fj.tobytes()}   # server-side only, dropped on GET
+        with self.lock:
+            self.events.append(ev)
+
+    def _detect_events(self, js_boxes, layer, data, faces_list) -> None:
+        """Layer-specific state changes -> the event ring. A tick that
+        merely re-observes the same scene emits nothing."""
+        if not hasattr(self, "events"):
+            from collections import deque
+            self.events = deque(maxlen=self.EV_RING)
+            self._ev = {"plates": set(), "gest": set(), "body": set(),
+                        "pose": set(), "fast": set(), "cross": None,
+                        "loiter_on": set(), "spots": {}, "faces_n": 0,
+                        "faces_t": 0.0, "heat_t": 0.0}
+        st = self._ev
+        now = time.time()
+        if layer == "plates":
+            for b in js_boxes:
+                t = b.get("plate")
+                if t and (b.get("tid"), t) not in st["plates"]:
+                    st["plates"].add((b.get("tid"), t))
+                    self._emit_event(layer,
+                                     f"plate {t} "
+                                     f"({b.get('plate_conf', 0):.2f}) "
+                                     f"{b.get('cls', '')}", b)
+        elif layer == "line":
+            prev, cur = st["cross"], dict(self.cross)
+            if prev is not None:
+                for d_ in ("in", "out"):
+                    if cur.get(d_, 0) > prev.get(d_, 0):
+                        self._emit_event(layer, f"crossing {d_.upper()} "
+                                         f"(total {cur[d_]})")
+            st["cross"] = cur
+        elif layer == "loiter":
+            for z in data.get("zones") or []:
+                name = z.get("name")
+                if z.get("alert") and name not in st["loiter_on"]:
+                    st["loiter_on"].add(name)
+                    self._emit_event(layer, f"loiter alert: {name} "
+                                     f"{int(z.get('max_dwell', 0))}s")
+                elif not z.get("alert"):
+                    st["loiter_on"].discard(name)
+        elif layer == "parking":
+            for s in data.get("spots") or []:
+                name, occ = s.get("name"), bool(s.get("occupied"))
+                if name in st["spots"] and st["spots"][name] != occ:
+                    self._emit_event(layer, f"{name} " +
+                                     (f"occupied ({s.get('cls')})" if occ
+                                      else "vacated"))
+                st["spots"][name] = occ
+        elif layer == "gestures":
+            for b in js_boxes:
+                for g in b.get("gestures") or []:
+                    k = (b.get("tid"), g)
+                    if k not in st["gest"]:
+                        st["gest"].add(k)
+                        self._emit_event(layer, f"#{b.get('tid')} {g}", b)
+        elif layer == "body":
+            for b in js_boxes:
+                f = b.get("flag")
+                if f and (b.get("tid"), f) not in st["body"]:
+                    st["body"].add((b.get("tid"), f))
+                    self._emit_event(layer, f"#{b.get('tid')} "
+                                     f"{str(f).upper()}"
+                                     + (" ALERT" if b.get("alert") else ""),
+                                     b)
+        elif layer == "pose":
+            for b in js_boxes:
+                if b.get("kps") and b.get("tid") not in st["pose"]:
+                    st["pose"].add(b.get("tid"))
+                    self._emit_event(layer, f"#{b.get('tid')} skeleton "
+                                     f"acquired", b)
+        elif layer == "paths":
+            for b in js_boxes:
+                if b.get("tier") == "fast" and b.get("tid") not in st["fast"]:
+                    st["fast"].add(b.get("tid"))
+                    self._emit_event(layer, f"#{b.get('tid')} fast "
+                                     f"({b.get('cls')})", b)
+        elif layer == "faces":
+            n = len(faces_list or [])
+            if n > st["faces_n"] and now - st["faces_t"] >= 30:
+                st["faces_t"] = now
+                self._emit_event(layer, f"{n} face(s) in frame")
+            st["faces_n"] = n
+        elif layer == "heat":
+            if now - st["heat_t"] >= 120:
+                raw = getattr(self, "heat", None)
+                if raw is not None:
+                    import numpy as np
+                    # self.heat is a plain list-of-lists; asarray first
+                    # (hm.shape on the raw list raised AttributeError and
+                    # silently killed every heat event).
+                    hm = np.asarray(raw, dtype=float)
+                    if hm.ndim == 2 and float(hm.max()) > 0:
+                        iy, ix = divmod(int(hm.argmax()), hm.shape[1])
+                        st["heat_t"] = now
+                        self._emit_event(layer, "hotspot at "
+                                         f"{int(100 * ix / hm.shape[1])}%,"
+                                         f"{int(100 * iy / hm.shape[0])}% "
+                                         f"of frame")
+        # Long sessions: bound the dedup sets.
+        for k in ("plates", "gest", "body", "pose", "fast"):
+            if len(st[k]) > 512:
+                st[k].clear()
+
+    def snapshot_events(self) -> list[dict]:
+        with self.lock:
+            return [{k: v for k, v in e.items() if k != "_full"}
+                    for e in reversed(self.events)]
+
+    def save_event(self, event_id: str) -> dict | None:
+        """Persist one ring event (full frame) to disk for later study."""
+        with self.lock:
+            ev = next((e for e in getattr(self, "events", [])
+                       if e["id"] == event_id), None)
+            full = ev.get("_full") if ev else None
+        if ev is None:
+            return None
+        from pathlib import Path
+        base = (Path(__file__).resolve().parent.parent / "web"
+                / "snapshots" / "detections")
+        base.mkdir(parents=True, exist_ok=True)
+        fn = f"{self.cam_id}_{ev['id']}.jpg"
+        if full:
+            (base / fn).write_bytes(full)
+        row = {"id": ev["id"], "cam": self.cam_id,
+               "cam_name": self.cam_name, "layer": ev["layer"],
+               "text": ev["text"], "ts": ev["ts"],
+               "image": f"snapshots/detections/{fn}"}
+        man = base / "saved.json"
+        try:
+            items = json.loads(man.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            items = []
+        items.insert(0, row)
+        man.write_text(json.dumps(items[:500], ensure_ascii=False),
+                       encoding="utf-8")
+        with self.lock:
+            ev["saved"] = True
+        return row
 
 
 # ---------------------------------------------------------------------------
@@ -1837,6 +2196,23 @@ class LiveAnalysisManager:
         with s.lock:
             return {"data": s.latest_data, "seq": s.seq, "layer": s.layer,
                     "note": s.note}
+
+    def events(self, cam_id: str) -> list[dict] | None:
+        """The session's detection-event ring, newest first (no full
+        frames - those stay server-side until an explicit save)."""
+        with self._lock:
+            s = self._sessions.get(cam_id)
+        if s is None or not s.is_alive():
+            return None
+        s.last_poll = time.time()
+        return s.snapshot_events()
+
+    def save_event(self, cam_id: str, event_id: str) -> dict | None:
+        with self._lock:
+            s = self._sessions.get(cam_id)
+        if s is None:
+            return None
+        return s.save_event(event_id)
 
     def stop(self, cam_id: str) -> bool:
         with self._lock:

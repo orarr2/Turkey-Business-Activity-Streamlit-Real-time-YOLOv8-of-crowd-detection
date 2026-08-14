@@ -199,12 +199,56 @@ class ModelViewProducer(threading.Thread):
                         elif b.get("cls") in ("car", "truck", "bus", "motorcycle",
                                               "bicycle"):
                             counts["vehicles"] += 1
+                    # camera_obstructed, LOCAL edition: one confident box
+                    # covering half the view (a bus parked on the lens, a
+                    # truck at the junction mouth) is an interference the
+                    # operator should see as a tile badge. Same gates as
+                    # the VM collector's ops event (collector.py:
+                    # OBSTRUCTION_AREA_FRAC=0.5, OBSTRUCTION_MIN_CONF=0.45).
+                    H, W = frame.shape[:2]
+                    obstructed = None
+                    for b in boxes or []:
+                        frac = (max(0, b["x2"] - b["x1"])
+                                * max(0, b["y2"] - b["y1"])) / max(1, W * H)
+                        if frac >= 0.5 and float(b.get("conf") or 0) >= 0.45:
+                            obstructed = {"cls": b.get("cls", "?"),
+                                          "frac": round(frac, 2)}
+                            break
+                    # camera_dark: mean luma near black = covered lens or
+                    # power cut (night streets still average 25-60; a
+                    # genuinely dead view sits under ~10). Same anomaly
+                    # kind the collector reports cloud-side.
+                    luma = float(frame[::8, ::8].mean())
+                    payload = {"slot_id": slot_id, "cam_id": cam_id,
+                               "cam_name": slot.get("placeholder_name")
+                                          or cam.get("name") or cam_id,
+                               "counts": counts,
+                               "at": time.time()}
+                    if luma < 10:
+                        payload["dark"] = round(luma, 1)
+                    if obstructed:
+                        payload["obstructed"] = obstructed
                     (MODEL_VIEW_DIR / f"{slot_id}.json").write_text(
-                        json.dumps({"slot_id": slot_id, "cam_id": cam_id,
-                                    "cam_name": slot.get("placeholder_name")
-                                               or cam.get("name") or cam_id,
-                                    "counts": counts,
-                                    "at": time.time()}))
+                        json.dumps(payload))
+                    # Rolling 24h footfall history for the PICKED cams -
+                    # the local-mode source for the combined 24h chart and
+                    # the tile KPI aggregates (the cloud collector's
+                    # Firestore history covers ITS country ladder, not the
+                    # local picks). One JSON line per producer round;
+                    # trimmed to 24h of 30s rounds.
+                    hist = MODEL_VIEW_DIR / f"{slot_id}_history.jsonl"
+                    row = json.dumps(
+                        {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                             time.gmtime()),
+                         "person": counts["person"],
+                         "vehicles": counts["vehicles"], "ok": True})
+                    with hist.open("a", encoding="utf-8") as hf:
+                        hf.write(row + "\n")
+                    if hist.stat().st_size > 300_000:
+                        keep = hist.read_text(
+                            encoding="utf-8").splitlines()[-2880:]
+                        hist.write_text("\n".join(keep) + "\n",
+                                        encoding="utf-8")
                 except Exception as e:
                     # A single-cam glitch (network, decoder, disk-lock) must
                     # never kill the loop for the OTHER cams.

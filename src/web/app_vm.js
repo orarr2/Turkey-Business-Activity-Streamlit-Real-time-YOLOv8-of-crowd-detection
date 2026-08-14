@@ -685,20 +685,11 @@ async function pollAnalysisEvents(st) {
   }
   const chips = a.evStrip.querySelectorAll(".event-chip");
   for (let i = 30; i < chips.length; i++) chips[i].remove();
-  // Show only the CURRENT layer's chips (server truth) - a heat view
-  // scrolling old loiter alerts read as "heat is showing loitering".
-  // Other layers' chips stay in the DOM and reappear on switch-back.
-  const cur = a.actualLayer || a.layer;
-  for (const c of a.evStrip.querySelectorAll(".event-chip")) {
-    c.style.display = (!c.dataset.layer || c.dataset.layer === cur)
-      ? "" : "none";
-  }
 }
 
 function _eventChip(a, ev) {
   const chip = document.createElement("div");
   chip.className = "event-chip";
-  chip.dataset.layer = ev.layer || "";
   chip.style.cssText =
     "flex:0 0 auto;display:flex;gap:6px;align-items:center;" +
     "background:#111a2e;border:1px solid #1e293b;border-radius:6px;" +
@@ -775,48 +766,6 @@ async function openSavedDetections() {
   document.body.appendChild(bg);
 }
 
-// Investigation tab: the standing gallery of saved detection samples -
-// reachable with or without a running analysis (the strip's modal only
-// exists while a wrap is mounted; this one always does).
-async function renderGallery() {
-  const wrap = document.getElementById("gallery-wrap");
-  const title = document.getElementById("gallery-title");
-  if (!wrap) return;
-  let items = [];
-  try {
-    const r = await fetch("/api/analysis/saved", { cache: "no-store" });
-    items = (await r.json()).items || [];
-  } catch (_) { return; }
-  if (title) title.textContent =
-    `Detections gallery - ${items.length} saved sample(s)`;
-  if (!items.length) {
-    wrap.innerHTML = `<div class="sub">nothing saved yet - press 💾 on a
-      live detection chip, or let the proof collector fill this up.</div>`;
-    return;
-  }
-  const order = ["plates", "line", "loiter", "parking", "gestures",
-                 "body", "pose", "faces", "heat", "paths"];
-  items.sort((a, b) => order.indexOf(a.layer) - order.indexOf(b.layer)
-                       || (b.ts || 0) - (a.ts || 0));
-  wrap.innerHTML = items.map((it) => {
-    const t = new Date((it.ts || 0) * 1000);
-    return `<figure style="margin:0;background:#0c0e13;border:1px solid
-        #232733;border-radius:8px;overflow:hidden">
-      <a href="${it.image}" target="_blank" rel="noopener">
-        <img src="${it.image}" alt="" loading="lazy"
-             style="width:100%;height:130px;object-fit:cover;display:block"></a>
-      <figcaption style="padding:6px 8px">
-        <div style="font-size:11px;color:#e7e9ee;white-space:nowrap;
-             overflow:hidden;text-overflow:ellipsis">${escapeHtml(it.text)}</div>
-        <div style="font-size:10px;color:#8b909a">${escapeHtml(it.layer)} ·
-          ${escapeHtml(it.cam_name || it.cam)} · ${t.toLocaleTimeString()}</div>
-      </figcaption>
-    </figure>`;
-  }).join("");
-}
-renderGallery();
-setInterval(renderGallery, 20000);
-
 // 60fps draw loop for one tile's analysis overlay. Runs only while that
 // tile's analysis is active (self-terminates when st.analysis changes).
 // Each frame: pick the buffered tick whose capture time matches the video
@@ -848,15 +797,7 @@ function _analysisDrawLoop(st, a) {
     for (let i = buf.length - 1; i >= 0; i--) {
       if ((buf[i].at || 0) <= vidEpoch + 0.25) { d = buf[i]; break; }
     }
-    // Extrapolation window 10s (was 3): with four concurrent sessions a
-    // tick lands every 5-8s, so a 3s cap meant boxes glided for 3s and
-    // then FROZE until the next tick - the operator's "boxes don't move
-    // with the objects". Velocity decays with a 5s time constant so a
-    // long gap eases the box to a stop instead of launching it across
-    // the frame on stale velocity.
-    const rawDt = Math.min(10, Math.max(0, vidEpoch - (d.at || vidEpoch)));
-    const TAU = 5;
-    dt = TAU * (1 - Math.exp(-rawDt / TAU));
+    dt = Math.min(3, Math.max(0, vidEpoch - (d.at || vidEpoch)));
   }
   _drawAnalysisOverlay(a.canvas, d, dt);
 }
@@ -896,26 +837,6 @@ async function pollAnalysisFrame(st) {
       { cache: "no-store" });
     if (r.status === 200) {
       const d = await r.json();
-      // Layer-truth sync: the blue tag reflects what the SERVER runs,
-      // not what was clicked. While they differ, say "switching..." and
-      // re-POST the switch (throttled) until the echo confirms - a
-      // silently failed switch used to leave the tag lying (a "Pose"
-      // tag over loiter zones).
-      a.actualLayer = d.layer;
-      const liveTag = st.videoWrap.querySelector(".analysis-live-tag");
-      if (d.layer === a.layer) {
-        if (liveTag) liveTag.textContent =
-          `LIVE · ${_layerLabel[d.layer] || d.layer}`;
-      } else {
-        if (liveTag) liveTag.textContent =
-          `switching to ${_layerLabel[a.layer] || a.layer}…`;
-        if (Date.now() - (a._switchPost || 0) > 4000) {
-          a._switchPost = Date.now();
-          fetch(`/api/analysis/start?cam=${encodeURIComponent(a.cam)}`
-                + `&layer=${encodeURIComponent(a.layer)}`,
-                { method: "POST" }).catch(() => {});
-        }
-      }
       if (d.seq !== a.lastSeq) {
         a.lastSeq = d.seq;
         a.tickBuf.push(d);
@@ -1155,10 +1076,6 @@ function _drawAnalysisOverlay(canvas, d, dtExtra = 0) {
     // boxes (vehicles, people) do not belong on it; the server JPEG
     // render has always been faces-only and the canvas must match.
     if (d.layer === "faces") continue;
-    // Heat layer draws ONLY the heat field - the layer's whole point is
-    // WHERE presence accumulates, and a wall of labeled boxes on top
-    // read as "heat shows detections" (it does not).
-    if (d.layer === "heat") break;
     const isPose = (d.layer === "pose" || d.layer === "gestures");
     if (isPose && b.cls !== "person") continue;
     if (d.layer === "body" && !b.flag) continue;
@@ -2007,43 +1924,52 @@ function start(cfg) {
   }, (err) => statusEl.textContent = "error: " + err.message);
 
   // 4c. footfall history for the 24h window, one query for all slots.
-  // CLOUD MODE ONLY: in local mode the 24h history comes from the LOCAL
-  // producers' per-slot history files (see _pollLocalHistory below) - the
-  // cloud collector watches its own country ladder, and its rows have no
-  // business on a chart titled with the operator's picked cameras.
-  if (!LOCAL_MODE) {
-    const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
-    const histQ = query(
-      collection(db, "footfall"),
-      where("ts", ">=", since),
-      orderBy("ts", "desc"),
-      limit(HISTORY_LIMIT * GRID_SLOTS.length),
-    );
-    onSnapshot(histQ, (snap) => {
-      const bySlot = Object.fromEntries(GRID_SLOTS.map((s) => [s.slot_id, []]));
-      for (const d of snap.docs) {
-        const r = d.data();
-        if (!r.ok) continue;
-        const tid = cloudToTile(r.slot);
-        if (!tid || !bySlot[tid]) continue;
-        bySlot[tid].push(r);
-      }
-      for (const slot of GRID_SLOTS) {
-        const rows = bySlot[slot.slot_id].sort((a, b) => a.ts.localeCompare(b.ts));
-        tileState[slot.slot_id].history = rows;
-        // Per-tile sparkline moved into the combined 24h chart to reclaim
-        // vertical space; renderTileChart is kept for future re-enabling but
-        // no-ops when chartCanvas is null.
-        renderTileChart(slot.slot_id, rows);
-        updateAggregates(slot.slot_id, rows);
-      }
-      renderAnomalyEvents();
-    }, (err) => console.error("footfall history query failed:", err));
-  }
+  const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+  const histQ = query(
+    collection(db, "footfall"),
+    where("ts", ">=", since),
+    orderBy("ts", "desc"),
+    limit(HISTORY_LIMIT * GRID_SLOTS.length),
+  );
+  onSnapshot(histQ, (snap) => {
+    const bySlot = Object.fromEntries(GRID_SLOTS.map((s) => [s.slot_id, []]));
+    for (const d of snap.docs) {
+      const r = d.data();
+      if (!r.ok) continue;
+      const tid = cloudToTile(r.slot);
+      if (!tid || !bySlot[tid]) continue;
+      bySlot[tid].push(r);
+    }
+    for (const slot of GRID_SLOTS) {
+      const rows = bySlot[slot.slot_id].sort((a, b) => a.ts.localeCompare(b.ts));
+      tileState[slot.slot_id].history = rows;
+      // Per-tile sparkline moved into the combined 24h chart to reclaim
+      // vertical space; renderTileChart is kept for future re-enabling but
+      // no-ops when chartCanvas is null.
+      renderTileChart(slot.slot_id, rows);
+      updateAggregates(slot.slot_id, rows);
+    }
+    renderAnomalyEvents();
+  }, (err) => console.error("footfall history query failed:", err));
 
   setInterval(renderCombinedChart, 4000);
   renderCombinedChart();
 
+  // 4d. Re-ID summary.
+  onSnapshot(collection(db, "reid_stats"), (snap) => {
+    renderReidTable(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+  }, () => {});
+
+  // 4e. Operational events (loiter / returning) - last 24h, newest first.
+  const evQ = query(
+    collection(db, "events"),
+    where("ts", ">=", since),
+    orderBy("ts", "desc"),
+    limit(120),
+  );
+  onSnapshot(evQ, (snap) => {
+    renderEventsTable(snap.docs.map((d) => d.data()));
+  }, (err) => console.warn("events subscription failed:", err));
 }
 
 // cloud slot_id -> local tile slot_id. Rebuilt on every config/grid change:
@@ -2406,14 +2332,15 @@ function toggleSection(id, hasContent) {
   if (el) el.hidden = !hasContent;
 }
 
-// Series label for a tile's 24h history. LOCAL mode now plots the LOCAL
-// producers' history of the operator's own picked cameras (the cloud
-// join was severed in the Turkey-cleanup pass), so the legend carries
-// the pick's own name - a Bangkok curve gets a Bangkok title. Cloud
-// mode keeps the cloud slot's area name.
+// Cloud-area label for a tile's data series: in local-preview mode the
+// 24h history routed to a tile belongs to the CLOUD camera, so the chart
+// legend and the anomaly/events tables must carry the CLOUD camera's name
+// - never the local pick's title (fix 2: no Bangkok titles on Istanbul
+// curves).
 function tileCloudLabel(slot) {
-  if (LOCAL_MODE) return slot.placeholder_name || slot.display_area;
-  return slot.display_area;
+  const st = tileState[slot.slot_id];
+  return (LOCAL_MODE && st && st.cloudCamName) ? st.cloudCamName
+                                               : slot.display_area;
 }
 
 function renderCombinedChart() {
@@ -2556,6 +2483,201 @@ function renderAnomalyEvents() {
     <tbody>${rows}</tbody></table>`;
 }
 
+// ---------- 6c. Operational events (loiter / returning) ----------------------
+
+const EVENT_LABELS = {
+  loiter:           { icon: "⏱", label: "prolonged presence" },
+  returning:        { icon: "↩", label: "returning visitor" },
+  static_departed:  { icon: "📤", label: "static object left" },
+};
+
+// Keep the full events list in module scope so the accordion can look up
+// prior sightings of the same entity without re-querying Firestore.
+let _ALL_EVENTS = [];
+
+function renderEventsTable(events) {
+  const wrap = document.getElementById("events-table-wrap");
+  if (!wrap) return;
+  _ALL_EVENTS = events;
+  const slotLabel = (id) => {
+    if (LOCAL_MODE) {
+      // Events are CLOUD data - name the cloud camera, not the local pick.
+      const tid = cloudToTile(id);
+      const st = tid && tileState[tid];
+      return (st && st.cloudCamName) || id;
+    }
+    const slot = GRID_SLOTS.find((s) => s.slot_id === id);
+    return slot ? slot.display_area : id;
+  };
+  toggleSection("events-section", events.length > 0);
+  if (!events.length) return;
+  const rows = events.slice(0, 60).map((e, i) => {
+    const meta = EVENT_LABELS[e.kind] || { icon: "•", label: e.kind };
+    const detail = e.kind === "loiter"
+        ? `${e.cls ?? "?"} stationary ${Math.round((e.duration_sec ?? 0) / 60)} min`
+        : e.kind === "returning"
+        ? `${e.cls ?? "?"} #${e.entity_id ?? "?"} back after ${Math.round((e.gap_seconds ?? 0) / 60)} min`
+        : e.kind === "static_departed"
+        ? `${e.cls ?? "?"} static ${Math.round((e.dwell_sec ?? 0) / 60)} min - now gone`
+        : "";
+    const snap = e.snapshot_url || e.fullframe_url;
+    // Every row with an entity_id gets an expand-toggle - clicking it opens
+    // an inline accordion that shows every past sighting of the same entity
+    // at the same slot, so the user can eyeball whether the "back after N min"
+    // claim really is the same object rather than a lookalike.
+    const canExpand = e.entity_id != null;
+    const toggle = canExpand
+        ? `<span class="row-toggle" data-idx="${i}" title="show all sightings of this entity">▸</span>`
+        : "";
+    return `<tr class="ev-row">
+      <td>${toggle} ${fmtTime(e.ts)}</td>
+      <td>${escapeHtml(slotLabel(e.slot))}</td>
+      <td>${meta.icon} ${escapeHtml(meta.label)}</td>
+      <td>${escapeHtml(detail)}</td>
+      <td>${snap ? `<a href="${snap}" target="_blank" rel="noopener">view</a>` : "-"}</td>
+    </tr>
+    <tr class="ev-accordion" data-idx="${i}" hidden><td colspan="5"></td></tr>`;
+  }).join("");
+  wrap.innerHTML = `<table class="reid">
+    <thead><tr>
+      <th>Time</th><th>Area</th><th>Event</th><th>Detail</th><th>Snapshot</th>
+    </tr></thead>
+    <tbody>${rows}</tbody></table>`;
+  // Wire up expand clicks
+  wrap.querySelectorAll(".row-toggle").forEach((t) => {
+    t.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      toggleEventAccordion(parseInt(t.dataset.idx, 10), t);
+    });
+  });
+}
+
+function toggleEventAccordion(idx, toggleEl) {
+  const wrap = document.getElementById("events-table-wrap");
+  const row = wrap.querySelector(`.ev-accordion[data-idx="${idx}"]`);
+  if (!row) return;
+  if (!row.hidden) {
+    row.hidden = true;
+    toggleEl.textContent = "▸";
+    return;
+  }
+  const target = _ALL_EVENTS[idx];
+  if (!target || target.entity_id == null) return;
+  // Same-slot, same-entity_id sightings, oldest first so the story reads
+  // left-to-right in the accordion strip.
+  const related = _ALL_EVENTS
+      .filter((e) => e.entity_id === target.entity_id && e.slot === target.slot)
+      .sort((a, b) => (a.ts || "").localeCompare(b.ts || ""));
+  const cell = row.querySelector("td");
+  // The per-entity gallery holds a crop from EVERY sighting (not just the
+  // ones that fired a returning-event), served by the local API from the
+  // synced entities/ pool. Appended async under the event cards.
+  const appendGallery = () => {
+    if (!target.cam_id) return;
+    fetch(`/api/entity-gallery?cam_id=${encodeURIComponent(target.cam_id)}` +
+          `&entity_id=${encodeURIComponent(target.entity_id)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((g) => {
+        if (!g || !(g.sightings || []).length || row.hidden) return;
+        const thumbs = g.sightings.map((s, i) => `
+          <a href="${s.url}" target="_blank" rel="noopener" class="ev-card">
+            <img src="${s.url}" loading="lazy" alt="appearance ${i + 1}"/>
+            <div class="ev-ts">${s.ts ? fmtTime(s.ts) : ""}</div>
+          </a>`).join("");
+        const div = document.createElement("div");
+        div.className = "ev-strip";
+        div.innerHTML = `<div class="ev-note">Every stored appearance of
+            #${target.entity_id} (${g.sightings.length} crops, newest first)
+            - the full gallery, not only event moments.</div>
+          <div class="ev-cards">${thumbs}</div>`;
+        cell.appendChild(div);
+      })
+      .catch(() => {});
+  };
+  if (related.length <= 1) {
+    cell.innerHTML = `<div class="ev-empty">
+      Only this sighting fired an event in the last 24h window -
+      the appearance gallery below shows every stored look at it.
+    </div>`;
+    appendGallery();
+  } else {
+    const cards = related.map((e, k) => {
+      const url = e.snapshot_url || e.fullframe_url;
+      const badge = e === target ? "this event" : `#${k + 1}`;
+      const sim = e.similarity != null
+          ? `<div class="ev-sim">similarity ${Math.round(e.similarity * 100)}%</div>`
+          : "";
+      return `<div class="ev-card ${e === target ? "current" : ""}">
+        <div class="ev-badge">${badge}</div>
+        ${url ? `<a href="${url}" target="_blank" rel="noopener">
+                  <img src="${url}" loading="lazy" alt="sighting ${k+1}"/>
+                </a>` : `<div class="ev-nosnap">no snapshot saved</div>`}
+        <div class="ev-ts">${fmtTime(e.ts)}</div>
+        ${sim}
+      </div>`;
+    }).join("");
+    cell.innerHTML = `<div class="ev-strip">
+      <div class="ev-note">All ${related.length} sightings of
+        <b>${target.cls ?? "?"} #${target.entity_id}</b>
+        at ${escapeHtml((GRID_SLOTS.find(s=>s.slot_id===target.slot)||{}).display_area || target.slot)}
+        in the last 24h - compare side by side.</div>
+      <div class="ev-cards">${cards}</div>
+    </div>`;
+    appendGallery();
+  }
+  row.hidden = false;
+  toggleEl.textContent = "▾";
+}
+
+// ---------- 7. Re-ID summary table ------------------------------------------
+
+function renderReidTable(docs) {
+  const wrap = document.getElementById("reid-table-wrap");
+  const slotIds = new Set(GRID_SLOTS.map((s) => s.slot_id));
+  // Re-id docs are keyed by CLOUD slot ids; route through cloudToTile so
+  // the table renders in local-preview mode too (it silently vanished
+  // there before - the cloud ids never matched the local_N tile ids).
+  const rows = docs.filter((d) => {
+    const tid = cloudToTile(d.id);
+    return tid && slotIds.has(tid);
+  });
+  toggleSection("reid-section", rows.length > 0);
+  if (!rows.length) return;
+  const tr = (cells) => `<tr>${cells.map((c) => `<td>${c}</td>`).join("")}</tr>`;
+  const slotLabel = (id) => {
+    if (LOCAL_MODE) {
+      const tid = cloudToTile(id);
+      const st = tid && tileState[tid];
+      return (st && st.cloudCamName) || id;
+    }
+    const slot = GRID_SLOTS.find((s) => s.slot_id === id);
+    return slot ? slot.display_area : id;
+  };
+  const total = (r, k) => Object.values(r.per_class ?? {}).reduce((s, p) => s + (p[k] ?? 0), 0);
+  wrap.innerHTML = `
+    <table class="reid">
+      <thead><tr>
+        <th>Slot</th><th>Camera (now)</th><th>Unique entities</th><th>Total sightings</th>
+        <th>Regulars (≥3)</th>
+      </tr></thead>
+      <tbody>
+        ${rows.map((r) => tr([
+          escapeHtml(slotLabel(r.id)),
+          escapeHtml(r.cam_id ?? "-"),
+          r.total_unique ?? total(r, "unique") ?? "-",
+          r.total_sightings ?? total(r, "total_sightings") ?? "-",
+          r.regulars ?? total(r, "regulars") ?? "-",
+        ])).join("")}
+      </tbody>
+    </table>
+    <div class="footnote" style="margin-top:8px">
+      Estimates from the OSNet appearance embedder (rolling 48h registry) -
+      robust to lighting and viewpoint changes, still an estimate rather than
+      a biometric identity system. Counts reset once on 2026-07-10 when the
+      embedder was upgraded from color histograms; entities age out after 48h
+      of absence, newest-in oldest-out - there is no daily wipe.
+    </div>`;
+}
 
 // ---------- helpers ---------------------------------------------------------
 
@@ -2615,6 +2737,55 @@ function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"]/g, (c) =>
       ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }
+
+// ---- Active-learning curve (plan WS5) --------------------------------------
+// One point per training run from /api/al-curve (gate history). Local-mode
+// only: on the hosted dashboard the fetch 404s and the panel stays hidden.
+let alCurveChart = null;
+async function renderAlCurve() {
+  const wrap = document.getElementById("al-curve-wrap");
+  const canvas = document.getElementById("al-curve");
+  if (!wrap || !canvas || typeof Chart === "undefined") return;
+  let data;
+  try {
+    const r = await fetch("/api/al-curve");
+    if (!r.ok) return;
+    data = await r.json();
+  } catch { return; }
+  const pts = data.points || [];
+  if (!pts.length) return;
+  wrap.hidden = false;
+  const labels = pts.map((p, i) =>
+      p.labels_total != null ? `${p.labels_total} lbl` : `run ${i + 1}`);
+  const promoted = pts.map((p) => (p.promoted ? p.map50 : null));
+  const rejected = pts.map((p) => (p.promoted ? null : p.map50));
+  const baseline = pts.map(() => data.baseline_map50);
+  if (alCurveChart) alCurveChart.destroy();
+  alCurveChart = new Chart(canvas, {
+    type: "line",
+    data: { labels, datasets: [
+      { label: "promoted", data: promoted, borderColor: "#4cc9f0",
+        backgroundColor: "#4cc9f0", spanGaps: true, pointRadius: 5 },
+      { label: "rejected", data: rejected, borderColor: "#6f7480",
+        backgroundColor: "#6f7480", spanGaps: true, pointRadius: 5,
+        pointStyle: "crossRot" },
+      { label: "base model", data: baseline, borderColor: "#e7e9ee",
+        borderDash: [6, 4], pointRadius: 0 },
+    ]},
+    options: {
+      animation: false, responsive: true,
+      scales: {
+        y: { title: { display: true, text: "mAP50 (val)" },
+             ticks: { color: "#9aa0ab" }, grid: { color: "#2a2d33" } },
+        x: { ticks: { color: "#9aa0ab" }, grid: { color: "#2a2d33" } },
+      },
+      plugins: { legend: { labels: { color: "#9aa0ab" } } },
+    },
+  });
+}
+renderAlCurve();
+setInterval(renderAlCurve, 300000);
+
 
 // -----------------------------------------------------------------------------
 // Counting-line editor + crossing alerts
@@ -3176,28 +3347,25 @@ function _updateLocalTileBadges(slotId, j) {
   st.activityBadge.style.display = "";
   setActivityBadge(st, act);
 
-  // LIVE per-camera ANOMALY indicator. Load stays NUMBERS-ONLY on the
-  // activity badge (X/10) - a busy street is not an anomaly, and the
-  // old idx>=8 trigger double-counted it here. This badge flags only
-  // true anomaly states, same kinds as the collector's table:
-  //   camera_obstructed - one confident box covers 50%+ of the view
-  //   camera_dark       - the view went black (covered lens, power cut)
-  //   extreme_load      - absolute EVENT scale: 50+ people / 38+ units
+  // Anomaly badge - same absolute bands as app/collector.py:
+  //   EXTREME_VEH_LOAD = 38 weighted-vehicles  ->  spike
+  //   >= 50 people                              ->  spike
+  //   activity idx >= 8                          ->  spike
   const load = act?.load ?? 0;
   const now  = act?.now  ?? 0;
   let mood = "unk", msg = "no data yet";
   if (hist.length >= 2) {
-    mood = "ok";
-    msg = act ? `no anomaly · activity ${act.idx}/10 ${act.label}` : "ok";
     if (now >= 50 || load >= 38) {
-      mood = "spike";
-      msg = `extreme load - ${now} people + ${load} veh-load units`;
+      mood = "spike"; msg = `extreme load - ${now} people + ${load} veh-load units`;
+    } else if (act && act.idx >= 8) {
+      mood = "spike"; msg = `busy - activity ${act.idx}/10 · ${act.label}`;
+    } else {
+      mood = "ok"; msg = act ? `activity ${act.idx}/10 · ${act.label}` : "ok";
     }
   }
-  if (j?.dark != null) {
-    mood = "spike";
-    msg = `camera dark - view went black (mean luma ${j.dark})`;
-  }
+  // camera_obstructed (local edition): the producer flags a confident
+  // box covering 50%+ of the view - a bus/truck parked on the lens is
+  // an interference, not traffic. Overrides the load verdict.
   if (j?.obstructed) {
     mood = "spike";
     msg = `camera obstructed - ${j.obstructed.cls} covers `
@@ -3239,34 +3407,4 @@ if (LOCAL_MODE) {
   };
   _pollLocalModelView();
   setInterval(_pollLocalModelView, 8000);
-
-  // 24h footfall history from the LOCAL producers (one JSONL per slot,
-  // one row per ~30s round) - feeds the combined chart and the per-tile
-  // aggregates with the operator's OWN cameras instead of cloud rows.
-  const _pollLocalHistory = async () => {
-    for (const slot of GRID_SLOTS) {
-      const url = `/snapshots/model_view/${slot.slot_id}_history.jsonl?_=`
-                + Date.now();
-      try {
-        const r = await fetch(url, { cache: "no-store" });
-        if (!r.ok) continue;
-        const text = await r.text();
-        const cutoff = Date.now() - 24 * 3600 * 1000;
-        const rows = [];
-        for (const line of text.split("\n")) {
-          if (!line.trim()) continue;
-          try {
-            const row = JSON.parse(line);
-            if (new Date(row.ts).getTime() >= cutoff) rows.push(row);
-          } catch (_) { /* torn write mid-append - skip the line */ }
-        }
-        if (!rows.length) continue;
-        tileState[slot.slot_id].history = rows;
-        renderTileChart(slot.slot_id, rows);
-        updateAggregates(slot.slot_id, rows);
-      } catch (_) { /* history not written yet */ }
-    }
-  };
-  _pollLocalHistory();
-  setInterval(_pollLocalHistory, 60000);
 }
