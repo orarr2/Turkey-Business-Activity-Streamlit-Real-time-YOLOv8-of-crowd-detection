@@ -935,15 +935,33 @@ function _analysisDrawLoop(st, a) {
     // Adaptive glide window: ~1.3 measured tick intervals (the old fixed
     // TAU=5s + 10s cap froze boxes mid-gap at 12-15s tick cadence - the
     // operator's "box stops, then snaps").
-    const lin = Math.max(2, Math.min(20, 1.3 * (a._gapEma || 4)));
+    // Extrapolation is tightly bounded on purpose (audit 2026-08-15:
+    // boxes flew off screen and stayed there when the previous 20s
+    // limit let stale velocities keep running). Real limits from what
+    // a street object physically does between analysis ticks:
+    //   * time: 1.5s past the newest real position, then STOP drawing
+    //   * displacement: never further than half the object's own
+    //     diagonal - a velocity that puts the box beyond that is
+    //     stale, and shifting it there paints on empty pixels.
+    // A missed track (coast=true) never extrapolates: we don't know it
+    // moved at all.
+    const EXTRAP_MAX_S = 1.5;
+    const EXTRAP_MAX_DIAG = 0.5;
+    const _capShift = (b, dt) => {
+      if (b.coast || !dt || dt <= 0) return _shiftBox(b, 0);
+      const diag = Math.hypot(b.x2 - b.x1, b.y2 - b.y1) || 1;
+      const disp = Math.hypot((b.vx || 0) * dt, (b.vy || 0) * dt);
+      const cap = EXTRAP_MAX_DIAG * diag;
+      const useDt = disp > cap && disp > 0 ? dt * (cap / disp) : dt;
+      return _shiftBox(b, Math.min(useDt, EXTRAP_MAX_S));
+    };
     let fade = 1;
     const boxes = [];
     if (nxt && (nxt.at || 0) > t0 + 0.05) {
-      // TRUE interpolation: the player runs a few seconds behind the
-      // live edge, so the tick AFTER the on-screen moment usually
-      // already exists. Same-track boxes lerp between their two real
-      // positions - the box rides the object's actual path, no
-      // prediction, no freeze, and it snaps to nothing.
+      // TRUE interpolation: the player runs behind the live edge, so
+      // the tick AFTER the on-screen moment usually already exists.
+      // Same-track boxes lerp between their two real positions - box
+      // rides the object's actual path, no prediction, no freeze.
       const al = Math.max(0, Math.min(1, (vidT - t0) / ((nxt.at || 0) - t0)));
       const byTid = new Map();
       for (const nb of nxt.boxes || []) {
@@ -951,20 +969,21 @@ function _analysisDrawLoop(st, a) {
       }
       for (const b of d.boxes || []) {
         const nb = b.tid !== undefined ? byTid.get(b.tid) : null;
-        boxes.push(nb ? _lerpBox(b, nb, al)
-                      : _shiftBox(b, Math.min(vidT - t0, lin)));
+        boxes.push(nb ? _lerpBox(b, nb, al) : _capShift(b, vidT - t0));
       }
     } else {
-      // Past the newest tick: ride the measured velocity LINEARLY for
-      // ~1.3 tick intervals, then hold and FADE - a stale box that
-      // quietly dims is honest, a frozen bright one lies.
       const rawDt = Math.max(0, vidT - t0);
-      for (const b of d.boxes || []) {
-        boxes.push(_shiftBox(b, Math.min(rawDt, lin)));
-      }
-      if (rawDt > lin) {
-        fade = Math.max(0.35,
-                        1 - 0.65 * (rawDt - lin) / Math.max(3, 0.7 * lin));
+      // Hard cutoff: if the newest tick is older than EXTRAP_MAX_S,
+      // publish NO boxes for this frame. The operator sees the analysis
+      // temporarily go dark (correct: server hasn't confirmed anything
+      // this fresh) instead of a rigid box drifting off after a stopped
+      // object. Next tick brings truth back within one poll interval.
+      if (rawDt <= EXTRAP_MAX_S) {
+        for (const b of d.boxes || []) boxes.push(_capShift(b, rawDt));
+        if (rawDt > EXTRAP_MAX_S * 0.7) {
+          fade = 1 - 0.5 * (rawDt - EXTRAP_MAX_S * 0.7)
+                     / (EXTRAP_MAX_S * 0.3);
+        }
       }
     }
     merged = Object.assign({}, d, { boxes, _fade: fade });

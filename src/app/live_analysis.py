@@ -73,8 +73,17 @@ LIVE_IMGSZ = 640
 # class not blacklisted. The analytics accumulators (heat, crossings,
 # counts) still consume every raw detection - display strictness must not
 # starve the statistics.
-DISPLAY_MIN_HITS = 2
-DISPLAY_MIN_CONF = 0.40
+DISPLAY_MIN_HITS = 1       # was 2; at 12-15s per tick a walker crossing
+                           # the frame in ~10s never got a second hit and
+                           # was invisible - operator saw "people walked by,
+                           # no boxes at all" (audit 2026-08-15). One high-
+                           # conf hit is enough to draw; the tracker still
+                           # graduates it to full status on the next match.
+DISPLAY_MIN_CONF = 0.32    # was 0.40; night street scenes carry a wide
+                           # confidence range and the 0.40 floor cost the
+                           # tail (visible pedestrians at 0.33-0.39). The
+                           # tracker's two-stage association still cleans
+                           # false positives before the display gate.
 DISPLAY_MAX_MISSES = 1     # allow 1-tick coasting through brief occlusion
 DISPLAY_CLASS_BLACKLIST = {"train", "boat", "airplane"}
 # Below this person-box height (px) skeletons are guesswork, so kps are
