@@ -839,26 +839,89 @@ function _analysisDrawLoop(st, a) {
   if (a.canvas.style.display === "none") return;   // JPEG mode covers it
   const buf = a.tickBuf;
   if (!buf.length) return;
-  let d = buf[buf.length - 1];
-  let dt = 0;
+  let merged = buf[buf.length - 1];
   const hls = st.currentHlsInstance;
   const pd = hls && hls.playingDate;
   if (pd instanceof Date && !isNaN(pd)) {
-    const vidEpoch = pd.getTime() / 1000;
-    for (let i = buf.length - 1; i >= 0; i--) {
-      if ((buf[i].at || 0) <= vidEpoch + 0.25) { d = buf[i]; break; }
+    const vidT = pd.getTime() / 1000;
+    // Newest tick at or before the video clock...
+    let i = buf.length - 1;
+    while (i > 0 && (buf[i].at || 0) > vidT + 0.25) i--;
+    const d = buf[i];
+    const nxt = i + 1 < buf.length ? buf[i + 1] : null;
+    const t0 = d.at || vidT;
+    // Adaptive glide window: ~1.3 measured tick intervals (the old fixed
+    // TAU=5s + 10s cap froze boxes mid-gap at 12-15s tick cadence - the
+    // operator's "box stops, then snaps").
+    const lin = Math.max(2, Math.min(20, 1.3 * (a._gapEma || 4)));
+    let fade = 1;
+    const boxes = [];
+    if (nxt && (nxt.at || 0) > t0 + 0.05) {
+      // TRUE interpolation: the player runs a few seconds behind the
+      // live edge, so the tick AFTER the on-screen moment usually
+      // already exists. Same-track boxes lerp between their two real
+      // positions - the box rides the object's actual path, no
+      // prediction, no freeze, and it snaps to nothing.
+      const al = Math.max(0, Math.min(1, (vidT - t0) / ((nxt.at || 0) - t0)));
+      const byTid = new Map();
+      for (const nb of nxt.boxes || []) {
+        if (nb.tid !== undefined) byTid.set(nb.tid, nb);
+      }
+      for (const b of d.boxes || []) {
+        const nb = b.tid !== undefined ? byTid.get(b.tid) : null;
+        boxes.push(nb ? _lerpBox(b, nb, al)
+                      : _shiftBox(b, Math.min(vidT - t0, lin)));
+      }
+    } else {
+      // Past the newest tick: ride the measured velocity LINEARLY for
+      // ~1.3 tick intervals, then hold and FADE - a stale box that
+      // quietly dims is honest, a frozen bright one lies.
+      const rawDt = Math.max(0, vidT - t0);
+      for (const b of d.boxes || []) {
+        boxes.push(_shiftBox(b, Math.min(rawDt, lin)));
+      }
+      if (rawDt > lin) {
+        fade = Math.max(0.35,
+                        1 - 0.65 * (rawDt - lin) / Math.max(3, 0.7 * lin));
+      }
     }
-    // Extrapolation window 10s (was 3): with four concurrent sessions a
-    // tick lands every 5-8s, so a 3s cap meant boxes glided for 3s and
-    // then FROZE until the next tick - the operator's "boxes don't move
-    // with the objects". Velocity decays with a 5s time constant so a
-    // long gap eases the box to a stop instead of launching it across
-    // the frame on stale velocity.
-    const rawDt = Math.min(10, Math.max(0, vidEpoch - (d.at || vidEpoch)));
-    const TAU = 5;
-    dt = TAU * (1 - Math.exp(-rawDt / TAU));
+    merged = Object.assign({}, d, { boxes, _fade: fade });
   }
-  _drawAnalysisOverlay(a.canvas, d, dt);
+  _drawAnalysisOverlay(a.canvas, merged, 0);
+}
+
+// Interpolated box: geometry lerped between the SAME track's two real
+// tick positions; label/conf/flags from the newer tick. Keypoints lerp
+// joint-by-joint when both ticks carry them, else ride the box shift.
+function _lerpBox(b, nb, al) {
+  const o = Object.assign({}, nb);
+  o.x1 = b.x1 + (nb.x1 - b.x1) * al;
+  o.y1 = b.y1 + (nb.y1 - b.y1) * al;
+  o.x2 = b.x2 + (nb.x2 - b.x2) * al;
+  o.y2 = b.y2 + (nb.y2 - b.y2) * al;
+  const dx = (o.x1 + o.x2 - b.x1 - b.x2) / 2;
+  const dy = (o.y1 + o.y2 - b.y1 - b.y2) / 2;
+  if (b.kps && nb.kps && nb.kps.length === b.kps.length) {
+    o.kps = b.kps.map((k, j) => [k[0] + (nb.kps[j][0] - k[0]) * al,
+                                 k[1] + (nb.kps[j][1] - k[1]) * al,
+                                 Math.min(k[2], nb.kps[j][2])]);
+  } else if (b.kps) {
+    o.kps = b.kps.map((k) => [k[0] + dx, k[1] + dy, k[2]]);
+  }
+  if (b.trail) o.trail = b.trail;
+  o.vx = 0; o.vy = 0;
+  return o;
+}
+
+// Extrapolated box: rigid shift along the tracker velocity.
+function _shiftBox(b, dt) {
+  const dx = (b.vx || 0) * dt, dy = (b.vy || 0) * dt;
+  const o = Object.assign({}, b);
+  o.x1 = b.x1 + dx; o.y1 = b.y1 + dy;
+  o.x2 = b.x2 + dx; o.y2 = b.y2 + dy;
+  if (b.kps) o.kps = b.kps.map((k) => [k[0] + dx, k[1] + dy, k[2]]);
+  o.vx = 0; o.vy = 0;
+  return o;
 }
 
 function _syncAnalysisBgVisibility(st) {
@@ -918,6 +981,15 @@ async function pollAnalysisFrame(st) {
       }
       if (d.seq !== a.lastSeq) {
         a.lastSeq = d.seq;
+        // Live tick-interval estimate (EMA) - the draw loop scales its
+        // glide/fade window to the cadence the session actually delivers.
+        const prevTick = a.tickBuf[a.tickBuf.length - 1];
+        if (prevTick) {
+          const gap = (d.at || 0) - (prevTick.at || 0);
+          if (gap > 0.2 && gap < 60) {
+            a._gapEma = a._gapEma ? 0.7 * a._gapEma + 0.3 * gap : gap;
+          }
+        }
         a.tickBuf.push(d);
         if (a.tickBuf.length > 24) a.tickBuf.shift();
         // Skip the JPEG round-trip while the smooth video is confirmed
@@ -1158,6 +1230,10 @@ function _drawAnalysisOverlay(canvas, d, dtExtra = 0) {
   // forward by track velocity. Pose-ish layers only box people;
   // body layer only boxes FLAGGED people (matching the server render).
   ctx.font = "12px system-ui, sans-serif";
+  // Stale-tick fade (set by the draw loop once extrapolation runs past
+  // its glide window): boxes dim instead of freezing bright.
+  const boxAlpha = Number(d._fade) || 1;
+  if (boxAlpha < 1) ctx.globalAlpha = boxAlpha;
   let alertOn = false;
   for (const b of d.boxes || []) {
     // Faces layer draws ONLY face rectangles (above) - generic tracked
@@ -1210,6 +1286,7 @@ function _drawAnalysisOverlay(canvas, d, dtExtra = 0) {
     ctx.fillStyle = "#f8fafc";
     ctx.fillText(label, x + 4, Math.max(12, y - 4));
   }
+  if (boxAlpha < 1) ctx.globalAlpha = 1;
 
   // Operating-envelope note: what the layer can physically see right
   // now ("7 people, skeletons on 2 (>=96px only)") - silent emptiness
