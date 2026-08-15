@@ -53,3 +53,11 @@ Pillow>=10.0
 #                     # experiments on close-range footage. The street-cam
 #                     # pipeline never needs it (arm-level gestures come
 #                     # from the pose keypoints).
+#
+# easyocr>=1.7        # optional: unlocks non-Latin plates (Thai / Arabic /
+#                     # Japanese) in the plates layer. Without it, plates
+#                     # keeps the Latin-only fast-plate-ocr path used for
+#                     # Turkish / US / European plates - the layer just
+#                     # returns "" for non-Latin scripts instead of
+#                     # crashing. First use downloads ~150 MB per language
+#                     # to ~/.EasyOCR/model/.

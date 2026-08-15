@@ -172,20 +172,121 @@ class _OvOcr:
         return text, conf
 
 
-def load_ocr(path: str | None = None) -> _OvOcr:
+class _MultiScriptOcr:
+    """Composite OCR: the fast Latin-only fast-plate-ocr head (~5 ms)
+    plus optional EasyOCR readers for the non-Latin scripts requested by
+    PLATE_OCR_LANGS. When the Latin path returns a text the non-Latin
+    readers are not consulted - keeps the hot path at fast-plate-ocr
+    speed for Turkish / US / European plates. Non-Latin readers are
+    LOADED LAZILY on the first crop that needed a fallback, so start-up
+    stays fast; each Reader is ~150 MB in memory once loaded.
+
+    Language keys map to EasyOCR language codes: th (Thai), ar (Arabic
+    - covers Saudi, Egypt, UAE, etc.), ja (Japanese). Turkish plates
+    use plain Latin so they ride the fast path. When easyocr is not
+    installed the composite silently degrades to Latin-only - the same
+    behavior as before this addition.
+    """
+
+    def __init__(self, latin_ocr: "_OvOcr", langs: list[str]):
+        self.latin = latin_ocr
+        # Filter to the non-Latin scripts EasyOCR needs separate Readers for
+        self.extra_langs = [l for l in langs
+                            if l and l.lower() not in ("latin", "en", "tr")]
+        self._readers: dict[str, object] = {}
+        self._lock = threading.Lock()
+        self._easyocr_available: bool | None = None
+
+    def _get_reader(self, lang: str):
+        r = self._readers.get(lang)
+        if r is not None:
+            return r
+        with self._lock:
+            r = self._readers.get(lang)
+            if r is not None:
+                return r
+            if self._easyocr_available is False:
+                return None
+            try:
+                import easyocr
+                self._easyocr_available = True
+            except ImportError:
+                self._easyocr_available = False
+                print(f"plates: easyocr not installed - {lang} skipped "
+                      "(pip install easyocr to enable non-Latin scripts)")
+                return None
+            try:
+                r = easyocr.Reader([lang], gpu=False, verbose=False)
+                self._readers[lang] = r
+                print(f"plates: easyocr Reader loaded for {lang!r}")
+                return r
+            except Exception as e:
+                print(f"plates: failed to load easyocr {lang!r}: {e}")
+                return None
+
+    # Latin returned at >=CERTAIN_LATIN skips the fallbacks (it's almost
+    # surely a Latin-alphabet plate). Below that, non-Latin plates can
+    # still trick the Latin head into a mid-confidence hallucination
+    # (a Thai plate reading as "TA1234" at 0.76), so we run every extra
+    # reader and pick the best conf across all of them.
+    CERTAIN_LATIN = 0.90
+
+    def read(self, plate_bgr) -> tuple[str, float]:
+        latin_text, latin_conf = self.latin.read(plate_bgr)
+        if latin_text and latin_conf >= self.CERTAIN_LATIN:
+            return latin_text, latin_conf
+        # Ambiguous or empty Latin read - try every configured script
+        # and keep the best-conf hit that clears the shared gates. The
+        # Latin candidate is included in the comparison so an
+        # 0.60-Latin still wins if no other reader beats it.
+        best_text, best_conf = "", 0.0
+        if latin_text and latin_conf >= OCR_MIN_CONF:
+            best_text, best_conf = latin_text, latin_conf
+        for lang in self.extra_langs:
+            r = self._get_reader(lang)
+            if r is None:
+                continue
+            try:
+                hits = r.readtext(plate_bgr, detail=1, paragraph=False)
+            except Exception:
+                continue
+            for _bbox, tx, cf in hits:
+                tx = tx.strip()
+                cf = float(cf)
+                if (len(tx) >= OCR_MIN_CHARS
+                        and cf >= OCR_MIN_CONF
+                        and cf > best_conf):
+                    best_text, best_conf = tx, cf
+        return best_text, best_conf
+
+
+# Comma-separated script list. Default keeps only Latin (the shipping
+# behavior); operator opts in to the extra readers by setting e.g.
+# PLATE_OCR_LANGS=latin,th,ar,ja - each non-Latin script costs another
+# ~150 MB of resident RAM the first time it's used.
+_PLATE_OCR_LANGS_DEFAULT = "latin,th,ar,ja"
+
+
+def load_ocr(path: str | None = None) -> _MultiScriptOcr:
     global _ocr
     if _ocr is not None:
         return _ocr
     with _LOAD_LOCK:
         if _ocr is None:
-            _ocr = _OvOcr(path or os.environ.get("PLATE_OCR",
-                                                 PLATE_OCR_DEFAULT))
-            print("plates: OCR head compiled (OpenVINO, "
-                  f"{OCR_SLOTS} slots, Latin+digits)")
+            latin = _OvOcr(path or os.environ.get("PLATE_OCR",
+                                                  PLATE_OCR_DEFAULT))
+            langs_env = (os.environ.get("PLATE_OCR_LANGS")
+                         or _PLATE_OCR_LANGS_DEFAULT)
+            langs = [l.strip() for l in langs_env.split(",") if l.strip()]
+            _ocr = _MultiScriptOcr(latin, langs)
+            extra = [l for l in langs
+                     if l.lower() not in ("latin", "en", "tr")]
+            print(f"plates: OCR compiled (Latin fast-plate-ocr; "
+                  f"non-Latin fallbacks={extra or 'none'})")
     return _ocr
 
 
-def attach_plates(det_model, ocr: _OvOcr, frame, tracker,
+def attach_plates(det_model, ocr: "_MultiScriptOcr", frame, tracker,
                   reads: dict) -> tuple[int, int]:
     """Read plates for the tracker's open vehicle tracks, in place.
 
