@@ -688,6 +688,11 @@ function beginTileAnalysis(st, cam, layer) {
       ■ Stop</button>`;
   st.videoWrap.style.position = st.videoWrap.style.position || "relative";
   st.videoWrap.appendChild(wrap);
+  // 2026-08-15: expand the analyzed tile to the full grid width and
+  // hide the other three so the operator's 4K source stops being
+  // wasted on a quarter-viewport tile. Reverts in stopTileAnalysis.
+  st.tile.classList.add("tile-expanded");
+  tilesEl.classList.add("has-expanded");
   wrap.querySelector(".analysis-stop").addEventListener("click",
     () => stopTileAnalysis(st));
   wrap.querySelector(".analysis-drawline").addEventListener("click", () => {
@@ -1575,6 +1580,10 @@ function stopTileAnalysis(st) {
   const strip = st.tile && st.tile.querySelector(".crossings-strip");
   if (strip) strip.remove();
   if (!st._overlayWasHidden) st.overlay.style.display = "";
+  // Reverse the full-width expand: this tile goes back to its grid
+  // slot and the other three reappear.
+  st.tile.classList.remove("tile-expanded");
+  tilesEl.classList.remove("has-expanded");
   // Overlay mode never tore down the video, so no rebuild needed.
 }
 

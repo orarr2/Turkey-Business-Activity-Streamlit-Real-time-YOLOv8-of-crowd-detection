@@ -48,6 +48,14 @@
     .grid { display: grid; gap: 8px;
             grid-template-columns: repeat(2, minmax(0, 1fr)); }
     @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+    /* 2026-08-15: when the operator starts advanced analysis on ONE
+       tile (singleton), stretch that tile to the full grid width and
+       hide the other three - the source is 4K so wasting half the
+       screen on the 2x2 layout leaves plate crops sub-legible. Reverts
+       to 2x2 on Stop. */
+    .grid.has-expanded .tile:not(.tile-expanded) { display: none; }
+    .tile.tile-expanded { grid-column: 1 / -1; }
+    .tile.tile-expanded [data-video-wrap] { min-height: 82vh; }
 
     /* Compact tile: header + video only. KPI values, activity/anomaly badges
        and the counts-age label are OVERLAID on the video, so the tile height
@@ -564,7 +572,7 @@
        so the browser doesn't serve a stale ES-module from disk cache. -->
   <script type="module" src="./firebase-config.js?v=40"></script>
   <script type="module" src="./cameras.js?v=40"></script>
-  <script type="module" src="./app.js?v=81"></script>
+  <script type="module" src="./app.js?v=82"></script>
 
 
   <style>
