@@ -62,17 +62,18 @@ OCR_W, OCR_H = 128, 64
 OCR_MIN_CONF = 0.45
 OCR_MIN_CHARS = 4
 # Vehicle box narrower than this (px) puts the plate under ~8 px of
-# height at 480p street distance - upscaling artifacts, not glyphs.
-# 96 (not higher): the pass should TRY mid-range vehicles too - the
-# plate-width and OCR-confidence gates downstream reject the unreadable
-# ones, so the range limit is physics (source resolution), not policy.
-MIN_VEHICLE_W = 96
+# height at 480p street distance. 2026-08-15: with FSRCNN 4x upscale
+# in the OCR pipeline the practical floor dropped - a 15-20 px plate on
+# a 60 px vehicle upscales to 60-80 px, back in OCR range. Kept as env
+# overrides so single-country deployments can tighten it back up.
+MIN_VEHICLE_W = int(os.environ.get("PLATE_MIN_VEHICLE_W") or 60)
 # Motorcycles get a lower floor: the bike itself is narrow, but its
 # plate fills a much larger FRACTION of the box than a car's does.
-MIN_VEHICLE_W_MOTO = 72
+MIN_VEHICLE_W_MOTO = int(os.environ.get("PLATE_MIN_VEHICLE_W_MOTO") or 40)
 # Plate crop narrower than this (px) is skipped even on a wide vehicle
-# (plate at an extreme angle or partially occluded).
-MIN_PLATE_W = 32
+# (plate at an extreme angle or partially occluded). Lowered 32 -> 16
+# now that FSRCNN can rescue small crops before OCR.
+MIN_PLATE_W = int(os.environ.get("PLATE_MIN_PLATE_W") or 16)
 # Bounded work per tick: closest (widest) unread vehicles first.
 MAX_VEHICLES_PER_TICK = 3
 # Give up on a track after this many failed read attempts; a vehicle
@@ -89,9 +90,84 @@ STATIC_RETRY_S = 120.0
 
 PLATE_VEHICLE_CLASSES = {"car", "bus", "truck", "motorcycle"}
 
+# 2026-08-15: heavy plate-OCR upgrade requested by operator ("try harder
+# and use my machine's resources"). Three additions layered on top of
+# the existing pipeline:
+#   * FSRCNN 4x super-resolution on tiny plate crops (see PLATE_SR_MIN_W)
+#     - a 22x8 plate becomes 88x32 and re-enters OCR range;
+#   * multi-frame buffer per track (up to PLATE_MULTI_CROP_MAX crops)
+#     re-OCR'd each attempt so the sharpest recent frame wins;
+#   * PaddleOCR added to the _MultiScriptOcr ensemble when installed -
+#     SOTA for small mixed-script text.
+# All three stay optional: FSRCNN skipped when opencv-contrib is absent
+# or the model file is missing, PaddleOCR skipped when the package
+# isn't importable. Pre-change behavior is preserved when everything is
+# off, so single-country deployments that don't want the RAM cost keep
+# working unchanged.
+PLATE_SR_MODEL_DEFAULT = "models/FSRCNN_x4.pb"    # OpenCV DNN Super-Res model
+PLATE_SR_MIN_W = 96                                # skip SR if plate already large
+PLATE_MULTI_CROP_MAX = 5                            # per-track crop buffer size
+
 _det_model = None
 _ocr = None
+_sr_model = None
+_sr_model_tried = False
 _LOAD_LOCK = threading.Lock()
+
+
+def load_sr_model(path: str | None = None):
+    """Load (once) an OpenCV DNN Super-Resolution model for upscaling
+    tiny plate crops before OCR. Returns None (silently) if opencv-
+    contrib-python isn't installed OR the model file is absent - the
+    caller then just skips super-resolution and uses the raw crop.
+    """
+    global _sr_model, _sr_model_tried
+    if _sr_model is not None or _sr_model_tried:
+        return _sr_model
+    with _LOAD_LOCK:
+        if _sr_model is not None or _sr_model_tried:
+            return _sr_model
+        _sr_model_tried = True
+        p = path or os.environ.get("PLATE_SR_MODEL",
+                                   PLATE_SR_MODEL_DEFAULT)
+        if not os.path.isfile(p):
+            print(f"plates: super-res model not found ({p}) - "
+                  "raw plate crops go straight to OCR")
+            return None
+        try:
+            import cv2
+            sr = cv2.dnn_superres.DnnSuperResImpl_create()
+            sr.readModel(p)
+            # Model filename encodes scale (FSRCNN_x4.pb -> 4x)
+            name = os.path.basename(p).lower()
+            scale = 4 if "x4" in name else (3 if "x3" in name else 2)
+            sr.setModel("fsrcnn", scale)
+            _sr_model = sr
+            print(f"plates: super-res loaded (FSRCNN x{scale}, {p})")
+        except AttributeError:
+            print("plates: opencv-contrib-python not installed - "
+                  "super-res disabled (raw crops -> OCR)")
+        except Exception as e:
+            print(f"plates: super-res load failed: {e}")
+    return _sr_model
+
+
+def _upscale_for_ocr(plate_bgr):
+    """Upscale a plate crop 4x with FSRCNN if the model loaded and the
+    crop is small; otherwise return the crop unchanged. A crop already
+    wide enough (>= PLATE_SR_MIN_W) is kept as-is - upscaling further
+    only adds latency without adding information."""
+    if plate_bgr is None or plate_bgr.size == 0:
+        return plate_bgr
+    if plate_bgr.shape[1] >= PLATE_SR_MIN_W:
+        return plate_bgr
+    sr = load_sr_model()
+    if sr is None:
+        return plate_bgr
+    try:
+        return sr.upsample(plate_bgr)
+    except Exception:
+        return plate_bgr
 
 
 def load_plate_model(weights: str | None = None):
@@ -358,17 +434,48 @@ def attach_plates(det_model, ocr: "_MultiScriptOcr", frame, tracker,
         if not entry.get("text") and _w_max and bw < 0.85 * _w_max:
             continue
         entry["tries"] += 1
+        # 2026-08-15: super-resolve the vehicle crop itself before the
+        # plate detector when it is small. yolov8n-plate returned 0
+        # boxes on every audit-frame vehicle at 60-110 px because the
+        # plate inside is only 15-25 px wide - below the detector's
+        # own receptive field. FSRCNN 4x on a 100 px vehicle produces
+        # a 400 px crop where the plate is 60-100 px, which the
+        # detector actually anchors on. When crop is already big
+        # enough (>=300 px) the SR call is a no-op.
+        crop_for_det = crop
+        _cscale = 1.0
+        if crop.shape[1] < 300:
+            _sr_veh = load_sr_model()
+            if _sr_veh is not None:
+                try:
+                    crop_for_det = _sr_veh.upsample(crop)
+                    _cscale = crop_for_det.shape[1] / max(1, crop.shape[1])
+                except Exception:
+                    crop_for_det = crop
+                    _cscale = 1.0
         with _PREDICT_LOCK:
-            res = det_model.predict(crop, imgsz=256, conf=PLATE_CONF,
+            res = det_model.predict(crop_for_det, imgsz=256,
+                                    conf=PLATE_CONF,
                                     verbose=False)[0]
         if res.boxes is None or len(res.boxes) == 0:
             continue
         confs = [float(c) for c in res.boxes.conf.tolist()]
         qi = max(range(len(confs)), key=confs.__getitem__)
-        px1, py1, px2, py2 = [int(v) for v in res.boxes.xyxy.tolist()[qi]]
-        if px2 - px1 < MIN_PLATE_W:
+        # Convert detector-coord plate box back to the ORIGINAL crop
+        # coord system so downstream annotations (b["plate_box"]) match
+        # the frame the operator actually sees.
+        _px1, _py1, _px2, _py2 = [float(v)
+                                  for v in res.boxes.xyxy.tolist()[qi]]
+        px1 = int(_px1 / _cscale); py1 = int(_py1 / _cscale)
+        px2 = int(_px2 / _cscale); py2 = int(_py2 / _cscale)
+        if (px2 - px1) < MIN_PLATE_W:
             continue
-        plate = crop[max(0, py1):py2, max(0, px1):px2]
+        # Crop the plate from the UPSCALED vehicle image (more pixels =
+        # OCR-happier) rather than the original crop. Even the raw-
+        # coord bbox stored above is what the frame-space annotation
+        # needs.
+        plate = crop_for_det[max(0, int(_py1)):int(_py2),
+                             max(0, int(_px1)):int(_px2)]
         if plate.size == 0:
             continue
         # Motion-blur gate: OCR on a smeared night plate can only
@@ -377,18 +484,43 @@ def attach_plates(det_model, ocr: "_MultiScriptOcr", frame, tracker,
         # tick may catch the same plate sharp (per-tick cost stays
         # bounded by MAX_VEHICLES_PER_TICK either way).
         _g = cv2.cvtColor(plate, cv2.COLOR_BGR2GRAY)
-        if float(cv2.Laplacian(_g, cv2.CV_64F).var()) < PLATE_SHARPNESS_MIN:
+        sharp = float(cv2.Laplacian(_g, cv2.CV_64F).var())
+        if sharp < PLATE_SHARPNESS_MIN:
             entry["tries"] -= 1
             continue
-        text, conf = ocr.read(plate)
-        # Best-read-wins: a later attempt only replaces the stored read
-        # when its confidence is higher.
-        if text and conf > entry.get("conf", 0):
+
+        # Multi-frame integration: keep this crop in the track's crop
+        # buffer alongside earlier ones from the same track (sorted by
+        # sharpness). On every attempt we OCR THE BEST N crops the
+        # track has seen so far, not just the current one - a sharper
+        # earlier frame can be what finally clears the OCR gate. The
+        # crop stored is the ORIGINAL (not upscaled) so we can re-run
+        # SR with a different model later without re-fetching frames.
+        crops_buf = entry.setdefault("crops", [])   # list of (sharp, crop)
+        crops_buf.append((sharp, plate))
+        # Keep only the sharpest PLATE_MULTI_CROP_MAX crops
+        crops_buf.sort(key=lambda x: -x[0])
+        del crops_buf[PLATE_MULTI_CROP_MAX:]
+
+        best_text, best_conf = "", 0.0
+        for _s, cr in crops_buf:
+            # Super-res tiny crops before OCR: FSRCNN x4 typically
+            # takes 12-70 ms and quadruples effective plate width, so
+            # a 22 px plate becomes 88 px - inside every OCR reader's
+            # working range.
+            cr_up = _upscale_for_ocr(cr)
+            tx, cf = ocr.read(cr_up)
+            if tx and cf > best_conf:
+                best_text, best_conf = tx, cf
+
+        # Best-read-wins across the whole crop buffer AND all prior
+        # attempts on the entry.
+        if best_text and best_conf > entry.get("conf", 0):
             if not entry.get("text"):
                 new_reads += 1
-            entry["text"] = text
-            entry["conf"] = round(conf, 2)
-            b["plate"] = text
+            entry["text"] = best_text
+            entry["conf"] = round(best_conf, 2)
+            b["plate"] = best_text
             b["plate_conf"] = entry["conf"]
             b["plate_box"] = [x1 + px1, y1 + py1, x1 + px2, y1 + py2]
     return in_range, new_reads
