@@ -407,9 +407,10 @@ analysisPanel.innerHTML = `
     <h3 style="margin:0 0 4px;font-size:17px">Live analysis -
       <span data-an-cam></span></h3>
     <div style="color:#94a3b8;font-size:13px;margin-bottom:12px">
-      One layer per camera, up to 4 live analyses across the grid.
-      The tile becomes a live analyzed stream (~1 fps on local CPU);
-      Stop on the tile returns the video.</div>
+      Only ONE camera runs advanced analysis at a time - stop the active
+      one first to switch. The active tile then gets the full CPU
+      (~2-4 fps expected vs. ~1 fps when 4 tiles competed), which
+      keeps boxes tight to moving objects. Stop returns the plain video.</div>
     <div data-an-boxes style="display:grid;grid-template-columns:1fr 1fr;
          gap:8px 14px;margin-bottom:14px"></div>
     <div data-an-err style="color:#f87171;font-size:13px;min-height:18px"></div>
@@ -458,6 +459,22 @@ for (const [key, label] of ANALYSIS_LAYER_DEFS) {
 
 let _anTarget = null;   // tileState entry the picker is open for
 
+// Singleton rule (2026-08-15): only ONE tile may run advanced analysis at
+// a time. With 4 concurrent sessions each yolo+pose+plates+faces tick was
+// 12-15s and box extrapolation had to bridge that whole window, so boxes
+// drifted visibly behind the moving objects. Running ONE session with
+// 100% CPU drops the tick to ~2-3s; extrapolation shrinks 5-6x and boxes
+// stick to their objects. This helper returns the OTHER tile with active
+// analysis (or null), and openAnalysisPicker / the Start handler use it
+// to block a second start.
+function _findActiveAnalysisTile(exceptSt) {
+  for (const key of Object.keys(tileState)) {
+    const other = tileState[key];
+    if (other !== exceptSt && other.analysis) return other;
+  }
+  return null;
+}
+
 function tileAnalysisCamId(st) {
   // The tile's OWN camera - the one whose video the operator watches.
   // Local preview: the picked slot (local_grid.json), resolved by the
@@ -469,17 +486,43 @@ function openAnalysisPicker(st) {
   _anTarget = st;
   analysisPanel.querySelector("[data-an-cam]").textContent =
     st.camNameEl.textContent || st.slot.display_area;
-  analysisPanel.querySelector("[data-an-err]").textContent = "";
+  const errEl = analysisPanel.querySelector("[data-an-err]");
+  const runBtn = analysisPanel.querySelector("[data-an-run]");
+  const editBtn = analysisPanel.querySelector("[data-an-editline]");
+  // Singleton block: another tile is already analyzing. Show the picker
+  // in a disabled state with a clear reason instead of silently letting
+  // the operator start a second one - the server would happily run both,
+  // but that reintroduces the tick-sharing that made boxes drift.
+  const otherActive = _findActiveAnalysisTile(st);
+  if (otherActive) {
+    const otherName =
+      otherActive.camNameEl.textContent || otherActive.slot.display_area;
+    errEl.style.color = "#fbbf24";
+    errEl.textContent =
+      `Advanced analysis is already running on "${otherName}". ` +
+      `Only ONE camera at a time - stop it first, then start here.`;
+    for (const rb of _anBoxes.querySelectorAll("input")) {
+      rb.checked = false;
+      rb.disabled = true;
+    }
+    runBtn.disabled = true;
+    editBtn.style.display = "none";
+    analysisPanel.style.display = "flex";
+    return;
+  }
+  // Normal path (or a same-tile layer switch).
+  errEl.style.color = "#f87171";
+  errEl.textContent = "";
+  for (const rb of _anBoxes.querySelectorAll("input")) rb.disabled = false;
+  runBtn.disabled = false;
   const current = st.analysis ? st.analysis.layer : null;
   for (const rb of _anBoxes.querySelectorAll("input"))
     rb.checked = rb.value === current;
-  analysisPanel.querySelector("[data-an-run]").textContent =
-    st.analysis ? "Switch layer" : "Start";
+  runBtn.textContent = st.analysis ? "Switch layer" : "Start";
   // Match the initial visibility of the "Edit counting line" button to
   // the currently-selected layer (the change listener only fires on
   // subsequent picks).
-  analysisPanel.querySelector("[data-an-editline]").style.display =
-    (current === "line") ? "" : "none";
+  editBtn.style.display = (current === "line") ? "" : "none";
   analysisPanel.style.display = "flex";
 }
 
@@ -501,8 +544,22 @@ analysisPanel.querySelector("[data-an-run]").addEventListener("click",
         "Camera not identified yet - wait for the first grid config";
       return;
     }
+    // Defense-in-depth for the singleton rule: openAnalysisPicker already
+    // blocks this path visually, but if the user somehow reaches Start
+    // with another tile still active (e.g. race between two picker opens),
+    // refuse cleanly instead of firing a second /api/analysis/start.
+    const otherActive = _findActiveAnalysisTile(st);
+    if (otherActive && !st.analysis) {
+      const otherName =
+        otherActive.camNameEl.textContent || otherActive.slot.display_area;
+      errEl.style.color = "#fbbf24";
+      errEl.textContent =
+        `Blocked - stop analysis on "${otherName}" first.`;
+      return;
+    }
     const runBtn = analysisPanel.querySelector("[data-an-run]");
     runBtn.disabled = true;
+    errEl.style.color = "#f87171";
     errEl.textContent = "";
     try {
       const r = await fetch(
