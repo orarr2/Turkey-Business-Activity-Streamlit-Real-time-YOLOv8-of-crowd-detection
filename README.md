@@ -3,37 +3,33 @@
 Turn public live-stream street cameras (Turkey, Thailand, Japan, USA) into
 quantitative time series:
 
-> **live HLS stream → YOLOv8 frame inference → counts + appearance re-ID → Firestore →
-> real-time web dashboard + Jupyter analytics.**
+> **live HLS stream -> yolov8s frame inference -> counts + appearance re-ID -> Firestore ->
+> real-time web dashboard.**
 
-The project samples a handful of street / market / square cameras every sampling
-round (40 s in the shipped cloud deployment; `--interval` sets it), runs YOLOv8 on
-each frame, writes the counts and a per-detection appearance signature to
-Firestore, and pushes the result to a browser dashboard via `onSnapshot` - no polling,
-no refresh, everything updates the moment the collector posts a new sample. The
-video tiles are (near-)live streams while the numbers describe the most recent
-sample, so each tile also shows the age of its counts ("counts from 38s ago") -
-if that label goes red the collector is not keeping up and the numbers should
-not be trusted as "now".
+The project samples 4 street cameras per sampling round (40 s in the shipped
+cloud deployment; `--interval` sets it), runs yolov8s on each frame, writes the
+counts and a per-detection appearance signature to Firestore, and pushes the
+result to a browser dashboard via `onSnapshot`. The video tiles are live
+streams while the numbers describe the most recent sample, so each tile also
+shows the age of its counts ("counts from 38s ago"); the label goes red when
+the collector is not keeping up.
 
-
-> All source, configs and the notebook live in [`src/`](src/). The repo root only carries this `README.md` and the gitignore so the GitHub landing page stays clean.
+> All source, configs and the notebook live in [`src/`](src/). The repo root only carries this `README.md`, the notebook, and the gitignore.
 
 ---
 
 ## What the model sees
 
 Live frames from the four grid cameras, annotated by the exact pipeline the
-collector runs (`yolov8n`, `imgsz 512` on the shipped systemd unit,
-`conf 0.30`): green boxes are people, orange are
-vehicles, magenta is a train, each with its confidence. The dashboard shows
-this view live under every tile ("Model view"), refreshed with every sample —
-including night scenes like these, where detection is hardest.
+collector runs (`yolov8s`, `imgsz 640` on the shipped systemd unit,
+`conf 0.30`): green boxes are people, orange are vehicles, magenta is a train,
+each with its confidence. The dashboard shows this view live under every tile
+("Model view"), refreshed with every sample, including night scenes.
 
-| Konya - Hükümet Meydanı | Konya - Otogar Kavşağı |
+| Konya - Hukumet Meydani | Konya - Otogar Kavsagi |
 |---|---|
 | ![Annotated live frame - people and vehicles boxed, Hukumet square](src/docs/images/model_view_konya_hukumet.jpg) | ![Annotated live frame - people and vehicles boxed, Otogar junction](src/docs/images/model_view_otogar_kavsagi.jpg) |
-| **Konya - Kültürpark** | **Konya - Millet Caddesi** |
+| **Konya - Kulturpark** | **Konya - Millet Caddesi** |
 | ![Annotated live frame - people and vehicles boxed, Kulturpark](src/docs/images/model_view_konya_kulturpark.jpg) | ![Annotated live frame - people and vehicles boxed, Millet Caddesi junction](src/docs/images/model_view_konya_millet_caddesi.jpg) |
 
 ---
@@ -41,73 +37,67 @@ including night scenes like these, where detection is hardest.
 ## What the program does, end to end
 
 ```
- ┌───────────────────────┐    ┌────────────────────────┐    ┌────────────────────┐
- │  Live cameras         │    │  Cloud collector       │    │  Firebase          │
- │  (TR: IBB + Konya;    │ ─► │  GCP e2-micro VM       │ ─► │  Firestore (24h TTL)│
- │   TH/JP/US: YouTube)  │    │  • country ladder grid │    │   footfall/{auto}   │
- │                       │    │  • YOLOv8n predict     │    │   latest/{slot_id}  │
- │                       │    │  • appearance re-ID    │    │   reid_stats/{slot} │
- │                       │    │  • anomaly gates       │    │   config/grid       │
- │                       │    │  • Storage snapshots   │    │  Storage (24h)      │
- └───────────────────────┘    └────────────────────────┘    └──────────┬─────────┘
-                                                                       │ onSnapshot
-                                                                       ▼
-                                           ┌────────────────────────────────────────┐
-                                           │  web/  static HTML dashboard            │
-                                           │  • 4-slot grid with active-cam badge   │
-                                           │  • per-tile mini chart + anomaly       │
-                                           │  • combined 24 h chart                  │
-                                           │  • re-ID summary table                  │
-                                           └────────────────────────────────────────┘
+ +-----------------------+    +------------------------+    +--------------------+
+ |  Live cameras         |    |  Cloud collector       |    |  Firebase          |
+ |  (TR: IBB + Konya;    | -> |  GCP e2-micro VM       | -> |  Firestore (24h TTL)|
+ |   TH/JP/US: YouTube)  |    |  * country ladder grid |    |   footfall/{auto}   |
+ |                       |    |  * yolov8s predict     |    |   latest/{slot_id}  |
+ |                       |    |  * appearance re-ID    |    |   reid_stats/{slot} |
+ |                       |    |  * anomaly gates       |    |   config/grid       |
+ |                       |    |  * Storage snapshots   |    |  Storage (24h)      |
+ +-----------------------+    +------------------------+    +----------+---------+
+                                                                       | onSnapshot
+                                                                       v
+                                           +----------------------------------------+
+                                           |  web/  static HTML dashboard            |
+                                           |  * 4-slot grid with active-cam badge   |
+                                           |  * per-tile mini chart + anomaly       |
+                                           |  * combined 24 h chart                  |
+                                           |  * re-ID summary table                  |
+                                           +----------------------------------------+
 ```
 
 The two halves are decoupled. The collector runs 24/7 on a GCP `e2-micro`
 on the Always Free tier ($0/month); the deploy README documents its
-measured memory sizing. The
-dashboard is plain HTML/JS — anyone can serve `web/` and
-subscribe to the live data. Because the state lives in Firestore, every visitor
-sees the accumulated history, and Firestore's TTL policy prunes the last 24h to
-keep the DB small. Anomaly / returning-visitor snapshots go to Firebase Storage
-(also 24h lifecycle).
+measured memory sizing. The dashboard is plain HTML/JS; anyone can serve
+`web/` and subscribe to the live data. Firestore's TTL policy prunes the last
+24h to keep the DB small. Anomaly and returning-visitor snapshots go to
+Firebase Storage (also 24h lifecycle).
 
 The grid is **country-generic**. It always runs **4 cameras from ONE country**
-and rotates through a country priority ladder — **Turkey → Thailand → Japan →
-USA** — falling through to the next country only when the active one goes fully
-dark. Turkey is the project's subject (Istanbul IBB first, then Konya); since
-IBB is geo-blocked from Google Cloud, from the VM the grid usually falls
-through to the foreign benches (YouTube-Live-backed street/traffic cameras that
-are not geo-blocked) until Turkey's block lifts. A few minutes before each
-daily report the collector re-probes higher-priority countries so Turkey
-reclaims the grid the moment it comes back.
+and rotates through a country priority ladder: **Turkey -> Thailand -> Japan
+-> USA**, falling through to the next country only when the active one goes
+fully dark. Turkey is the project's subject (Istanbul IBB first, then Konya);
+since IBB is geo-blocked from Google Cloud, from the VM the grid usually falls
+through to the foreign benches (YouTube-Live-backed street/traffic cameras
+that are not geo-blocked). A few minutes before each daily report the collector
+re-probes higher-priority countries so Turkey reclaims the grid the moment it
+comes back.
 
 Inside a country, a `CameraPool` walks that country's own ladder: every round
-runs the first 4 healthy cameras (always distinct), a camera that misses 3
+runs the first 4 healthy cameras (always distinct); a camera that misses 3
 samples in a row rests 15 min and the grid backfills from deeper in the SAME
-country's bench, and `tvkur` (Konya) cameras are low-risk fast-fail probes that
-rest after a single miss. A `HostBreaker` rests a whole host for 20 min after 4
-consecutive access refusals (HTTP 403/429) and reopens it with a single probe —
-so a blocking CDN is knocked ~3 times an hour, not ~120. Each assignment change
-updates `config/grid` (with the active `country`) — the dashboard re-renders
-that tile with the new active cam.
+country's bench; `tvkur` (Konya) cameras are fast-fail probes that rest after
+a single miss. A `HostBreaker` rests a whole host for 20 min after 4
+consecutive access refusals (HTTP 403/429) and reopens it with a single probe.
+Each assignment change updates `config/grid` (with the active `country`); the
+dashboard re-renders that tile with the new active cam.
 
 Report fields follow the live country and camera: the day/night gate uses
-each **camera's** timezone (the US bench alone spans
-Eastern, Central and Pacific).
+each **camera's** timezone (the US bench alone spans Eastern, Central and
+Pacific).
 
 ---
 
 ## Quick start
 
-The project ships zero-config for **viewers** — the Firebase Web SDK identifier
+The project ships zero-config for **viewers**: the Firebase Web SDK identifier
 is committed, Firestore Rules make the four public collections read-only, the
 cloud collector is running, and the dashboard just lights up.
 
 ```bash
 # Anyone who clones the repo
 pip install -r src/requirements.txt
-jupyter lab turkey_business_activity.ipynb   # notebook lives at the repo root;
-                                             # imports find app/ under src/ automatically
-# or just the dashboard (no notebook, no analysis):
 cd src && python serve.py                    # opens http://localhost:8000 with live counts
 ```
 
@@ -120,7 +110,7 @@ kill-switch all live in one consolidated guide:
 - Hebrew (verbose, RTL): [`src/docs/PROJECT_GUIDE_HE.md`](src/docs/PROJECT_GUIDE_HE.md)
 
 **Connecting to the collector VM** (`turkey-collector`, zone `us-east1-c`,
-project `turkey-footfall`) - Console → Compute Engine → the **SSH** button,
+project `turkey-footfall`): Console -> Compute Engine -> the **SSH** button,
 or from your own machine:
 
 ```bash
@@ -129,33 +119,29 @@ gcloud compute ssh turkey-collector --zone=us-east1-c
 
 The guide's [health-check battery](src/docs/PROJECT_GUIDE.md#45-health-check-battery--is-the-vm-really-feeding-the-report)
 (service status, live sampling, memory, and an end-to-end "grab a real
-Turkey frame now" test) is the fastest way to confirm the collector
-before trusting any report. The VM is disposable by design; the
+Turkey frame now" test) is the fastest way to confirm the collector before
+trusting any report. The VM is disposable by design; the
 [rebuild-from-zero](src/docs/PROJECT_GUIDE.md#48-full-rebuild-from-zero)
 recipe covers both a GCP-identical machine and any other Linux provider,
 including the re-mint path for every secret.
 
-`serve.py` is a small no-cache static server that binds `web/` on port 8000 (override
-with `--port`, suppress the browser pop with `--no-browser`, auto-falls-back to the
-next free port if 8000 is busy).
+`serve.py` is a no-cache static server that binds `web/` on port 8000
+(override with `--port`, suppress the browser pop with `--no-browser`,
+auto-falls-back to the next free port if 8000 is busy).
 
 ---
 
 ## What the model predicts
 
-**Two detectors, one pipeline.** The 24/7 cloud collector runs **`yolov8n`**
-(nano) at `imgsz 512`, pinned in the shipped systemd unit
-([`--weights yolov8n.pt`](src/deploy/gcp-vm/collector.service)) - it is the
-heaviest model that fits the e2-micro's 1 GB budget without OOM. The **local
-notebook** (`turkey_business_activity.ipynb`) instead loads **`yolo26m`**
-(YOLO26, medium - the 2026 generation, NMS-free), the strong accuracy
-reference: on one live frame nano found 2 people / 9 vehicles while YOLO26-m
-found 12 people, 19 vehicles and 5 motorcycles nano missed. Change either via
-`MODEL_WEIGHTS` (notebook) or `--weights` (collector); `ultralytics`
-auto-downloads the weights on first use.
+The 24/7 cloud collector runs **`yolov8s`** at `imgsz 640`, pinned in the
+shipped systemd unit
+([`--weights yolov8s.pt --imgsz 640`](src/deploy/gcp-vm/collector.service)).
+Change via `--weights` (collector); `ultralytics` auto-downloads the weights
+on first use. The nano fallback (`yolov8n.pt`) is documented in the systemd
+unit's comments for memory-pressure scenarios.
 
-Each call returns boxes + class ids + confidences for the **COCO classes the project
-cares about** ([`CLASSES_OF_INTEREST`](src/app/detect_core.py:18)):
+Each call returns boxes + class ids + confidences for the **COCO classes the
+project cares about** ([`CLASSES_OF_INTEREST`](src/app/detect_core.py:111)):
 
 | COCO id | name        | role                                       |
 |:-------:|-------------|--------------------------------------------|
@@ -175,343 +161,297 @@ counts = {
     "bicycle": 0, "motorcycle": 2, "train": 0,
     "vehicles": 7,   # sum of the ROAD vehicle classes (train is separate)
 }
-boxes = [{"x1":…, "y1":…, "x2":…, "y2":…, "cls":"person", "conf":0.71}, …]
+boxes = [{"x1": ..., "y1": ..., "x2": ..., "y2": ..., "cls": "person", "conf": 0.71}, ...]
 ```
 
-**Burst-median sampling.** A single frame is a noisy estimator - a pedestrian
-occluded for a moment, or a car at the edge of the confidence band, flips the
-count between consecutive frames. Each sampling round therefore grabs a short
-burst (default 3 frames ~1 s apart), detects on every frame, and keeps the
+**Burst-median sampling.** Each sampling round grabs a short burst (default 2
+frames ~0.5 s apart on the VM), detects on every frame, and keeps the
 **median** count per class ([`grab_burst` / `detect_burst`](src/app/detect_core.py)).
-Re-ID and snapshots use the frame whose count matches the median, so images and
-numbers stay consistent. The raw per-frame series is kept on each doc (`burst`)
-for transparency.
+Re-ID and snapshots use the frame whose count matches the median, so images
+and numbers stay consistent. The raw per-frame series is kept on each doc
+(`burst`) for transparency.
 
-**Input size + confidence.** The `detect_core.DEFAULT_IMGSZ` is `960` (the
-notebook + local runs use it) because these wide street shots shrink a
-distant pedestrian or car to a few pixels, and at 640 the model undercounts.
-The shipped systemd unit for the Always Free e2-micro (1 GB) pins
-`--imgsz 512` instead - not for accuracy but for RSS: even yolov8n at 960
-would overshoot the host's memory once the OSNet re-ID embedder is loaded.
-Raise `--imgsz` on any host with more RAM
-(e2-small = 2 GB and up) to recover the last ~10-15% of distant-object
-recall. Default confidence is `--conf 0.30`, with per-class overrides in
-[`DEFAULT_PER_CLASS_CONF`](src/app/detect_core.py) - `person` is 0.35 to
-stop the low-confidence "traffic sign labeled as person" mis-fires. Any
-camera can carry its own calibrated `"conf"` override in
-[`cameras.py`](src/app/cameras.py); notebook section 10 measures MAE/bias
-per camera and per input size against your own manual counts and tells you
-what to set.
+**Input size + confidence.** `detect_core.DEFAULT_IMGSZ` is `960`. The shipped
+systemd unit for the Always Free e2-micro (1 GB) pins `--imgsz 640` for RSS
+headroom (with the OSNet re-ID embedder loaded). Raise `--imgsz` on any host
+with more RAM (e2-small = 2 GB and up) to recover distant-object recall.
+Default confidence is `--conf 0.30`, with per-class overrides in
+[`DEFAULT_PER_CLASS_CONF`](src/app/detect_core.py:1235): `person` is 0.35 to
+stop low-confidence "traffic sign labeled as person" mis-fires. Any camera
+can carry its own calibrated `"conf"` override in
+[`cameras.py`](src/app/cameras.py).
 
-**Static false-positive gates.** Two shape/aspect gates + a per-camera
-polygon opt-out shave off the classes of mis-detection that a confidence
-threshold alone can't kill:
+**Static false-positive gates.** Two shape/aspect gates plus a per-camera
+polygon opt-out shave off classes of mis-detection that a confidence
+threshold alone cannot kill:
 
 - `DEFAULT_PERSON_MIN_ASPECT = 0.90` drops person boxes shorter than they
   are wide (strollers, banners, low road furniture).
-- `DEFAULT_PERSON_MAX_ASPECT = 3.5` drops person boxes far taller than they
-  are wide (lamp posts, thin bollards, some traffic signs) - the case that
-  a lower-bound-only shape check missed.
-- A camera dict can name per-class exclude polygons: `cam["roi_exclude_class"]
-  = {"person": [poly, ...]}` says "in this zone, never accept a `person`",
-  without hiding cars/trains that legitimately cross the same pixels.
-  Foot-point-inside test, same as the existing `roi` / `roi_exclude`.
+- `DEFAULT_PERSON_MAX_ASPECT = 3.0` drops person boxes far taller than they
+  are wide (lamp posts, thin bollards, some traffic signs).
+- A camera dict can name per-class exclude polygons:
+  `cam["roi_exclude_class"] = {"person": [poly, ...]}` says "in this zone,
+  never accept a `person`", without hiding cars/trains that legitimately
+  cross the same pixels. Foot-point-inside test, same as the existing `roi` /
+  `roi_exclude`.
 
 Per sampling round the collector writes:
 
-- **`footfall/{auto-id}`** - append-only history doc:
+- **`footfall/{auto-id}`**: append-only history doc:
   `{ts, slot, cam_id, cam_name, person, vehicles, counts, burst, is_night,
   crossings?, ok, is_anomaly, anomaly?, new_entities, seen_entities,
   expire_at}`. Powers the 24 h charts, the anomaly badges and the events
   table. `expire_at` is 24h ahead; Firestore's TTL policy auto-deletes
   expired docs.
-- **`events/{auto-id}`** - operational events (`loiter`, `returning`) with
+- **`events/{auto-id}`**: operational events (`loiter`, `returning`) with
   snapshot URLs; same 24h TTL model (set the TTL policy on
   `events.expire_at`). Powers the dashboard's "Operational events" table and
   the alert pushes.
-- **`latest/{slot_id}`** - overwritten each sample. Powers the "now" KPI tiles cheaply
-  (one doc per slot, not a full history scan). Contains the current `cam_id`
-  so the dashboard can label the tile with which cam is active right now.
-- **`reid_stats/{slot_id}`** - overwritten each sample with the appearance-registry
-  rollup for the currently-active camera in that slot.
-- **`config/grid`** - one document, updated whenever a slot switches cameras.
+- **`latest/{slot_id}`**: overwritten each sample. Powers the "now" KPI tiles
+  cheaply (one doc per slot, not a full history scan). Contains the current
+  `cam_id` so the dashboard can label the tile with which cam is active
+  right now.
+- **`reid_stats/{slot_id}`**: overwritten each sample with the
+  appearance-registry rollup for the currently-active camera in that slot.
+- **`config/grid`**: one document, updated whenever a slot switches cameras.
   Lists the active_cam / embed URL / display area for each of the 4 slots.
   The dashboard subscribes to this and re-renders when a fallback happens.
 
-### Anomaly detection - operational scene gates, decided server-side
+### Anomaly detection - operational scene gates
 
-The collector - not the browser - decides what is anomalous; the dashboard
-renders its verdicts verbatim (`is_anomaly` + the `anomaly` map on each doc),
-so the badge, the events table and the snapshots always agree. An anomaly is
-an OPERATIONAL event - something worth walking to the screen for - not a
-statistical outlier:
+The collector, not the browser, decides what is anomalous; the dashboard
+renders its verdicts verbatim (`is_anomaly` + the `anomaly` map on each
+doc), so the badge, the events table and the snapshots always agree. An
+anomaly is an OPERATIONAL event:
 
-- **`extreme_load`** - ≥ 50 people, or a weighted vehicle load ≥ 38 (car 1,
+- **`extreme_load`**: >= 50 people, or a weighted vehicle load >= 38 (car 1,
   truck/bus 2.5, train 3, motorcycle 0.5, bicycle 0.3);
-- **`camera_obstructed`** - one detection covering ≥ 50% of the frame at
-  confidence ≥ 0.45 (the confidence gate keeps a low-conf hallucination from
-  "obstructing" the camera);
-- **`camera_dark`** - mean luma collapsing from ≥ 90 to ≤ 25 (feed died or
-  lens covered - distinct from ordinary nightfall, which the day/night gate
+- **`camera_obstructed`**: one detection covering >= 50% of the frame at
+  confidence >= 0.45 (the confidence gate keeps a low-conf hallucination
+  from "obstructing" the camera);
+- **`camera_dark`**: mean luma collapsing from >= 90 to <= 25 (feed died or
+  lens covered; distinct from ordinary nightfall, which the day/night gate
   handles).
 
 Each (camera, kind) pair cools down for 30 minutes between verdicts, and the
-collector warns loudly when a camera exceeds 8 verdicts a day - that means
-miscalibrated gates, not an interesting street. Every verdict carries
-`observed` vs `expected`, and each event saves a raw + annotated snapshot
-(drawn from the detections already computed - no second model pass).
+collector warns loudly when a camera exceeds 8 verdicts a day. Every verdict
+carries `observed` vs `expected`, and each event saves a raw + annotated
+snapshot (drawn from the detections already computed, no second model pass).
 Loitering and returning-visitor detections flow through the same `events`
 feed as their own kinds.
 
-An earlier statistical pair (rolling median+MAD z-window and an hour-of-week
-Welford baseline) was removed on 2026-07-18: its verdicts had been muted by
-design since the operator ruled "busier than usual" is weather, not an
-anomaly, and keeping it warm cost Firestore writes on every round plus a
-bootstrap read on every restart.
+### The full decision logic
 
-### The full decision logic - every gate, every number
+Values below are the shipped defaults; the CLI flags / `cameras.py` keys
+named in each table override them.
 
-Everything the collector decides about the video is listed here; there is no
-hidden logic beyond this section. Values are the shipped defaults - the CLI
-flags / `cameras.py` keys named in each table override them.
-
-**Stage 0 - what a "sample" is.** Every round (`--interval`, 40 s shipped) and
-per camera: resolve the stream → grab a burst of frames (`--burst 2` shipped,
-~0.5 s apart at the stream's measured fps) → YOLOv8s
-at `imgsz 640` (systemd unit) or `960` (notebook / larger hosts) - a camera
-entry may override with its own `"imgsz"` key (the far wide-angle Sarachane
-cam runs at 960 on the VM while the rest stay at 640), confidence
-≥ 0.30 with `person`/`car`/`bus`/`train`/`truck` re-tightened to 0.35 and
-the person-shape gate active (see aspect gates above), COCO classes
-person/bicycle/car/motorcycle/bus/train/truck → optional ROI + per-class
-exclude filters (below) → the reported count per class is the **median
-across the burst** (one bad frame can't move the number) → `vehicles` = sum
-of the road-vehicle classes (`train` stays separate). The representative
-frame (person count closest to the median) feeds re-ID and snapshots so
-images always match the numbers. Every sample also gets an `is_night` tag
-(mean gray < 60).
+**Stage 0 - what a "sample" is.** Every round (`--interval`, 40 s shipped)
+and per camera: resolve the stream -> grab a burst of frames (`--burst 2`
+shipped, ~0.5 s apart at the stream's measured fps) -> yolov8s at `imgsz 640`
+(systemd unit) or `960` (larger hosts); a camera entry may override with its
+own `"imgsz"` key (the far wide-angle Sarachane cam runs at 960 on the VM
+while the rest stay at 640). Confidence >= 0.30 with
+`person`/`car`/`bus`/`train`/`truck` re-tightened to 0.35 and the
+person-shape gate active. COCO classes person/bicycle/car/motorcycle/bus/
+train/truck -> optional ROI + per-class exclude filters (below) -> the
+reported count per class is the **median across the burst** -> `vehicles` =
+sum of the road-vehicle classes (`train` stays separate). The representative
+frame (person count closest to the median) feeds re-ID and snapshots. Every
+sample also gets an `is_night` tag (mean gray < 60).
 
 **Stage 0.5 - ROI filter** (only when the camera defines `"roi"` /
 `"roi_exclude"` polygons): a detection exists only if its **foot point**
-(bottom-center of the box - where the object touches the ground) is inside
-the include-polygon and outside every exclude-polygon. Everything downstream
-(counts, anomalies, re-ID, loitering) sees only ROI-passing detections.
+(bottom-center of the box) is inside the include-polygon and outside every
+exclude-polygon. Everything downstream (counts, anomalies, re-ID, loitering)
+sees only ROI-passing detections.
 
-**Layer 1 - scene anomalies (the only anomaly verdicts).** Evaluated on
-every successful sample by `check_scene_anomalies`, all thresholds hard
-operational gates:
+**Layer 1 - scene anomalies.** Evaluated on every successful sample by
+`check_scene_anomalies`, all thresholds hard operational gates:
 
 | kind | fires when | default |
 |---|---|---|
-| `extreme_load` | people ≥ 50, or weighted vehicle load ≥ 38 (car 1, truck/bus 2.5, train 3, motorcycle 0.5, bicycle 0.3) | `PERSON_EXTREME`, `VEHICLE_LOAD_EXTREME` |
-| `camera_obstructed` | one box covers ≥ 50% of the frame at conf ≥ 0.45 | `OBSTRUCT_AREA_FRAC`, `OBSTRUCT_MIN_CONF` |
-| `camera_dark` | mean luma falls from ≥ 90 to ≤ 25 between samples | `DARK_FROM`, `DARK_TO` |
+| `extreme_load` | people >= 50, or weighted vehicle load >= 38 (car 1, truck/bus 2.5, train 3, motorcycle 0.5, bicycle 0.3) | `PERSON_EXTREME`, `VEHICLE_LOAD_EXTREME` |
+| `camera_obstructed` | one box covers >= 50% of the frame at conf >= 0.45 | `OBSTRUCT_AREA_FRAC`, `OBSTRUCT_MIN_CONF` |
+| `camera_dark` | mean luma falls from >= 90 to <= 25 between samples | `DARK_FROM`, `DARK_TO` |
 
 Each (camera, kind) cools down 30 minutes; more than 8 verdicts per camera
-per day triggers a loud miscalibration warning in the log. (The former
-statistical layers - rolling robust-z and the hour-of-week baseline - were
-removed on 2026-07-18; their verdicts had been muted by design.)
+per day triggers a miscalibration warning in the log.
 
-**Layer 2 - (removed).** Kept here as a numbered placeholder so older notes
-referencing "Layer 3/4" still line up.
-
-**Layer 3 - returning visitor (came back to the scene).** Person-only since
-2026-08-08: a city bus on a fixed route "returns" every few minutes and
-Istanbul's look-alike white taxis re-match each other constantly - 39 of that
-day's 40 return events were vehicles, which is a timetable, not an anomaly.
-Vehicles keep their re-ID identities (counting, gallery, regulars stats);
-only the saved EVENT is scoped to people. For every re-ID match, a saved
-return event requires ALL of, in order: class `person` with box height ≥
-64 px (embeddings of smaller crops are upscaling noise) → not a new entity →
-has a previous sighting → absence ≥ **5 min** (`--returning-gap-min`) →
-match similarity ≥ 0.92 (OSNet person floor; 0.96 histogram) → ≥ 2 prior
-sightings → the camera was actually SAMPLED during ≥ 50% of the absence (an
-outage/fallback blind spot is not a departure; observation log seeded from
-Firestore history on restart) → the entity re-appeared AWAY from its
-previous position (IoU < 0.35 - a parked object re-matching in place never
-"returned") → ≥ 30 min since this entity's last saved return. Passing all ⇒
-crop + full-frame snapshot, an `events` doc, and an alert push. Each
-(camera, kind) is capped at 10 events/day; the counters persist to disk AND
-are rebuilt from Firestore's own `events` on startup, so a restart can no
-longer hand a flooding camera a fresh budget (the 08.08 midday report's x20).
+**Layer 3 - returning visitor (came back to the scene).** Person-only: for
+every re-ID match, a saved return event requires ALL of, in order: class
+`person` with box height >= 64 px (embeddings of smaller crops are upscaling
+noise) -> not a new entity -> has a previous sighting -> absence >= **5 min**
+(`--returning-gap-min`) -> match similarity >= 0.92 (OSNet person floor;
+0.96 histogram) -> >= 2 prior sightings -> the camera was actually SAMPLED
+during >= 50% of the absence (an outage/fallback blind spot is not a
+departure; observation log seeded from Firestore history on restart) -> the
+entity re-appeared AWAY from its previous position (IoU < 0.35) -> >= 30 min
+since this entity's last saved return. Passing all => crop + full-frame
+snapshot, an `events` doc, and an alert push. Each (camera, kind) is capped
+at 10 events/day; the counters persist to disk AND are rebuilt from
+Firestore's own `events` on startup.
 
 **Layer 4 - prolonged presence / loitering.** A stay = consecutive re-ID
-matches of the same entity whose boxes overlap (IoU ≥ 0.3) with no gap longer
-than 3 min. When a stay exceeds **5 min for a person / 15 min for a vehicle**
-(`--loiter-*-min`, per-camera `loiter_person_sec`/`loiter_vehicle_sec`), with
-the foot point inside `loiter_roi` when one is set ⇒ `loiter` event with crop
-snapshot + alert; the same entity re-alerts at most every 30 min. Stationary
-objects re-match reliably even with the histogram embedder (same spot, same
-lighting), so this layer works today and gets stronger with OSNet.
+matches of the same entity whose boxes overlap (IoU >= 0.3) with no gap
+longer than 3 min. When a stay exceeds **5 min for a person / 15 min for a
+vehicle** (`--loiter-*-min`, per-camera `loiter_person_sec` /
+`loiter_vehicle_sec`), with the foot point inside `loiter_roi` when one is
+set => `loiter` event with crop snapshot + alert; the same entity re-alerts
+at most every 30 min.
 
 **Layer 5 - line crossings (sampled flow).** Cameras with a `"line"`: within
 each burst, detections are linked across frames by nearest centroid (move
-budget 12% of the frame diagonal, class must match); a track whose foot point
-changes sides of the line counts as one crossing, split in/out (sign of the
-cross product vs the A→B direction) and person/vehicles. The burst observes
-~2-3 s out of every 40 s, so these are a **sampled rate** - trend-comparable
-on the same camera over time, not a turnstile total. Two Konya cameras ship
-with calibrated lines (`konya_millet_caddesi` across the junction mouth,
-`otogar_kavsagi` across the diagonal road axis - both calibrated against the
-`docs/images/model_view_*.jpg` frames); the dashboard renders each tile's
-in/out the moment the field appears. `tools/roi_grid.py` overlays the
-normalized grid on any camera's frame when you calibrate your own.
+budget 12% of the frame diagonal, class must match); a track whose foot
+point changes sides of the line counts as one crossing, split in/out (sign
+of the cross product vs the A->B direction) and person/vehicles. The burst
+observes ~2-3 s out of every 40 s, so these are a **sampled rate**:
+trend-comparable on the same camera over time, not a turnstile total. Two
+Konya cameras ship with calibrated lines (`konya_millet_caddesi` across the
+junction mouth, `otogar_kavsagi` across the diagonal road axis); the
+dashboard renders each tile's in/out the moment the field appears.
+`tools/roi_grid.py` overlays the normalized grid on any camera's frame when
+you calibrate your own.
 
-**Re-ID accumulators.** Per detection: crop → embedder → unit vector →
-cosine vs the ≤ 400 most-recently-seen same-camera same-class entities
-(SQLite) minus entities already matched in this frame → best ≥ threshold
+**Re-ID accumulators.** Per detection: crop -> embedder -> unit vector ->
+cosine vs the <= 400 most-recently-seen same-camera same-class entities
+(SQLite) minus entities already matched in this frame -> best >= threshold
 (0.92 histogram / 0.65 OSNet) = same entity: sightings += 1, `last_seen`
 updated, stored vector drifts toward the new look
-(`0.75·old + 0.25·new`, skipped when similarity ≥ 0.995); otherwise a new
-entity row. Entities idle 48 h are pruned. The registry stores which embedder
-produced its vectors and resets itself if the embedder changes.
+(`0.75*old + 0.25*new`, skipped when similarity >= 0.995); otherwise a new
+entity row. Entities idle 48 h are pruned. The registry stores which
+embedder produced its vectors and resets itself if the embedder changes.
 
-**Aggregates computed on top** - per-sample record fields: `person`,
+**Aggregates computed on top**: per-sample record fields: `person`,
 `vehicles`, `counts` (per class), `burst` (raw per-frame series),
 `is_night`, `crossings`, `new_entities`/`seen_entities`, `is_anomaly` +
-`anomaly`, snapshot URLs. Dashboard-side (from the last 24 h of records): avg
-and peak people; **activity index 0-10** = now ÷ 90th-percentile of the 24 h
-series, ×8, clamped (Quiet ≤ 2 < Moderate ≤ 5 < Busy ≤ 7 < Crowded); anomaly
-count per tile. Collector-side: anomalies per camera per Turkey-local day -
-crossing **8/day** prints a miscalibration warning; alert pushes are capped
-at one per (kind, camera) per 10 min and 20/hour globally.
+`anomaly`, snapshot URLs. Dashboard-side (from the last 24 h of records):
+avg and peak people; **activity index 0-10** = now / 90th-percentile of the
+24 h series, x8, clamped (Quiet <= 2 < Moderate <= 5 < Busy <= 7 < Crowded);
+anomaly count per tile. Collector-side: anomalies per camera per Turkey-local
+day; crossing **8/day** prints a miscalibration warning; alert pushes are
+capped at one per (kind, camera) per 10 min and 20/hour globally.
 
 ### Operational events + alert push
 
 `loiter` and `returning` events land in the `events` Firestore collection
 (24 h TTL, rendered in the dashboard's "Operational events" table with
-snapshot links) and are pushed - with the image - via **Telegram**
+snapshot links) and are pushed, with the image, via **Telegram**
 (`TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`) and/or a **generic webhook**
 (`ALERT_WEBHOOK_URL`, JSON with optional base64 image; feed it to
 Slack/Discord/n8n). Confirmed anomalies push too, with the annotated
 snapshot. Rate limits above; `--no-alerts` / `--no-loiter` switch the
 features off. Push failures never interrupt sampling.
 
-### Re-identification ("have I seen this person/car before?")
+### Re-identification
 
 Implemented in [`app/reid.py`](src/app/reid.py) with a **pluggable embedder**
 ([`app/reid_embed.py`](src/app/reid_embed.py)):
 
 - **Default: HSV histogram** (dependency-free). Crop each detection
-  (`64×128` persons, `96×96` vehicles), HSV-convert, mask very dark pixels
-  (V<30), build an `8×8×8` color histogram + `[aspect_ratio, area]`,
-  L2-normalize → 514-d unit vector. Good for stationary objects and
-  same-lighting matches; **cannot** match the same object across a lighting
-  change.
-- **Upgrade: OSNet via ONNX** - a real re-ID CNN that survives lighting and
+  (`64x128` persons, `96x96` vehicles), HSV-convert, mask very dark pixels
+  (V<30), build an `8x8x8` color histogram + `[aspect_ratio, area]`,
+  L2-normalize -> 514-d unit vector.
+- **Upgrade: OSNet via ONNX** - a re-ID CNN that survives lighting and
   pose change. Produce the `.onnx` once on any machine with internet (any
   torchreid export path works), copy to the VM, run with
   `--reid-model data/osnet_x0_25.onnx` (~5-10 ms/crop on CPU via
   onnxruntime). Match threshold drops to the embedder's own default (0.65)
-  automatically; the registry detects the embedder switch and resets itself
-  (old vectors are not comparable).
+  automatically; the registry detects the embedder switch and resets itself.
 
-Matching (either embedder): cosine against the same camera × same class
-entities in SQLite (`data/reid.db`); best ≥ threshold bumps `sightings` and
-EMA-drifts the stored embedding toward the fresh look; otherwise a new entity
-is inserted. Two detections in one frame can never match the same entity.
+Matching (either embedder): cosine against the same camera x same class
+entities in SQLite (`data/reid.db`); best >= threshold bumps `sightings`
+and EMA-drifts the stored embedding toward the fresh look; otherwise a new
+entity is inserted. Two detections in one frame can never match the same
+entity.
 
 **Returning-visitor events** (the saved snapshot pairs under
-`snapshots/returning/`) are person-only (2026-08-08) and require ALL of:
-class `person` at box height ≥ 64 px, absence ≥ 5 min (`--returning-gap-min`),
-similarity ≥ 0.92 (OSNet person floor; 0.96 histogram), ≥ 2 prior sightings,
-a 30-min per-entity cooldown, a 10/day per-camera budget that survives
-restarts (disk snapshot + rebuild from Firestore `events`), **and two
-authenticity guards**: the camera must have actually been sampled during most
-of the absence (an outage or fallback episode is a blind spot, not a
-departure), and the entity must re-appear away from its previous position (a
-parked car re-matching in the same box never "returned").
+`snapshots/returning/`) are person-only and require ALL of: class `person`
+at box height >= 64 px, absence >= 5 min (`--returning-gap-min`), similarity
+>= 0.92 (OSNet person floor; 0.96 histogram), >= 2 prior sightings, a 30-min
+per-entity cooldown, a 10/day per-camera budget that survives restarts
+(disk snapshot + rebuild from Firestore `events`), and two authenticity
+guards: the camera must have actually been sampled during most of the
+absence, and the entity must re-appear away from its previous position.
 
-What the dashboard surfaces from this: per-camera **unique entities**, **total
-sightings**, and **regulars** (entities seen ≥ 3 times) in the bottom table -
-labeled as an **appearance-based estimate**, which is what it is: two people in
-similar clothing can merge, the same person can split after a hard lighting
-change (the EMA drift helps with gradual change only). Accurate for trends in
-daylight, weaker at night; note that "sightings" counts every sample an entity
-is matched in, so a person lingering in view accumulates sightings without
-"returning". The registry is pruned of entities not seen for 48 h (on startup +
-every 6 h) so it stays small and the counts describe the recent crowd, not
-everything since the DB was created. Swap `embed_crop()` for an OSNet/torchreid
-forward pass when you need production accuracy; the SQLite registry stays the
-same.
+Dashboard-surfaced metrics: per-camera **unique entities**, **total
+sightings**, and **regulars** (entities seen >= 3 times), labeled as an
+**appearance-based estimate**. Two people in similar clothing can merge;
+the same person can split after a hard lighting change (EMA drift helps
+with gradual change only). The registry is pruned of entities not seen for
+48 h (on startup + every 6 h) so counts describe the recent crowd. Swap
+`embed_crop()` for OSNet when you need production accuracy; the SQLite
+registry stays the same.
 
 ### Stream resolution
 
-Cameras come in several `kind`s - [`resolve_stream`](src/app/detect_core.py:93) routes
-each one through the right resolver:
+Cameras come in several `kind`s; [`resolve_stream`](src/app/detect_core.py)
+routes each one through the right resolver:
 
 | kind          | example                          | how it's resolved              |
 |---------------|----------------------------------|--------------------------------|
 | `hls`         | IBB livestream `.m3u8`           | used as-is                     |
-| `youtube`     | YouTube Live page                | `yt-dlp` → HLS                 |
+| `youtube`     | YouTube Live page                | `yt-dlp` -> HLS                |
 | `skyline`     | skylinewebcams.com page          | scrape rotating HLS token      |
 | `webcamera24` | webcamera24.com page             | pull embedded tvkur player id  |
 
-Some HLS hosts (`content.tvkur.com`, `livestream.ibb.gov.tr`, `skylinewebcams.com`)
-require `Referer` / `Origin` headers that `cv2.VideoCapture` can't set on Windows;
-for those the collector downloads the latest `.ts` segment manually with the right
-headers and decodes locally ([`_grab_via_segment`](src/app/detect_core.py:133)).
+Some HLS hosts (`content.tvkur.com`, `livestream.ibb.gov.tr`,
+`skylinewebcams.com`) require `Referer` / `Origin` headers that
+`cv2.VideoCapture` cannot set on Windows; for those the collector downloads
+the latest `.ts` segment manually with the right headers and decodes locally
+([`_grab_via_segment`](src/app/detect_core.py)).
 
 ---
 
 ## The dashboard (`web/`)
 
-Pure static page - no build step. Module ES imports, Firebase web SDK v10,
+Pure static page, no build step. Module ES imports, Firebase web SDK v10,
 Chart.js 4. Opens with [`python serve.py`](src/serve.py) and renders:
 
-- **2×2 camera grid** - each tile has a live iframe (tvkur player or a
+- **2x2 camera grid**: each tile has a live iframe (tvkur player or a
   corsproxy.io-wrapped page for hosts with strict `X-Frame-Options`), a
-  **Model view** - the collector's annotated frame (people green, vehicles
-  orange), refreshed every sample so you can compare the live video against
-  the exact boxes the counts came from - four KPIs (people now, vehicles now,
-  24 h average, 24 h peak), a ticking **"counts from
-  Ns ago"** age label (red when > 120 s - the video is live, the numbers are
-  the collector's most recent sample, and the label makes that gap explicit),
-  an anomaly badge showing the collector's latest verdict (▲ spike / ▼ drop,
-  which metric, observed vs expected), and a per-tile mini chart of the last
-  30 samples with anomalous points enlarged in red on the series that fired.
-- **Heat depth on the model strip** - each strip cell's 🔥 toggle swaps to
-  the camera's dwell heatmap; on the private dashboard two selectors pick
-  the **layer (people / vehicles / other) x daypart (all day / night /
-  morning / afternoon / evening)** combination, rendered on demand by
+  **Model view** (the collector's annotated frame with people green,
+  vehicles orange, refreshed every sample), four KPIs (people now, vehicles
+  now, 24 h average, 24 h peak), a ticking **"counts from Ns ago"** age
+  label (red when > 120 s), an anomaly badge showing the collector's latest
+  verdict (which metric, observed vs expected), and a per-tile mini chart
+  of the last 30 samples with anomalous points enlarged in red on the
+  series that fired.
+- **Heat depth on the model strip**: each strip cell's toggle swaps to the
+  camera's dwell heatmap; on the private dashboard two selectors pick the
+  **layer (people / vehicles / other) x daypart (all day / night / morning
+  / afternoon / evening)** combination, rendered on demand by
   `/api/heatmap` from the grid state the collector publishes next to its
   overlay (`snapshots/heatmaps/<cam>.json`). The public copy keeps the
   single published person overlay.
 - **Combined 24 h chart** stacking all four cameras' people series.
-- **Anomaly events table** - every flagged sample of the last 24 h across all
-  slots: when, where, spike or drop, people or vehicles, observed vs expected
-  and a link to
-  the saved snapshot. This is the collector's own log - nothing is recomputed
-  client-side.
-- **Re-ID summary table** - unique entities / total sightings / regulars per
+- **Anomaly events table**: every flagged sample of the last 24 h across
+  all slots: when, where, which metric, observed vs expected, and a link
+  to the saved snapshot.
+- **Re-ID summary table**: unique entities / total sightings / regulars per
   cam, tagged as an appearance-based estimate.
-- **Status pill** in the header - `live` when every camera reported within 120 s,
-  `partial` if some are stale, `down` if Firestore has no recent writes (usually
-  means the collector isn't running).
+- **Status pill** in the header: `live` when every camera reported within
+  120 s, `partial` if some are stale, `down` if Firestore has no recent
+  writes.
 
-Connection state is `connection refused` when nothing is bound to port 8000 - that
-is the role of [`serve.py`](src/serve.py). The dashboard itself doesn't open any port;
-it just talks to Firestore from the browser tab.
+Connection state is `connection refused` when nothing is bound to port 8000
+(the role of [`serve.py`](src/serve.py)). The dashboard itself does not
+open any port; it talks to Firestore from the browser tab.
 
 ---
 
 ## Search (image similarity + class/time browse)
 
-Ask the system what it has seen - by uploading a reference photo, by
-picking a class and time range, or both together. The pieces live next to
-(not inside) the collector pipeline, so nothing changes for the dashboard
-or the VM until you opt in:
+Search the saved snapshot corpus produced by the VM collector, either by
+uploading a reference photo, by picking a class and time range, or both:
 
-- **UI**: the "Search" panel on the main dashboard (persistent, always
-  visible). Three inputs, all optional and freely combinable:
-  1. reference photo (drop zone) - similarity match by YOLO+embedder;
-  2. class chips (person / car / truck / bus / motorcycle / bicycle / train,
-     multi-select, "any" = pick nothing);
+- **UI**: the "Search" panel on the main dashboard. Three inputs, all
+  optional and freely combinable:
+  1. reference photo (drop zone): similarity match by YOLO + embedder;
+  2. class chips (person / car / truck / bus / motorcycle / bicycle /
+     train, multi-select, "any" = pick nothing);
   3. from/to datetime + count field, with 1h/24h/7d presets and a
-     Loose/Balanced/Strict strictness switch that hides the raw `min_sim`
-     behind a name a user actually understands.
-  The "New search" button clears the panel so you can run search after
-  search without re-uploading anything.
+     Loose/Balanced/Strict strictness switch that maps to `min_sim`.
+  The "New search" button clears the panel.
 - **API**: `POST /api/search` - image mode when the body is non-empty (rank
   by cosine similarity), browse mode when the body is empty (list crops by
   filter, ordered by time). Query params: `top`, `min_sim`, `classes`,
@@ -521,424 +461,126 @@ or the VM until you opt in:
   collector has accumulated real snapshots you can seed a demo index from
   still images: `--seed-images "docs/images/*.jpg"`.
 
-How it works: the query image goes through the same YOLO detection the
-collector runs (each detected person/vehicle becomes a query object; an
-already-cropped photo falls back to whole-image), each crop is embedded with
-the same pluggable re-ID embedder (`app/reid_embed.py`), and the embedding is
+The query image goes through the same YOLO detection the collector runs
+(each detected person/vehicle becomes a query object; an already-cropped
+photo falls back to whole-image), each crop is embedded with the same
+pluggable re-ID embedder (`app/reid_embed.py`), and the embedding is
 cosine-matched against the saved snapshot crops (embeddings cached in
 `web/snapshots/.search_cache.json`) and the `data/reid.db` entities. A hit
-above the embedder's own matching threshold is labeled a **match** ("same
-appearance" in re-ID terms); everything else is ranked "similar". The
-registry part refuses to compare across embedders - the same rule the
-registry applies to itself.
+above the embedder's own matching threshold is labeled a **match**;
+everything else is ranked "similar". The registry refuses to compare across
+embedders.
 
-Honest limitation: the default HSV-histogram embedder finds *the same-looking
-object* (color + build), especially under similar lighting - it does not do
-semantic "person with a red hat" search. Point `REID_MODEL` at an OSNet
-`.onnx` (produced separately with torchreid) for lighting/pose-robust
+The default HSV-histogram embedder finds *the same-looking object* (color
++ build) under similar lighting; it does not do semantic "person with a red
+hat" search. Point `REID_MODEL` at an OSNet `.onnx` for lighting/pose-robust
 matching. Env knobs: `REID_MODEL`, `REID_DB`, `SEARCH_YOLO` (YOLO weights
 for query parsing, `off` to disable).
-
-Trial on this repo's own media (the four `docs/images/model_view_*.jpg`
-frames, 13 objects seeded): 12/13 jittered re-crops (+12% padding, +18
-brightness, JPEG q70) retrieved their own object as top-1; uploading the full
-kulturpark frame matched 5/6 of its objects above the identity threshold
-(93.8-99.8%). `tests/test_visual_search.py` covers the index/cache/registry
-behaviors without needing YOLO.
-
----
-
-## Live analysis - one layer per camera, on the tile itself
-
-The private dashboard's 🔬 button (visible only where the local server
-answers `/api/ping`) runs a **continuous live analysis on the exact
-camera whose tile was clicked**: the tile keeps playing its full-rate
-video, and a transparent canvas ABOVE the video draws the analysis in
-real time, while the other tiles stay untouched and the cloud VM is
-never involved. Engine: `app/live_analysis.py`; endpoints:
-`POST /api/analysis/start?cam&layer`, `GET /api/analysis/data?cam`
-(overlay JSON, polled every 500 ms), `GET /api/analysis/frame?cam`
-(server-annotated JPEG fallback), `GET /api/analysis/events?cam` (hot
-trail), `POST /api/analysis/stop?cam`.
-
-### The engine, in one pass
-
-One `LiveSession` thread per camera (max 4 = the grid). Each session
-pulls decoded frames from a **shared per-camera HLS reader** pinned to
-the live edge, then runs one detector pass per tick. Every session in
-the process funnels its frame through **one shared YOLO** (`yolov8s` /
-its OpenVINO engine, the same weights the VM runs - the notebook's own
-sections use the stronger `yolo26m`, but the live engine deliberately
-reuses the already-loaded search model instead of holding a second
-40 MB engine in RAM). Detection envelope: COCO classes
-person/bicycle/car/motorcycle/bus/truck, conf floor 0.12 with per-class
-gates scaled x0.7, class-agnostic NMS, imgsz 640.
-
-Detections are threaded into tracks by `app/tracker.py` - a BYTE-style
-two-stage association (high-confidence boxes >= 0.45 match first, the
-leftovers get a second, looser pass) over a constant-velocity
-prediction, with per-track velocity smoothed by an EMA (alpha 0.6).
-Display gates keep the overlay honest: a track appears only after 2
-consecutive hits at conf >= 0.40, disappears after 1 missed tick, and
-train/boat/airplane are suppressed outright (a street scene produces
-them only as false positives).
-
-**Why boxes glide instead of freezing:** every published box carries
-its velocity (vx, vy in px/s), and every tick is stamped `at` in the
-*video's own clock* - wall clock minus the HLS playlist's live-edge
-offset, re-measured on every playlist refresh. The client's 15 fps
-canvas loop picks the buffered tick that matches the video's current
-`playingDate` and extrapolates each box along its velocity with a
-saturating dt (tau = 5 s). Between two analysis ticks the boxes keep
-moving along their measured direction; when the next tick lands they
-snap to truth. Switching layers mutates the running session in place -
-stream, tracker, heat grid, line counters and gesture history all
-survive, so heat -> gestures -> heat resumes the accumulated map.
-
-Compute honesty: ultralytics predict is not thread-safe, so every model
-call in the process serializes on one lock. Measured on the operator
-laptop (2026-08-14, four concurrent sessions + four playing videos): a
-new analysis tick lands every ~12-15 s per camera; a single session
-alone runs ~1-2 s per tick. The video itself never drops - only the
-overlay cadence stretches, and the velocity extrapolation is what keeps
-it readable. A session with no poller for 60 s shuts itself down.
-
-### The 10 layers - mechanism, thresholds, and why
-
-Every layer publishes its result per tick, emits events into the hot
-trail (below), and states an empty result honestly ("no gestures
-detected right now").
-
-1. **`paths` - trails and speed tiers.** Draws each track's last 12
-   centroids as a trail plus a speed tier. Speed is computed in
-   **body-lengths per second**: `blps = speed_px_s / bbox_diagonal_px`.
-   Tiers: `static` < 0.05 (only after >= 3 hits and >= 4 s of age, so a
-   newborn track can never be branded static), `slow` < 0.25, `moving`
-   < 0.8, `fast` >= 0.8 (fires a hot-trail event). Why body-lengths: a
-   px/s number depends on how far the object is from the camera;
-   dividing by the object's own apparent size is the only
-   calibration-free normalization a single uncalibrated street view
-   offers, and it makes a distant bike and a near pedestrian
-   comparable.
-
-2. **`pose` - skeletons, top-down.** Person boxes at least 96 px tall
-   are cropped with 25 % padding and each crop runs `yolov8n-pose` at
-   256 px, max 6 crops per tick (CPU cap). Keypoints below conf 0.30
-   are dropped; the client draws the COCO-17 skeleton (14 bones) and
-   extrapolates it with the box velocity between ticks. Why top-down:
-   full-frame pose at 640 sees ~15 px people on a wide street and
-   returns nothing; a per-person crop hands the pose model a
-   full-resolution human. The detector stays the source of truth for
-   WHO exists - pose can never add or remove a person, it only
-   decorates one.
-
-3. **`gestures` - temporal arm gestures.** From each tracked person's
-   recent keypoint history: `hand_raised` = wrist above shoulder
-   (screen-y) sustained >= 3 consecutive pose frames - one frame is
-   noise, a run is a posture; `both_hands_up` = both wrists, same
-   sustain; `wave` = a *raised* wrist crossing its elbow's x at least
-   twice (sign changes of `wrist_x - elbow_x`), with a deadband of
-   `max(2 px, 8 % of shoulder width)` so the same rule works on a 40 px
-   person and a 300 px one, anchored to the elbow so a raised hand on a
-   *walking* person does not "wave" just because the body moves.
-   Finger-level vocabulary is deliberately out of scope - fingers are
-   not in the signal at street range.
-
-4. **`body` - behavior verdicts, alert-only rendering.** Every tracked
-   person gets one verdict from trajectory + posture math
-   (`app/behavior_labels.py`): walking / standing / dwelling / driving
-   / parked are normal street life and stay quiet; the layer draws and
-   alerts ONLY on `running`, `erratic` (>= 3 sharp course reversals in
-   the window) and `fall_suspect` (torso axis > 60 degrees from
-   vertical with >= 8 px of torso, >= 2 consecutive frames). A HUD
-   counts persons-in-view / flagged; flagged people get a red box +
-   skeleton + verdict chip and a banner while the flag is live. Why
-   alert-only: a badge that fires on every pedestrian gets ignored -
-   the anomaly list is deliberately three labels long.
-
-5. **`faces` - a separate detector, never mixed.** OpenCV **YuNet**
-   (`face_detection_yunet_2023mar.onnx`, score >= 0.60, NMS 0.30) runs
-   on the full frame, then a stricter live gate keeps only faces with
-   conf >= 0.90 and >= 24 px, capped at 32. Faces are published as
-   their own array and drawn by their own code path - they are never
-   converted into "boxes", so a face can never be relabeled as a
-   vehicle and a vehicle can never appear under the Faces layer (this
-   structural separation is the fix for the old cross-layer
-   contamination bug). Detection only - no identification. If the face
-   backend is unavailable the layer says so instead of silently
-   rendering nothing.
-
-6. **`line` - crossing counter on ground contact.** The operator draws
-   a two-point line on the tile (default when none saved: horizontal at
-   62 % height - the sidewalk band of a typical street view). Each
-   tick, every confirmed track's **foot point** (bottom-center of the
-   box = where it touches the ground) is signed against the line;
-   flipping from the negative to the positive side of A->B counts as
-   "in", the reverse as "out", and a per-track 2 s cooldown swallows
-   the jitter of a foot point trembling on the line. Every crossing
-   appends a JSONL row plus a padded crop snapshot into the crossings
-   strip. The line file is re-read every 5 s, so redrawing it takes
-   effect on a running session. Why the foot point: box centers cross
-   lines when a tall object merely turns in place; ground contact is
-   the honest "physically passed it" signal.
-
-7. **`loiter` - dwell zones.** User-drawn polygons (dwell threshold
-   5-3600 s, defaults 300 s person / 900 s vehicle). A track whose foot
-   point sits inside starts a clock (streak-based, tolerant of a
-   single missed tick); crossing the threshold flips the zone into
-   alert and fires an event. Per-camera thresholds are the point: "how
-   long is suspicious" is a property of the PLACE - a bench square
-   tolerates 15 minutes, an ATM lobby does not.
-
-8. **`parking` - occupancy flips.** Polygons of kind `parking`:
-   occupied = any confirmed vehicle-class track's foot point inside.
-   Events fire only on the occupied/free FLIP, not continuously -
-   state changes are information, steady state is wallpaper.
-
-9. **`plates` - LPR, two stages + a per-track cache.** Stage 1: a
-   dedicated `yolov8n-plate` detector (OpenVINO) looks for plate boxes
-   ONLY inside vehicle boxes wide enough to physically carry a readable
-   plate (vehicle >= 96 px wide, motorcycles >= 72; plate box >= 32 px;
-   conf 0.30; at most 3 vehicles per tick, widest first). Stage 2: the
-   plate crop (2x cubic-upscaled when < 128 px) goes through
-   `plate_ocr_global.onnx` - a CTC recognizer with a 9-slot,
-   **country-agnostic alphabet `0-9 A-Z`**: no per-country grammar, so
-   Turkish, US and Japanese Latin-digit plates all read the same way,
-   and Thai/Japanese script glyphs are honestly out-of-alphabet rather
-   than hallucinated into digits. A read is accepted at OCR conf >=
-   0.45 with >= 4 characters; each TRACK caches its best read and
-   re-tries up to 6 times until conf >= 0.70 - best-of-N across frames,
-   never one arbitrary frame. Detection and OCR are separate verdicts:
-   the envelope always reports the honest funnel - "N vehicles - M in
-   plate range - K read".
-
-10. **`heat` - recent-activity ground map.** A 48x27 grid banks every
-    box's foot point each tick, weighted by the real elapsed tick time
-    (clamped to 0.2-5 s so one hiccup cannot dump minutes into a cell),
-    and the whole grid decays exponentially with a **180 s half-life**
-    before every bank - so the map answers "where has the activity been
-    in the last few minutes", not "since the session started". Render:
-    p99-normalized colormap (one stuck-hot cell cannot black out the
-    rest) burned over the frame - stylized brightness + dwell, not a
-    thermal sensor, and labeled as such. A hotspot event (grid argmax)
-    fires at most every 120 s.
-
-### The hot trail - see it, save it, argue with it
-
-Every layer feeds a per-camera event ring (50 events): plate read, line
-crossing, loiter alert, parking flip, new gesture, body flag, skeleton
-acquired, fast mover, face-count rise, heat hotspot. The strip under
-the video polls it every 2.5 s and shows each event as a chip with a
-thumbnail; chips expire by ring overflow (or after 30 in the DOM), and
-the 💾 on a chip POSTs `/api/analysis/event/save` - the server then
-writes the **full annotated frame** (box + caption burned in) to
-`web/snapshots/detections/` plus a manifest row, capped at 500. The
-**Investigation tab** is the permanent gallery over that manifest -
-saved detections survive the session and can be pulled up later to
-argue with the algorithm frame by frame.
-
-## Window analysis - pose, behavior labels, gestures, faces, target lock
-
-The dashboard's "Window analysis" panel (`POST /api/deep-analyze`, CLI:
-`tools/analyze_window.py`) grabs a longer window (default 12 frames ~0.5 s
-apart) from ONE camera, threads the detections into per-individual tracks
-(`app/tracker.py` - position + motion), and profiles each individual:
-path, distance, px/s + km/h estimate, moving fraction, direction, visited
-heatmap zones, closest same-class neighbor. On top of that base profile,
-three opt-in layers (checkboxes in the panel / query params on the API):
-
-- **Behavior labels** (`app/behavior_labels.py`, always on) - every
-  individual gets ONE readable verdict with its evidence
-  (`label_reasons`): `walking` / `standing` / `running` / `dwelling`
-  (moved but went nowhere) / `erratic` (≥ 3 sharp course reversals) for
-  people, `driving` / `parked` for vehicles. Verdicts worth walking to the
-  screen for (`erratic`, `fall_suspect`) carry `alert: true` and a ⚠ in
-  the table - deliberately a short list, the anomaly layer already taught
-  us a chatty badge gets ignored.
-- **Pose** (`pose=1`, `app/pose.py`) - a second pass with `yolov8n-pose`
-  (auto-downloaded; `POSE_WEIGHTS` overrides), run **top-down since
-  2026-08-08**: each detector `person` box is cropped (25% padding, boxes
-  ≥ 40 px tall only) and the pose model sees the crop at its own
-  resolution. The previous full-frame pass handed the model ~15 px of
-  person on wide street shots and attached ZERO skeletons; the crop pass
-  finds 9/10 on the same live Taksim frame. The detector stays the source
-  of truth for WHO exists - the best pose-person inside each crop claims
-  that box, so counts can never change because pose ran. Matched boxes
-  gain COCO-17 keypoints (drawn on the annotated frame), which unlocks
-  the posture labels - `crouching`, `fall_suspect` (torso past 60° from
-  vertical with ≥ 8 px of torso, ≥ 2 frames) - and the gesture pass:
-  **`hand_raised`, `both_hands_up`, `wave`** (`app/gestures.py`, a raised
-  wrist swinging across its elbow ≥ 2 times, deadband scaled to shoulder
-  width). Arm-level only, honestly:
-  at street-cam distance a hand is a few pixels, finger-level vocabulary
-  needs a close-range camera (mediapipe experiment noted in
-  requirements.txt, notebook-only).
-- **Faces** (`faces=1`, `app/faces.py`) - face **detection** boxes on the
-  final frame via OpenCV's bundled YuNet. Drop the ~230 KB
-  `face_detection_yunet_2023mar.onnx` from the opencv_zoo repo at
-  `data/face_detection_yunet_2023mar.onnx` (picked up automatically), or
-  point `FACE_MODEL` anywhere else; silently off without a model. This
-  is rectangles only - no embeddings, no face database, no identification;
-  "have I seen this person before?" stays answered by body-appearance
-  re-ID, which is the honest tool at these camera distances.
-- **Target lock** (`lock=auto` or `lock=<track id>`) - a crosshair
-  overlay locked on one individual: the first alerting one, else the
-  largest person in view. The result carries `{track_id, cx, cy, dx, dy}`
-  where `dx/dy` is the normalized offset from frame center - the error
-  signal a pan/tilt controller would zero out. These are read-only public
-  streams, so there is no actuator; the lock is an annotation plus that
-  hook, nothing more.
-
-The same pose/blur machinery is available to the 24/7 collector as two
-opt-in flags, both off by default so the shipped VM behaves bit-identically:
-`--pose` (skeletons on the published model view - loads a SECOND model, for
-hosts with ≥ 2 GB; do not enable on the 1 GB e2-micro) and `--blur-faces`
-(privacy mode: every published snapshot - model view, anomaly frames, event
-crop + full-frame pairs, heatmap base - has faces gaussian-blurred before
-the bytes leave the process; counting and re-ID always run on the unblurred
-in-memory frame, so the numbers don't move).
 
 ---
 
 ## Review detections - human in the loop
 
-YOLOv8 is inference-only at runtime - it does not learn from the live stream,
-so there is no built-in feedback loop for the mistakes users care about
-("that lamp post has been counted as a person all week"). The Review panel
-on the dashboard is that feedback loop:
+YOLOv8 is inference-only at runtime; it does not learn from the live stream.
+The Review panel on the dashboard is the feedback loop:
 
 - **UI**: the "Review detections" section on the dashboard picks one saved
   crop the user has not reviewed yet, shows it next to the model's label,
   and offers three verdicts: `correct`, `wrong label` (with a select for
   the right class), `not an object`. An optional free-form note is stored
-  alongside. Submitting fetches the next crop, so a user can grind through
-  a batch quickly.
+  alongside. Submitting fetches the next crop.
 - **API**: `GET /api/review-sample`, `POST /api/review-submit`,
   `GET /api/review-stats`. Storage is a plain JSON file at
-  [`data/reviews.json`](src/data) - thread-safe, atomic rewrite per submit,
+  [`data/reviews.json`](src/data): thread-safe, atomic rewrite per submit,
   no new DB dependency.
 - **Downstream** ([`app/labels.py`](src/app/labels.py)):
   `ReviewStore.rejects_for_cls("person")` returns the crop paths a user
-  flagged as `wrong_label` or `not_an_object` for that class - the input
-  to hand-crafting the per-camera `roi_exclude_class` polygons above, or
-  to exporting a COCO-format fine-tuning dataset once a few hundred
-  labels have accumulated.
+  flagged as `wrong_label` or `not_an_object` for that class: the input to
+  hand-crafting the per-camera `roi_exclude_class` polygons, or to
+  exporting a COCO-format fine-tuning dataset.
 
-**Full-frame review UX (canvas)** - the shipped default. The panel
-loads one saved frame at a time and draws every detection as a
-class-colored rectangle over it. Click a box: grey → green
-(correct) → red (wrong) → grey. Switch to "add missing", pick a
-class, drag a rectangle around an object the model failed to see -
-that's the **FN signal** that finally makes recall computable.
-Verdicts land in `data/reviews.json::frame_reviews`, feed the same
-confidence-boost + auto-blacklist pipes as the crop-level flow.
+**Full-frame review UX (canvas)** - the shipped default. The panel loads
+one saved frame at a time and draws every detection as a class-colored
+rectangle over it. Click a box: grey -> green (correct) -> red (wrong) ->
+grey. Switch to "add missing", pick a class, drag a rectangle around an
+object the model failed to see: the **FN signal** that makes recall
+computable. Verdicts land in `data/reviews.json::frame_reviews`, feed the
+same confidence-boost + auto-blacklist pipes as the crop-level flow.
 
 ### Active-learning loop (labels -> fine-tuned head -> gated promotion)
 
-Every verdict does double duty: the instant heuristics above, and real
-training. The full loop, end to end:
+Every verdict does double duty: instant heuristics and training.
 
-1. **Uncertainty at capture** - the collector scores every stored box
-   against the EFFECTIVE gates the burst ran with (`app/uncertainty.py`);
-   the review queue serves the least-certain frames first, and the BADGE
-   crop sampler (`REVIEW_SAMPLER=badge`) adds embedding-space diversity.
-2. **Sync** - each submit ships verdicts + reviewed frames to Storage
-   `training/` in the background (`app/training_sync.py`).
-3. **Train** - the `train-head` GitHub Actions workflow (manual Run
-   workflow button; free public-repo runner) pulls the data, exports a
-   chronological 90/10 YOLO dataset, and fine-tunes ONLY the Detect head
-   of **yolov8n** - the exact base the VM runs - backbone frozen,
-   mosaic/mixup off, ≤ 10 epochs.
-4. **Gate** - `tools/promote_adapter.py` validates base vs candidate on
-   the same val split; promotion requires mAP50 +0.5pp AND no class
-   dropping > 2pp (person/car: 0pp). Every run - promoted or rejected -
-   lands in `history.jsonl` and mirrors to Firestore `training_events`.
-5. **Deploy** - promoted heads publish to Storage; the collector polls
-   every 30 rounds and hot-swaps the Detect tensors in place (no restart).
+1. **Uncertainty at capture**: the collector scores every stored box
+   against the EFFECTIVE gates the burst ran with
+   ([`app/uncertainty.py`](src/app/uncertainty.py)); the review queue
+   serves the least-certain frames first, and the BADGE crop sampler
+   (`REVIEW_SAMPLER=badge`) adds embedding-space diversity.
+2. **Sync**: each submit ships verdicts + reviewed frames to Storage
+   `training/` in the background
+   ([`app/training_sync.py`](src/app/training_sync.py)).
+3. **Train**: the `train-head` GitHub Actions workflow (manual Run workflow
+   button; free public-repo runner) pulls the data, exports a chronological
+   90/10 YOLO dataset, and fine-tunes ONLY the Detect head of **yolov8s**
+   (the exact base the VM runs), backbone frozen, mosaic/mixup off,
+   <= 10 epochs.
+4. **Gate**: `tools/promote_adapter.py` validates base vs candidate on the
+   same val split; promotion requires mAP50 +0.5pp AND no class dropping
+   > 2pp (person/car: 0pp). Every run - promoted or rejected - lands in
+   `history.jsonl` and mirrors to Firestore `training_events`.
+5. **Deploy**: promoted heads publish to Storage; the collector polls every
+   30 rounds and hot-swaps the Detect tensors in place (no restart).
    `--rollback` restores the previous head in one command.
-6. **Calibrate** - `tools/calibrate_conf.py` distills the review confusion
+6. **Calibrate**: `tools/calibrate_conf.py` distills the review confusion
    matrix into per-(camera, class) confidence gates at 0.90 precision
-   (pairs with ≥ 30 verdicts), overriding the ±0.015 heuristic nudge.
-7. **Prove it** - the dashboard's "labels vs mAP50" chart (`/api/al-curve`)
+   (pairs with >= 30 verdicts), overriding the +/-0.015 heuristic nudge.
+7. **Prove it**: the dashboard's "labels vs mAP50" chart (`/api/al-curve`)
    plots every training run: promoted in color, rejected greyed, baseline
-   dashed - the improvement claim is a chart, not an anecdote.
+   dashed.
 
-**Model-quality scoreboard** - the header carries a live one-liner
-computed from the review store:
+**Model-quality scoreboard**: the header carries a live one-liner computed
+from the review store:
 
-    Model: 87% accuracy · P(person) 82% · P(car) 91% · R 74% · F1 79%
-           · FP 13% · 312 reviews · tuned 5 classes
+    Model: 87% accuracy . P(person) 82% . P(car) 91% . R 74% . F1 79%
+           . FP 13% . 312 reviews . tuned 5 classes
 
-The line refreshes every 10 s so a review sitting shifts the numbers
-in near-real-time. Recall and F1 appear once any frame review has
-landed an FN (missed-detection); until then only precision and
-accuracy are honest, and the line reflects that.
+The line refreshes every 10 s. Recall and F1 appear once any frame review
+has landed an FN (missed-detection); until then only precision and accuracy
+are honest, and the line reflects that.
 
-**OSNet upgrade (optional)** - the shipped default appearance embedder
-is an HSV histogram. It's dependency-free but color-only and collapses
-across lighting shifts. To upgrade to a semantic identity embedder
-(OSNet, ~5 MB ONNX, ~5-10 ms per crop on CPU):
+**OSNet upgrade (optional)**: the shipped default appearance embedder is
+an HSV histogram. To upgrade to a semantic identity embedder (OSNet, ~5 MB
+ONNX, ~5-10 ms per crop on CPU):
 
     bash tools/setup_reid.sh
 
-The script tries a few public mirrors, falls back to printing
-"produce your own" instructions if the network is locked down. The
-systemd unit already sets `REID_MODEL=<install>/src/data/osnet_x0_25_msmt17.onnx`;
-when the file exists both the collector and the dashboard server pick
-it up on their next start (`reid_embed.make_embedder` degrades to the
-histogram transparently when the file is absent). At the same time
-this raises the search-similarity floor from 0.30 to 0.55 by default
-so mid-tier color-similar noise stops appearing in results.
-
----
-
-## Notebook - `turkey_business_activity.ipynb`
-
-`jupyter lab turkey_business_activity.ipynb` opens the offline analysis side:
-
-- footfall time series + diurnal pattern + peak-hour bands per camera,
-- robust (median + MAD) rolling anomaly markers on the same series - the same
-  statistic the cloud collector uses,
-- dwell-time and prolonged-stops via ByteTrack on consecutive frames,
-- appearance-registry summary (regulars, unique counts) read from `data/reid.db`,
-- site-selection composite score combining footfall, dwell time, and consistency,
-- **section 10: accuracy calibration** - capture frames from the live grid
-  cameras, count people/vehicles yourself, and get MAE + bias per camera and
-  per input size (640 vs 960) plus a concrete `conf`/`imgsz` recommendation.
-- **section 11: forecasting** - pulls the collector's Firestore history into a
-  local CSV cache (incremental, read-quota aware; the cache is the long-term
-  archive - Firestore only remembers a few days back), resamples to a 15-min
-  grid per camera, then runs an honest model ladder (persistence, seasonal
-  naive, hour-of-day/week profile, closed-form numpy ridge, and a small torch
-  GRU reading 24 h to predict the next 12 h) with a held-out tail and MAE
-  skill scores. The payoff: an expected-activity band per camera and
-  deviation anomalies - |actual - expected| in MAD units - which flag
-  unusual QUIET (an empty square at rush hour) that rolling-z detectors
-  cannot see by construction. The VM twin notebook carries only the
-  numpy profile forecaster - the piece light enough to run on the e2-micro.
-
-Reuses the exact same `detect_core` + `reid` modules as the collector so the
-numbers reconcile.
+The systemd unit already sets
+`REID_MODEL=<install>/src/data/osnet_x0_25_msmt17.onnx`; when the file
+exists both the collector and the dashboard server pick it up on their
+next start (`reid_embed.make_embedder` degrades to the histogram
+transparently when the file is absent). At the same time this raises the
+search-similarity floor from 0.30 to 0.55 by default.
 
 ---
 
 ## Camera catalog
 
-[`app/cameras.py`](src/app/cameras.py) is the source of truth. The four cameras shipped
-in the dashboard grid (`GRID_CAMERAS`):
+[`app/cameras.py`](src/app/cameras.py) is the source of truth. The four
+cameras shipped in the dashboard grid (`GRID_CAMERAS`):
 
 | id                       | name                                   | host         |
 |--------------------------|----------------------------------------|--------------|
-| `konya_hukumet`          | Konya - Hükümet / Sarraflar Yeraltı    | tvkur        |
-| `otogar_kavsagi`         | Konya - Otogar Kavşağı                 | tvkur        |
-| `konya_kulturpark`       | Konya - Kültürpark                     | tvkur        |
-| `konya_millet_caddesi`   | Konya - Millet / Hastane Kavşağı       | tvkur        |
+| `konya_hukumet`          | Konya - Hukumet / Sarraflar Yeralti    | tvkur        |
+| `otogar_kavsagi`         | Konya - Otogar Kavsagi                 | tvkur        |
+| `konya_kulturpark`       | Konya - Kulturpark                     | tvkur        |
+| `konya_millet_caddesi`   | Konya - Millet / Hastane Kavsagi       | tvkur        |
 
-IBB Istanbul streams (`taksim`, `kapali_carsi`, `misir_carsisi`, `sultanahmet_1`,
-`kadikoy`, `eyup_sultan`, `uskudar`, `beyazit_meydan`) and `giresun_gazi`
-(skylinewebcams) are in the catalog but **geo-restricted** to a Turkey-routed IP.
-Run the collector from a Turkey VPN/VPS to populate those tiles too. From any other
-network you'll see `MISS` rows for them and the dashboard will leave them blank.
+IBB Istanbul streams (`taksim`, `kapali_carsi`, `misir_carsisi`,
+`sultanahmet_1`, `kadikoy`, `eyup_sultan`, `uskudar`, `beyazit_meydan`) and
+`giresun_gazi` (skylinewebcams) are in the catalog but **geo-restricted**
+to a Turkey-routed IP. Run the collector from a Turkey VPN/VPS to populate
+those tiles too. From any other network you will see `MISS` rows for them
+and the dashboard will leave them blank.
 
 Verifying a stream resolves on your network:
 
@@ -950,31 +592,28 @@ python -m app.detect_core --resolve konya_hukumet,otogar_kavsagi
 
 ## Operational notes
 
-- **Storage:** Firestore free tier ≈ 20 k writes/day. At one write per camera per
-  20 s that is ~4,300 writes/day/camera (the shipped cloud service runs
-  `--interval 40` ≈ half that). Stay modest on free tier, raise `--interval`,
-  or batch. For many cameras at high frequency keep only `latest` in Firestore
-  and ship `footfall` to BigQuery instead.
-- **VM sizing (measured):** this project's live `e2-micro` (1 GB, Always
-  Free, $0) measured **~635 MB RSS** at `--imgsz 960` under
-  `MemoryHigh=700M`/`MemoryMax=850M` and runs fine. Peaks vary by torch
-  build; if a box shows reclaim-throttling (rounds of minutes, frozen
-  dashboard numbers), add `--imgsz 640` to `ExecStart` - half the inference
-  memory for less small/distant-object recall. If a round takes longer than
-  `--interval` the collector says so in its log, and the effective tile
-  refresh rate is the round time.
-- **Calibration is not pre-baked:** notebook section 10 measures MAE/bias per
-  camera against your own manual counts and recommends `conf`/`imgsz` - run it
-  before trusting absolute counts; out of the box the counts are consistent
-  (same model, same gates) but uncalibrated. YOLOv8n undercounts dense/distant
-  crowds; the anomaly layers compare the stream to itself, so relative verdicts
-  survive that bias, absolute counts don't.
-- **Privacy by design:** the collector stores **aggregate counts** (and an HSV
-  histogram appearance hash for re-ID), never raw frames of people. Crops live in
-  memory only and are dropped after embedding.
-- **Scope:** only public, intentionally-public cameras (city tourism cams,
-  official infrastructure feeds, market broadcasters). Cameras exposed to the
-  internet without owner consent are explicitly out of scope.
+- **Storage**: Firestore free tier ~ 20 k writes/day. At the shipped
+  `--interval 40` cadence with 4 slots x 2 writes/round the service uses
+  ~17.3k/day of the 20k free budget. Raise `--interval`, batch, or ship
+  `footfall` to BigQuery instead of keeping everything in Firestore.
+- **VM sizing (measured)**: this project's `e2-micro` (1 GB, Always Free,
+  $0) with `--weights yolov8s.pt --imgsz 640 --burst 2` sits at ~410 MB RSS
+  with 96-100% CPU idle (load avg 0.03) under
+  `MemoryHigh=760M`/`MemoryMax=900M`. Peaks vary by torch build; if a box
+  shows reclaim-throttling (rounds of minutes, frozen dashboard numbers),
+  drop to `--weights yolov8n.pt --imgsz 768` before touching anything else.
+  If a round takes longer than `--interval` the collector logs it, and the
+  effective tile refresh rate is the round time.
+- **Calibration is not pre-baked**: absolute counts are consistent (same
+  model, same gates) but uncalibrated. yolov8s undercounts dense/distant
+  crowds; the anomaly layers compare the stream to itself, so relative
+  verdicts survive that bias, absolute counts do not.
+- **Privacy by design**: the collector stores **aggregate counts** (and an
+  HSV histogram appearance hash for re-ID), never raw frames of people.
+  Crops live in memory only and are dropped after embedding.
+- **Scope**: only public, intentionally-public cameras (city tourism cams,
+  official infrastructure feeds, market broadcasters). Cameras exposed to
+  the internet without owner consent are explicitly out of scope.
 
 ---
 
@@ -982,8 +621,8 @@ python -m app.detect_core --resolve konya_hukumet,otogar_kavsagi
 
 | Path | Purpose |
 |------|---------|
+| [`turkey_business_activity_yolov8s.ipynb`](turkey_business_activity_yolov8s.ipynb) | The project notebook (lives at the repo root). |
 | [`serve.py`](src/serve.py) | One-shot launcher for the dashboard (no-cache static server). |
-| [`turkey_business_activity.ipynb`](turkey_business_activity.ipynb) | Offline analytics notebook (lives at the repo root, not under `src/`). |
 | [`app/collector.py`](src/app/collector.py) | 24/7 sampler that writes to Firestore. |
 | [`app/detect_core.py`](src/app/detect_core.py) | YOLO loading, stream resolution, detection, ROI filter, burst tracking + line crossings. |
 | [`app/reid.py`](src/app/reid.py) | Appearance-based re-identification registry (SQLite). |
@@ -996,4 +635,4 @@ python -m app.detect_core --resolve konya_hukumet,otogar_kavsagi
 | [`tools/roi_grid.py`](src/tools/roi_grid.py) | Capture a frame with a coordinate grid to configure ROI/line polygons. |
 | [`tools/search_by_image.py`](src/tools/search_by_image.py) | CLI for search-by-example (+ demo index seeding from still images). |
 | [`web/`](src/web/) | Static HTML/JS dashboard. |
-| [`docs/PROJECT_GUIDE.md`](src/docs/PROJECT_GUIDE.md) / [`PROJECT_GUIDE_HE.md`](src/docs/PROJECT_GUIDE_HE.md) | Single consolidated project guide (English + verbose Hebrew): architecture, VM setup + commands + rebuild, live analysis layers, notebook, Firebase, Cloudflare proxy, billing kill-switch. |
+| [`docs/PROJECT_GUIDE.md`](src/docs/PROJECT_GUIDE.md) / [`PROJECT_GUIDE_HE.md`](src/docs/PROJECT_GUIDE_HE.md) | Single consolidated project guide (English + verbose Hebrew): architecture, VM setup + commands + rebuild, Firebase, Cloudflare proxy, billing kill-switch. |

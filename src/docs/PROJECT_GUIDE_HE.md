@@ -1,14 +1,12 @@
 <div dir="rtl">
 
-# מדריך הפרויקט — פעילות מסחרית / Live Footfall
+# מדריך הפרויקט - פעילות מסחרית / Live Footfall
 
-מסמך הפעלה מאוחד ומפורט לפרויקט כולו: איך המערכת עובדת, איך הניתוחים עובדים,
+מסמך הפעלה מאוחד ומפורט לפרויקט: איך המערכת עובדת, איך הניתוחים עובדים,
 איך ה-VM עובד ואילו פקודות מפעילות אותו. מאחד לקובץ אחד את כל מה שהיה
 פזור בשישה מסמכים נפרדים (`deploy/gcp-vm/README.md`, `deploy/REBUILD.md`,
 `deploy/cloudflare-proxy/README.md`, `deploy/gcp-billing-killswitch/README.md`,
-`docs/firebase_setup.md` ו-`MODEL_GUIDE_HE.md` הישן). התאום האנגלי של המסמך
-הזה — עם אותו מספר פרקים ואותם עוגנים — נמצא ב-[`PROJECT_GUIDE.md`](PROJECT_GUIDE.md),
-כך שהפניות עוברות בשני הכיוונים.
+`docs/firebase_setup.md` ו-`MODEL_GUIDE_HE.md` הישן).
 
 </div>
 
@@ -18,21 +16,20 @@
 
 ## ניווט מהיר
 
-1. [מה המערכת עושה בסך הכל](#1-מה-המערכת-עושה-בסך-הכל)
-2. [ארכיטקטורה — איפה כל דבר רץ](#2-ארכיטקטורה--איפה-כל-דבר-רץ)
-3. [ה-VM — צלילה מלאה](#3-ה-vm--צלילה-מלאה)
+1. [מה המערכת עושה](#1-מה-המערכת-עושה)
+2. [ארכיטקטורה - איפה כל דבר רץ](#2-ארכיטקטורה---איפה-כל-דבר-רץ)
+3. [ה-VM - צלילה מלאה](#3-ה-vm---צלילה-מלאה)
 4. [שולחן הפקודות של ה-VM](#4-שולחן-הפקודות-של-ה-vm)
 5. [10 שכבות הניתוח החי](#5-10-שכבות-הניתוח-החי)
-6. [ניתוח חלון עמוק (`behavior.analyze_window`)](#6-ניתוח-חלון-עמוק-behavioranalyze_window)
-7. [המחברת — אנליטיקה מקומית](#7-המחברת--אנליטיקה-מקומית)
+6. [ניתוח חלון עמוק](#6-ניתוח-חלון-עמוק-behavioranalyze_window)
+7. [המחברת](#7-המחברת)
 8. [בחירת המודל והפרמטרים](#8-בחירת-המודל-והפרמטרים)
 9. [אנומליות ודיווח](#9-אנומליות-ודיווח)
 10. [לולאת הלמידה הפעילה](#10-לולאת-הלמידה-הפעילה)
 11. [הגדרות פרויקט Firebase](#11-הגדרות-פרויקט-firebase)
-12. [‏Cloudflare Worker ל-IBB](#12-cloudflare-worker-ל-ibb)
+12. [Cloudflare Worker ל-IBB](#12-cloudflare-worker-ל-ibb)
 13. [ה-Killswitch של החיוב ב-GCP](#13-ה-killswitch-של-החיוב-ב-gcp)
 14. [תקלות נפוצות ותשובות](#14-תקלות-נפוצות-ותשובות)
-15. [נספח: החלטות עיצוב שהתקבלו](#15-נספח-החלטות-עיצוב-שהתקבלו)
 
 </div>
 
@@ -40,79 +37,64 @@
 
 <div dir="rtl">
 
-## 1. מה המערכת עושה בסך הכל
+## 1. מה המערכת עושה
 
 המערכת ממירה 4 מצלמות רחוב פומביות לזרם נתונים כמותי:
 
-> **‏Live HLS stream → YOLOv8 frame inference → counts + appearance re-ID →
-> Firestore → real-time web dashboard + Jupyter analytics.**
+> **Live HLS stream -> YOLOv8 frame inference -> counts + appearance re-ID ->
+> Firestore -> real-time web dashboard + Jupyter analytics.**
 
-בכל סבב דגימה (‏40 שניות בפריסת הענן שנכתבה בקוד; ‏`--interval` קובע אותו),
-הקולקטור אוסף burst של פריימים מכל מצלמה פעילה, מריץ YOLO על כל פריים,
-מחשב ספירות מדוללות + חתימות מראה + שערי אנומליה, ואז כותב את התוצאה
-ל-Firestore. הדשבורד באתר נרשם עם `onSnapshot` — בלי polling, בלי refresh;
-כל כתיבה של הקולקטור מופיעה מיד.
+בכל סבב דגימה (40 שניות בפריסת הענן; `--interval` קובע אותו), הקולקטור
+אוסף burst של פריימים מכל מצלמה פעילה, מריץ YOLO על כל פריים, מחשב ספירות
+מדוללות + חתימות מראה + שערי אנומליה, ואז כותב את התוצאה ל-Firestore.
+הדשבורד באתר נרשם עם `onSnapshot`, בלי polling ובלי refresh; כל כתיבה של
+הקולקטור מופיעה מיד.
 
-הגריד הוא **גנרי-מדינתי**: הוא תמיד מריץ 4 מצלמות ממדינה **אחת** וסובב לפי
-סולם עדיפויות (**טורקיה ← תאילנד ← יפן ← ארה"ב**), נופל למדינה הבאה רק
-כשהמדינה הפעילה כולה חשוכה. טורקיה היא נושא הפרויקט; מ-GCP הזרם של IBB
-איסטנבול חסום גיאוגרפית, לכן בפועל הגריד רץ בדרך כלל על ספסלי החו"ל
-(מצלמות רחוב מגובות YouTube-Live) עד שגם Cloudflare Worker ב-ASN שאיננו של
-גוגל מחזיר את IBB (ראה פרק 12).
+הגריד הוא **גנרי-מדינתי**: הוא תמיד מריץ 4 מצלמות ממדינה **אחת** וסובב
+לפי סולם עדיפויות (**טורקיה -> תאילנד -> יפן -> ארה"ב**), נופל למדינה
+הבאה רק כשהמדינה הפעילה כולה חשוכה. טורקיה היא נושא הפרויקט; מ-GCP הזרם
+של IBB איסטנבול חסום גיאוגרפית, לכן בפועל הגריד רץ בדרך כלל על ספסלי
+החו"ל (מצלמות רחוב מגובות YouTube-Live) עד ש-Cloudflare Worker ב-ASN
+שאיננו של גוגל מחזיר את IBB (ראה פרק 12).
 
 **מה מפיקה המערכת:**
 
-- **‏Footfall** — כמה אנשים / כלי רכב פר מצלמה פר סבב.
-- **‏Re-identification** — זיהוי-מחדש של אותה ישות (אדם או רכב) לאורך זמן
+- **Footfall** - כמה אנשים / כלי רכב פר מצלמה פר סבב.
+- **Re-identification** - זיהוי-מחדש של אותה ישות (אדם או רכב) לאורך זמן
   (חתימות OSNet כאשר קובץ ה-ONNX קיים, hist HSV אחרת).
-- **אנומליות** — עומס קיצוני, חסימת מצלמה, החשכה, שהייה ממושכת, מבקר חוזר,
-  חפץ נטוש, חשד לנפילה.
-- **מהירות אופיינית של רכבים בקמ"ש** (מוצגת רק כשלמצלמה יש מסה סטטיסטית
-  אמיתית: לפחות 5 דגימות ולפחות 10% מהסבבים; רחבת הולכי-רגל בלי תנועה אמיתית
-  מקבלת "-" במקום מספר מומצא).
-- **דוח PDF** במייל לפי דרישה (כפתור "Send Report" בדשבורד); דיגסט מתוזמן
-  פעמיים ביום נשלח אך ורק לתיבת הארכיון של הפרויקט.
+- **אנומליות** - עומס קיצוני, חסימת מצלמה, החשכה, שהייה ממושכת, מבקר
+  חוזר, חפץ נטוש, חשד לנפילה.
+- **מהירות אופיינית של רכבים בקמ"ש** - מוצגת רק כשלמצלמה יש מסה
+  סטטיסטית: לפחות 5 דגימות ולפחות 10% מהסבבים; רחבת הולכי-רגל בלי תנועה
+  מקבלת "-" במקום מספר.
+- **דוח PDF** במייל לפי דרישה (כפתור "Send Report" בדשבורד); דיגסט
+  מתוזמן פעמיים ביום נשלח אך ורק לתיבת הארכיון של הפרויקט.
 
 הכל רץ על מסלולים חינמיים: מודל בקוד פתוח, GCP `e2-micro` במסלול Always
 Free ($0/חודש), GitHub Actions על ריפו ציבורי, Firebase Spark plan.
 
-### 1.1 שני זמני-ריצה, אותו קוד בסיס
+### 1.1 סולם ה-fallback של המדינות
 
-| | ‏VM בענן (‏פרודקשן 24/7) | מחברת מקומית (הפניה לדיוק) |
-|---|---|---|
-| מארח | GCP `e2-micro` (1 GB RAM) | כל מחשב נייד |
-| דטקטור | `yolov8s.pt` @ `imgsz 640` (‏fallback לזיכרון: `yolov8n.pt` @ 768) | `yolo26m.pt` @ `imgsz 960` |
-| ייעוד | רץ לנצח, מזין את הדשבורד + הדוחות | ניתוח עמוק; משמש גם כמקור-אמת (‏ground-truth) לצורך ה-calibration |
-| זרימת נתונים | Firestore + Firebase Storage | ‏CSV cache מקומי הנמשך מ-Firestore |
-| קובץ המחברת | — | `turkey_business_activity.ipynb` (בגיט, `MODEL_WEIGHTS = 'yolo26m.pt'`) |
-| מחברת תאומה | — | `turkey_business_activity_yolov8n.ipynb` (מקומית בלבד, ב-`.gitignore`; משקפת את מודל ה-VM כדי להשוות ‏apples-to-apples על אותה מצלמה) |
-
-התאומה נשמרת בכוונה מחוץ לגיט: היא עותק ידני של המחברת הראשית עם
-`MODEL_WEIGHTS = 'yolov8s.pt'` (או `yolov8n.pt`), כדי שהמפעיל יראה על
-המחשב שלו בדיוק מה שה-VM היה רואה על אותו פריים.
-
-### 1.2 סולם ה-fallback של המדינות
-
-הקולקטור לעולם לא נעול על קבוצת מצלמות קבועה. מחלקה בשם `CountryDirector`
+הקולקטור לא נעול על קבוצת מצלמות קבועה. מחלקה בשם `CountryDirector`
 מנהלת שני סולמות מקוננים:
 
-- **סולם המדינות (עדיפות):** טורקיה ← תאילנד ← יפן ← ארה"ב. הגריד מציג 4
-  מצלמות ממדינה אחת ועובר למדינה הבאה **רק** כשהמדינה הפעילה לא יכולה
-  להעמיד ולו מצלמה חיה אחת. מצלמה בודדת שנפלה לא מזיזה את הגריד — מצלמה
-  מהספסל של אותה מדינה מחליפה אותה.
+- **סולם המדינות (עדיפות):** טורקיה -> תאילנד -> יפן -> ארה"ב. הגריד
+  מציג 4 מצלמות ממדינה אחת ועובר למדינה הבאה **רק** כשהמדינה הפעילה לא
+  יכולה להעמיד ולו מצלמה חיה אחת. מצלמה בודדת שנפלה לא מזיזה את הגריד;
+  מצלמה מהספסל של אותה מדינה מחליפה אותה.
 - **סולם המצלמות (בתוך כל מדינה):** מחלקת `CameraPool` עוברת על רשימת
-  המצלמות של המדינה ומקצה כל סבב את 4 המצלמות החיות הראשונות (תמיד שונות);
-  מצלמה שהחטיאה 3 דגימות ברצף נחה 15 דקות; מצלמות `tvkur` (קוניה) הן מסלול
-  fail-fast — החמצה אחת מספיקה כדי להרגיע אותן.
-- **מנתק-זרם ברמת ה-host** (`HostBreaker`): 4 סירובי גישה רצופים (‏HTTP
-  403/429) — כל מצלמות ה-host נחות 20 דקות ובקשת גישוש בודדת מחזירה אותן.
-  ‏CDN חוסם מקבל ~3 בקשות בשעה במקום ~120.
-- **התאוששות לפני הדוח:** כמה דקות לפני כל דוח מתוזמן (‏12:00 ו-20:00 שעון
-  ישראל) הקולקטור מגשש שוב את המדינות בעדיפות גבוהה יותר, כדי שטורקיה תחזור
-  לגריד ברגע ש-IBB משתחררת.
+  המצלמות של המדינה ומקצה כל סבב את 4 המצלמות החיות הראשונות (תמיד
+  שונות); מצלמה שהחטיאה 3 דגימות ברצף נחה 15 דקות; מצלמות `tvkur`
+  (קוניה) הן מסלול fail-fast: החמצה אחת מספיקה כדי להרגיע אותן.
+- **מנתק-זרם ברמת ה-host** (`HostBreaker`): 4 סירובי גישה רצופים (HTTP
+  403/429) גורמים לכל מצלמות ה-host לנוח 20 דקות; בקשת גישוש בודדת
+  מחזירה אותן. CDN חוסם מקבל ~3 בקשות בשעה במקום ~120.
+- **התאוששות לפני הדוח:** כמה דקות לפני כל דוח מתוזמן (12:00 ו-20:00
+  שעון ישראל) הקולקטור מגשש שוב את המדינות בעדיפות גבוהה יותר, כדי
+  שטורקיה תחזור לגריד ברגע ש-IBB משתחררת.
 
-שדות הדוח בוחרים day/night לפי **אזור-הזמן של כל מצלמה** (הספסל האמריקאי לבדו
-משתרע על Eastern / Central / Pacific).
+שדות הדוח בוחרים day/night לפי **אזור-הזמן של כל מצלמה** (הספסל
+האמריקאי לבדו משתרע על Eastern / Central / Pacific).
 
 </div>
 
@@ -120,7 +102,7 @@ Free ($0/חודש), GitHub Actions על ריפו ציבורי, Firebase Spark pl
 
 <div dir="rtl">
 
-## 2. ארכיטקטורה — איפה כל דבר רץ
+## 2. ארכיטקטורה - איפה כל דבר רץ
 
 </div>
 
@@ -156,18 +138,20 @@ Free ($0/חודש), GitHub Actions על ריפו ציבורי, Firebase Spark pl
 
 מונחי מסגרת:
 
-- **‏VM** — Virtual Machine בענן של גוגל. הפרויקט משתמש ב-`e2-micro`,
-  המסלול הקטן ביותר של GCP (‏2 vCPU שיתופיים, 1 GB RAM), הנכלל ב-Always Free.
-- **‏Firestore** — מסד נתונים NoSQL של גוגל. הדשבורד נרשם ב-`onSnapshot`
+- **VM** - Virtual Machine בענן של גוגל. הפרויקט משתמש ב-`e2-micro`,
+  המסלול הקטן ביותר של GCP (2 vCPU שיתופיים, 1 GB RAM), הנכלל ב-Always
+  Free.
+- **Firestore** - מסד נתונים NoSQL של גוגל. הדשבורד נרשם ב-`onSnapshot`
   וכל כתיבה של הקולקטור מגיעה לדפדפן ללא polling.
-- **‏Firebase Storage** — דלי אחסון אובייקטים עבור snapshots JPEG וייצואי
+- **Firebase Storage** - דלי אחסון אובייקטים עבור snapshots JPEG וייצואי
   JSON של heatmap. מוגדר כלל lifecycle של 24 שעות על `snapshots/`.
-- **‏GitHub Actions** — ה-CI החינמי של GitHub. אימון הראש רץ שם על דקות של
-  ריפו ציבורי; הראש שקודם נוחת ב-Storage והקולקטור מבצע לו hot-swap ללא restart.
+- **GitHub Actions** - ה-CI החינמי של GitHub. אימון הראש רץ שם על דקות
+  של ריפו ציבורי; הראש שקודם נוחת ב-Storage והקולקטור מבצע לו hot-swap
+  ללא restart.
 
-**עיקרון מרכזי:** הדשבורד הוא **צרכן טהור**. כל מי שמשכפל (‏clone) את הריפו
-יכול להגיש את `web/` ולראות את אותו גריד חי — כי כל המצב שוכן ב-Firestore,
-וה-TTL של Firestore מנקה כל אוסף היסטוריה אחרי 24 שעות.
+הדשבורד הוא **צרכן טהור**. כל מי שמשכפל (clone) את הריפו יכול להגיש את
+`web/` ולראות את אותו גריד חי - כל המצב שוכן ב-Firestore, וה-TTL של
+Firestore מנקה כל אוסף היסטוריה אחרי 24 שעות.
 
 </div>
 
@@ -175,7 +159,7 @@ Free ($0/חודש), GitHub Actions על ריפו ציבורי, Firebase Spark pl
 
 <div dir="rtl">
 
-## 3. ה-VM — צלילה מלאה
+## 3. ה-VM - צלילה מלאה
 
 ### 3.1 המכונה עצמה
 
@@ -192,22 +176,22 @@ Zone        : us-east1-c (Virginia)
 Public IP   : ephemeral (rotates on stop/start; a static IP costs money)
 Instance ID : turkey-collector
 Project     : turkey-footfall
-Cost        : $0/month (Always Free — one e2-micro per account,
+Cost        : $0/month (Always Free - one e2-micro per account,
               us-central1 / us-east1 / us-west1 only)
 ```
 
 <div dir="rtl">
 
-**מה שחשוב לשים לב:**
+הערות:
 
-- **‏"0.25 vCPU guaranteed"** אומר שברירת המחדל היא רבע ליבה; יש burst עד
-  ~1 vCPU כאשר יש חלון פנוי בשרת המשותף. סבבים לפעמים לוקחים ~25% יותר זמן
-  בלי סיבה נראית לעין — זה מס-דיירים, לא באג.
-- **‏1 GB RAM זה מעט מאוד** למודל של 11M פרמטרים + 4 זרמי HLS פעילים
+- **"0.25 vCPU guaranteed"** אומר שברירת המחדל היא רבע ליבה; יש burst עד
+  ~1 vCPU כאשר יש חלון פנוי בשרת המשותף. סבבים לפעמים לוקחים ~25% יותר
+  זמן בגלל שיתוף המשאבים.
+- **1 GB RAM זה מעט מאוד** למודל של 11M פרמטרים + 4 זרמי HLS פעילים
   + OSNet. נוסף `/swapfile` של 2 GB ידנית (לא ב-`install.sh`) כביטחון;
   שיא נמדד ~273 MB.
-- **‏us-east1-c, לא קרוב לטורקיה** — ‏Always Free מוגבל לאזורים us-central1
-  / us-east1 / us-west1. ה-RTT לאיסטנבול הוא ~150ms, ולא חשוב כאן — דגימה
+- **us-east1-c, לא קרוב לטורקיה** - Always Free מוגבל לאזורים us-central1
+  / us-east1 / us-west1. ה-RTT לאיסטנבול הוא ~150ms ולא רלוונטי - דגימה
   מתבצעת כל 40 שניות, לכן ה-latency לא משפיע.
 
 ### 3.2 מבנה התיקיות ב-VM
@@ -225,7 +209,7 @@ Cost        : $0/month (Always Free — one e2-micro per account,
 │   │   ├── confidence_boost.json  ← "learned" per-(cam,cls) gate nudges
 │   │   ├── blacklist_auto.json    ← polygons של auto-blacklist
 │   │   ├── per_camera_conf.json   ← פלט WS4: gates מכוילי-precision
-│   │   └── adapters/              ← ראשים אחרי fine-tune (‏head-only)
+│   │   └── adapters/              ← ראשים אחרי fine-tune (head-only)
 │   │       ├── current.json       ← מצביע לראש הפעיל
 │   │       ├── history.jsonl      ← יומן קידומים/דחיות
 │   │       └── head_run<N>.pt     ← קובץ הראש עצמו
@@ -259,35 +243,36 @@ Cost        : $0/month (Always Free — one e2-micro per account,
 
 הערות:
 
-- הקולקטור רץ כ-root כי הוא צריך לקרוא את `serviceAccount.json` (מצב 0400
+- הקולקטור רץ כ-root כדי לקרוא את `serviceAccount.json` (מצב 0400
   root:root). שום דבר אחר ב-VM לא זקוק להרשאות מוגברות.
-- ‏`.venv/` נשלטת ברובה על ידי `torch` (~1.2 GB) ו-`ultralytics` (~200 MB).
-  אל תנסה לגזום — שניהם קריטיים לריצה.
-- כל מה שתחת `web/snapshots/` מתחדש תוך סבב אחד — בטוח למחוק לצורך restart נקי.
+- `.venv/` נשלטת ברובה על ידי `torch` (~1.2 GB) ו-`ultralytics`
+  (~200 MB). שניהם קריטיים לריצה.
+- כל מה שתחת `web/snapshots/` מתחדש תוך סבב אחד; בטוח למחוק לצורך
+  restart נקי.
 
 ### 3.3 התקנה
 
 **מקדימים (פעם אחת, בקונסולת GCP):**
 
-1. הפעל חיוב על הפרויקט (נדרש גם למכונות ‏free-tier).
+1. הפעל חיוב על הפרויקט (נדרש גם למכונות free-tier).
 2. הפעל APIs: Compute Engine, Secret Manager, Cloud Storage.
-3. ‏Secret Manager ← Create secret `firebase-sa`, הדבק את ה-JSON של מפתח
-   ‏Firebase Admin SDK כערך הסוד.
+3. Secret Manager -> Create secret `firebase-sa`, הדבק את ה-JSON של מפתח
+   Firebase Admin SDK כערך הסוד.
 4. הענק ל-`<PROJECT_NUMBER>-compute@developer.gserviceaccount.com` את
-   התפקיד **‏Secret Manager Secret Accessor** על `firebase-sa`.
-5. ‏Firestore console ← Time-to-live ← הוסף TTL על `footfall.expire_at`
+   התפקיד **Secret Manager Secret Accessor** על `firebase-sa`.
+5. Firestore console -> Time-to-live -> הוסף TTL על `footfall.expire_at`
    וגם על `events.expire_at`.
-6. ‏Firebase Console ← Storage ← Get started; ואז GCP ← Cloud Storage ←
-   הדלי ← Lifecycle ← מחק קבצים תחת `snapshots/` אחרי יום.
+6. Firebase Console -> Storage -> Get started; ואז GCP -> Cloud Storage
+   -> הדלי -> Lifecycle -> מחק קבצים תחת `snapshots/` אחרי יום.
 
-**‏Create the VM (‏Console ← Compute Engine ← Create instance):**
+**Create the VM (Console -> Compute Engine -> Create instance):**
 
 - שם: `turkey-collector`
 - אזור: `us-east1` (או `us-central1` / `us-west1`)
-- ‏Machine type: `e2-micro`
-- ‏Boot disk: Debian 12, Standard persistent disk, 30 GB
-- ‏Firewall: השאר HTTP/HTTPS לא מסומן (הקולקטור לא מאזין לשום דבר)
-- ‏Identity & API access: השאר את חשבון השירות הדיפולטיבי
+- Machine type: `e2-micro`
+- Boot disk: Debian 12, Standard persistent disk, 30 GB
+- Firewall: השאר HTTP/HTTPS לא מסומן (הקולקטור לא מאזין לשום דבר)
+- Identity & API access: השאר את חשבון השירות הדיפולטיבי
 
 **להתקין את הקולקטור (ברגע שה-VM עלה):**
 
@@ -302,28 +287,31 @@ curl -sSL https://raw.githubusercontent.com/orarr2/Turkey-Business-Activity-Stre
 
 <div dir="rtl">
 
-הסקריפט הוא idempotent — הרצה חוזרת היא הדרך הסטנדרטית לרענן קוד. ששת השלבים:
+הסקריפט הוא idempotent - הרצה חוזרת היא הדרך הסטנדרטית לרענן קוד. ששת
+השלבים:
 
-1. התקנת חבילות מערכת דרך `apt-get install`: ‏`git`, ‏`python3-venv`, ‏`ffmpeg`,
-   ה-‏shared libs של OpenCV, ‏`fonts-dejavu-core`.
-2. ‏Clone (או fetch + reset) של `/opt/turkey-footfall`.
-3. יצירת `.venv` והרצת `pip install -r requirements.txt` עם `TMPDIR=/var/tmp`
-   (מונע מיצוי של ה-`/tmp` שהוא ‏RAM-backed באמצע ההתקנה).
+1. התקנת חבילות מערכת דרך `apt-get install`: `git`, `python3-venv`,
+   `ffmpeg`, ה-shared libs של OpenCV, `fonts-dejavu-core`.
+2. Clone (או fetch + reset) של `/opt/turkey-footfall`.
+3. יצירת `.venv` והרצת `pip install -r requirements.txt` עם
+   `TMPDIR=/var/tmp` (מונע מיצוי של ה-`/tmp` שהוא RAM-backed באמצע
+   ההתקנה).
 4. משיכת מפתח Firebase Admin מ-Secret Manager אל
-   `/etc/turkey-footfall/serviceAccount.json` (‏mode 0400 root:root).
-5. זיהוי הדלי של Firebase Storage (תחילה `<project>.firebasestorage.app`,
-   ואז ה-legacy `<project>.appspot.com`); רינדור של תבניות ה-systemd units
-   עם `sed`; התקנה ל-`/etc/systemd/system/`.
-6. ‏`systemctl enable --now collector.service`; התקנת `digest.service`
-   ו-`digest.timer` (ה-timer מופעל רק אם `/etc/turkey-footfall/digest.env`
-   קיים).
+   `/etc/turkey-footfall/serviceAccount.json` (mode 0400 root:root).
+5. זיהוי הדלי של Firebase Storage (תחילה
+   `<project>.firebasestorage.app`, ואז ה-legacy
+   `<project>.appspot.com`); רינדור של תבניות ה-systemd units עם `sed`;
+   התקנה ל-`/etc/systemd/system/`.
+6. `systemctl enable --now collector.service`; התקנת `digest.service`
+   ו-`digest.timer` (ה-timer מופעל רק אם
+   `/etc/turkey-footfall/digest.env` קיים).
 
 **שלבים חד-פעמיים לאחר ההתקנה שאינם מכוסים על ידי `install.sh`:**
 
 </div>
 
 ```bash
-# swap של 2 GB — ה-VM של 1 GB זקוק לזה (שיא נמדד: 273 MB בשימוש)
+# swap של 2 GB - ה-VM של 1 GB זקוק לזה (שיא נמדד: 273 MB בשימוש)
 sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
 sudo mkswap /swapfile && sudo swapon /swapfile
 echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
@@ -336,7 +324,7 @@ EOF
 sudo chmod 600 /etc/turkey-footfall/digest.env
 sudo systemctl enable --now digest.timer
 
-# ‏Cloudflare-Worker relay ל-IBB (ראה פרק 12 להגדרת wrangler)
+# Cloudflare-Worker relay ל-IBB (ראה פרק 12 להגדרת wrangler)
 sudo tee /etc/turkey-footfall/proxy.env > /dev/null <<'EOF'
 IBB_PROXY_URL=https://ibb-proxy.<subdomain>.workers.dev
 IBB_PROXY_SECRET=<same secret you set on the worker>
@@ -350,9 +338,9 @@ sudo bash /opt/turkey-footfall/src/tools/setup_reid.sh
 
 <div dir="rtl">
 
-### 3.4 ‏`collector.service` — יחידת ה-systemd
+### 3.4 `collector.service` - יחידת ה-systemd
 
-התבנית נמצאת ב-`src/deploy/gcp-vm/collector.service`; ‏`install.sh` מרנדר
+התבנית נמצאת ב-`src/deploy/gcp-vm/collector.service`; `install.sh` מרנדר
 אותה עם `sed -e 's|__INSTALL_DIR__|/opt/turkey-footfall|g' ...` לפני
 כתיבה ל-`/etc/systemd/system/`. השורות המרכזיות ומה הן עושות:
 
@@ -365,23 +353,22 @@ Environment=OMP_NUM_THREADS=2
 
 Environment=MALLOC_ARENA_MAX=2
 # glibc מגדל arena אחת ל-thread כברירת מחדל (~50-150 MB של RSS על תהליך
-# פייתון מרובה threads). עלות ממשית במכונה של 1 GB שנהרגה בעבר על ידי
-# kernel oom-killer ב-696 MB peak.
+# פייתון מרובה threads). עלות ממשית במכונה של 1 GB.
 
 Environment=FIREBASE_CREDENTIALS=/etc/turkey-footfall/serviceAccount.json
 Environment=FIREBASE_STORAGE_BUCKET=<detected at install time>
 Environment=REID_MODEL=/opt/turkey-footfall/src/data/osnet_x0_25_msmt17.onnx
 
 EnvironmentFile=-/etc/turkey-footfall/proxy.env
-# ‏IBB relay + secret אופציונלי; כשהקובץ חסר הקולקטור רץ ללא שינוי
+# IBB relay + secret אופציונלי; כשהקובץ חסר הקולקטור רץ ללא שינוי
 # (IBB נשאר 403 מ-GCP, גריד טורקיה תלוי בשכבת ה-YouTube בלבד).
 
 Environment=EXTRA_CLASSES=bird:0.35,dog:0.35,cat:0.40,backpack:0.35,handbag:0.40,suitcase:0.35,umbrella:0.35
-# ‏fix1: תיקים מזינים את מעקב-חפץ-נטוש; חיות + שמשיות מקבלות ספירה נפרדת
+# תיקים מזינים את מעקב-חפץ-נטוש; חיות + שמשיות מקבלות ספירה נפרדת
 # (שורת "other objects" בדוח). זיהוי בלבד, לעולם לא אימון.
 
 Environment=FALL_CHECK=1
-# ‏fix1-A11: אירוע person-loiter מפעיל pose pass אחד על ה-crop של אותו אדם;
+# אירוע person-loiter מפעיל pose pass אחד על ה-crop של אותו אדם;
 # torso אופקי מעלה את ההתראה ל-"Possible FALL".
 
 ExecStart=/opt/turkey-footfall/src/.venv/bin/python \
@@ -397,12 +384,13 @@ MemoryMax=900M
 
 <div dir="rtl">
 
-**חשוב לעדכוני קוד:** ‏`git pull` בתוספת ‏`systemctl restart` מספיקים לבדם —
-ה-unit המותקן נושא שורות ‏`Environment=` ‏machine-local (‏`FIREBASE_CREDENTIALS`,
-‏`FIREBASE_STORAGE_BUCKET`, ‏`REID_MODEL`) שבכוונה אינן ב-template שבגיט.
-דריסה של ה-unit המותקן מה-template **מוחקת** את השורות האלה, והקולקטור נכנס
-ל-crash-loop עם `FileNotFoundError: Firebase service-account JSON not found`.
-כדי לשנות דגל, ערוך את ה-unit המותקן במקומו:
+**חשוב לעדכוני קוד:** `git pull` בתוספת `systemctl restart` מספיקים
+לבדם - ה-unit המותקן נושא שורות `Environment=` machine-local
+(`FIREBASE_CREDENTIALS`, `FIREBASE_STORAGE_BUCKET`, `REID_MODEL`)
+שבכוונה אינן ב-template שבגיט. דריסה של ה-unit המותקן מה-template
+**מוחקת** את השורות האלה, והקולקטור נכנס ל-crash-loop עם
+`FileNotFoundError: Firebase service-account JSON not found`. כדי לשנות
+דגל, ערוך את ה-unit המותקן במקומו:
 
 </div>
 
@@ -414,13 +402,13 @@ sudo systemctl daemon-reload && sudo systemctl restart collector
 
 <div dir="rtl">
 
-### 3.5 ‏`digest.service` + ‏`digest.timer`
+### 3.5 `digest.service` + `digest.timer`
 
-הדיגסט היומי הפך ל-on-demand בלבד (דרך כפתור בדשבורד); ה-timer שרץ פעמיים
-ביום כותב עכשיו רק לתיבת הארכיון של הפרויקט. הפעלתו דורשת
+הדיגסט היומי הפך ל-on-demand בלבד (דרך כפתור בדשבורד); ה-timer שרץ
+פעמיים ביום כותב עכשיו רק לתיבת הארכיון של הפרויקט. הפעלתו דורשת
 `/etc/turkey-footfall/digest.env` עם `GMAIL_USER` ו-`GMAIL_APP_PASSWORD`.
 
-### 3.6 הלולאה הראשית — זרימת דגימה
+### 3.6 הלולאה הראשית - זרימת דגימה
 
 מפושט מ-`app/collector.py`:
 
@@ -446,40 +434,42 @@ while True:
 
 <div dir="rtl">
 
-כל ‏`sample_slot` תופס `burst` (ברירת מחדל 2 פריימים, `--burst-stride 13`
-פריימים במרווח = ~0.5s ב-25fps), מריץ `detect_and_count`, מפעיל ‏ROI +
-פילטרי gate + polygons של auto-blacklist, ואז מאחד את ה-burst על ידי חציון
-(תיבות מזויפות בפריים בודד לא יכולות למשוך את ה-bin למעלה).
+כל `sample_slot` תופס `burst` (ברירת מחדל 2 פריימים, `--burst-stride 13`
+פריימים במרווח = ~0.5s ב-25fps), מריץ `detect_and_count`, מפעיל ROI +
+פילטרי gate + polygons של auto-blacklist, ואז מאחד את ה-burst על ידי
+חציון (תיבות מזויפות בפריים בודד לא יכולות למשוך את ה-bin למעלה).
 
 ### 3.7 מודל הזיכרון
 
-המגבלות ‏`MemoryHigh=760M / MemoryMax=900M` יחד עם ה-envs `MALLOC_ARENA_MAX=2`
-ו-`OMP_NUM_THREADS=2` וה-`/swapfile` של 2 GB — הן שמאפשרות לכל זה להיכנס
-פיזית ל-RAM של 1 GB. סטטוס יציב שנמדד לאחר עדכון הדיוק של 2026-08-05
-(4 מצלמות, ‏`burst 2`, ‏`yolov8s @ 640`): ‏RSS של ~410 MB, ‏96-100% CPU idle,
-‏swap 0-30 MB.
+המגבלות `MemoryHigh=760M / MemoryMax=900M` יחד עם ה-envs
+`MALLOC_ARENA_MAX=2` ו-`OMP_NUM_THREADS=2` וה-`/swapfile` של 2 GB
+מאפשרות לכל זה להיכנס פיזית ל-RAM של 1 GB. סטטוס יציב שנמדד (4 מצלמות,
+`burst 2`, `yolov8s @ 640`): RSS של ~410 MB, 96-100% CPU idle, swap
+0-30 MB.
 
 אם היומן מראה אחד מהמצבים הבאים, עבור ל-`yolov8n @ 768`:
 
-- ‏Reclaim throttling (הודעות `memory pressure` ב-`journalctl -u collector`)
-- ‏Kernel oom-kill loops (`Killed process ... (python)` ב-`journalctl -k`)
-- סבבים שנמתחים מעבר ל-interval (`! round took Ns > interval` ב-app log;
-  התווית "counts from Ns ago" בדשבורד מסמנת אדום)
+- Reclaim throttling (הודעות `memory pressure` ב-`journalctl -u
+  collector`)
+- Kernel oom-kill loops (`Killed process ... (python)` ב-`journalctl
+  -k`)
+- סבבים שנמתחים מעבר ל-interval (`! round took Ns > interval` ב-app
+  log; התווית "counts from Ns ago" בדשבורד מסמנת אדום)
 
 ### 3.8 מבנה Firestore
 
-| קולקציה | ‏Rows/day | צורת document | גישת client |
+| קולקציה | Rows/day | צורת document | גישת client |
 |---|---|---|---|
-| ‏`footfall/{auto}` | ~17k | `{cam_id, ts, person, vehicles, ok, night, expire_at}` (TTL 24h) | קריאה בלבד |
-| ‏`latest/{cam_id}` | ~2.16k (‏upserts) | דגימה אחרונה פר מצלמה | קריאה בלבד |
-| ‏`reid_stats/{cam_id}` | ‏upsert יומי | ספירות unique / seen-again | קריאה בלבד |
-| ‏`events/{auto}` | ~0-50 | אירועי אנומליה (‏TTL 24h) | קריאה בלבד |
-| ‏`config/grid` | ‏1 doc | 4 המצלמות הנוכחיות + מדינה פעילה | קריאה בלבד |
-| ‏`training_events/{auto}` | 1 לקידום | ‏mAP + labels_total לעקומת ה-AL | קריאה בלבד |
+| `footfall/{auto}` | ~17k | `{cam_id, ts, person, vehicles, ok, night, expire_at}` (TTL 24h) | קריאה בלבד |
+| `latest/{cam_id}` | ~2.16k (upserts) | דגימה אחרונה פר מצלמה | קריאה בלבד |
+| `reid_stats/{cam_id}` | upsert יומי | ספירות unique / seen-again | קריאה בלבד |
+| `events/{auto}` | ~0-50 | אירועי אנומליה (TTL 24h) | קריאה בלבד |
+| `config/grid` | 1 doc | 4 המצלמות הנוכחיות + מדינה פעילה | קריאה בלבד |
+| `training_events/{auto}` | 1 לקידום | mAP + labels_total לעקומת ה-AL | קריאה בלבד |
 
-מכסת Spark plan: 20,000 כתיבות/יום. ב-`--interval 40` הקולקטור משתמש ב-~17k
-(4 slots × 2 writes/round × 2160 samples/day). העלאת `--interval` ל-60 שניות
-מכניסה את זה בהחלט מתחת למכסה.
+מכסת Spark plan: 20,000 כתיבות/יום. ב-`--interval 40` הקולקטור משתמש
+ב-~17k (4 slots × 2 writes/round × 2160 samples/day). העלאת `--interval`
+ל-60 שניות מכניסה את זה בהחלט מתחת למכסה.
 
 ### 3.9 מבנה Firebase Storage
 
@@ -490,8 +480,8 @@ snapshots/
 ├── review_frames/<cam>/<ts>_uNN.jpg   ← תור התיוג (LRU בדיסק ה-VM, נשלח ל-Storage באצווה)
 ├── live_samples/<cam>/<ts>_<cls>.jpg  ← crops לחיפוש חזותי
 ├── entities/<eid>/<ts>.jpg            ← per-entity crops (עד 6 ליישות)
-├── anomalies/<cam>/<ts>.jpg           ← ראיות אנומליה (‏24h lifecycle)
-├── heatmaps/<cam>.jpg                 ← ‏overlay פר-מצלמה (רענון אחרון)
+├── anomalies/<cam>/<ts>.jpg           ← ראיות אנומליה (24h lifecycle)
+├── heatmaps/<cam>.jpg                 ← overlay פר-מצלמה (רענון אחרון)
 └── heatmaps/<cam>.json                ← ה-grid המלא per-daypart × per-layer
 training/
 ├── labels/                             ← verdicts של המפעיל שהועלו על ידי training_sync
@@ -501,12 +491,12 @@ training/
 
 <div dir="rtl">
 
-### 3.10 ‏Hot-swap של ה-Detect head
+### 3.10 Hot-swap של ה-Detect head
 
 כל 30 סבבים הקולקטור בודק את `data/adapters/current.json`, ואם המצביע
-השתנה — קורא ל-`adapters.overlay_head(model, head_state_dict)` — זה
-מטייל על ה-Detect module ומעתיק את ה-tensors של הראש במקום. אין restart,
-אין קפיצת זיכרון, אין הפרעה לדגימה. גיבוי: אם `current.json` חסר או לא
+השתנה, קורא ל-`adapters.overlay_head(model, head_state_dict)` - זה מטייל
+על ה-Detect module ומעתיק את ה-tensors של הראש במקום. אין restart, אין
+קפיצת זיכרון, אין הפרעה לדגימה. גיבוי: אם `current.json` חסר או לא
 קריא, מודל הבסיס רץ ללא שינוי (byte-identical).
 
 </div>
@@ -517,7 +507,7 @@ training/
 
 ## 4. שולחן הפקודות של ה-VM
 
-### 4.1 ‏SSH פנימה
+### 4.1 SSH פנימה
 
 שלוש דרכי כניסה, כולן מגיעות לאותו `turkey-collector`:
 
@@ -570,7 +560,7 @@ sudo journalctl -u collector --since "15 min ago" \
 </div>
 
 ```bash
-# המסלול הסטנדרטי — בטוח גם עם היסטוריה שנדחפה force-pushed
+# המסלול הסטנדרטי - בטוח גם עם היסטוריה שנדחפה force-pushed
 sudo git -C /opt/turkey-footfall fetch origin main && \
   sudo git -C /opt/turkey-footfall reset --hard origin/main && \
   sudo systemctl restart collector
@@ -581,10 +571,11 @@ sudo /opt/turkey-footfall/src/deploy/gcp-vm/install.sh
 
 <div dir="rtl">
 
-לעולם אל תעשה ‏`sed ... | tee /etc/systemd/system/collector.service` מה-template
-בגיט — ה-unit המותקן נושא שורות ‏Environment= ‏machine-local (ראה 3.4).
+לעולם אל תעשה `sed ... | tee /etc/systemd/system/collector.service`
+מה-template בגיט - ה-unit המותקן נושא שורות Environment= machine-local
+(ראה 3.4).
 
-### 4.5 בטריית health-check — האם ה-VM באמת מזין את הדוח?
+### 4.5 בטריית health-check - האם ה-VM באמת מזין את הדוח?
 
 הרץ את זה לפני שאתה סומך על דוח כלשהו:
 
@@ -594,7 +585,7 @@ sudo /opt/turkey-footfall/src/deploy/gcp-vm/install.sh
 # 1. השירות חי
 sudo systemctl status collector --no-pager | head -12
 
-# 2. דגימה חיה — want slot_1..4 עם ספירות אמיתיות מתגלגלות כל ~40 שניות
+# 2. דגימה חיה - want slot_1..4 עם ספירות אמיתיות מתגלגלות כל ~40 שניות
 sudo journalctl -u collector -f --no-hostname | grep --line-buffered -E "slot_|MISS|country"
 
 # 3. יחס success/miss, 15 דקות אחרונות
@@ -610,7 +601,7 @@ sudo journalctl -u collector --since "6h" | grep -iE "oom-kill|Killed process|ou
 # 6. env של IBB proxy מחוברים (ערכים חסויים; want 2)
 sudo grep -c -E "IBB_PROXY_URL|IBB_PROXY_SECRET" /etc/turkey-footfall/proxy.env
 
-# 7. DECISIVE end-to-end — תופס פריים אמיתי מטורקיה עכשיו
+# 7. DECISIVE end-to-end - תופס פריים אמיתי מטורקיה עכשיו
 sudo bash -c 'set -a; . /etc/turkey-footfall/proxy.env; set +a; \
   cd /opt/turkey-footfall/src && timeout 90 .venv/bin/python - <<PY
 from app.cameras import CAMERAS
@@ -642,8 +633,8 @@ sudo du -sh /opt/turkey-footfall/src/web/snapshots  # מטמון אנומליו�
 
 ### 4.7 החלפת ה-IP החיצוני
 
-לפעמים IP חדש מנקה rate-block של CDN. מחיקה והוספה מחדש של ה-access config
-מחליפה את ה-IP בלי reboot:
+לפעמים IP חדש מנקה rate-block של CDN. מחיקה והוספה מחדש של ה-access
+config מחליפה את ה-IP בלי reboot:
 
 </div>
 
@@ -662,11 +653,11 @@ gcloud compute instances describe turkey-collector --zone=us-east1-c \
 ### 4.8 בנייה מחדש מאפס
 
 ה-VM חד-פעמי בכוונה. שלושה סודות שורדים: מפתח Firebase Admin (מונפק
-מחדש מ-Firebase Console ← Service accounts ← Generate new private key),
-סוד ה-IBB relay (`wrangler secret put PROXY_SECRET`), וסיסמת אפליקציה
-של Gmail (‏`myaccount.google.com/apppasswords`).
+מחדש מ-Firebase Console -> Service accounts -> Generate new private
+key), סוד ה-IBB relay (`wrangler secret put PROXY_SECRET`), וסיסמת
+אפליקציה של Gmail (`myaccount.google.com/apppasswords`).
 
-**מסלול א' — בנייה מחדש ב-GCP (מכונה זהה):**
+**מסלול א' - בנייה מחדש ב-GCP (מכונה זהה):**
 
 </div>
 
@@ -687,10 +678,10 @@ gcloud compute ssh turkey-collector --zone=us-east1-c --project=turkey-footfall 
 
 <div dir="rtl">
 
-**מסלול ב' — בנייה מחדש בכל ספק לינוקס אחר:**
+**מסלול ב' - בנייה מחדש בכל ספק לינוקס אחר:**
 
-דרישות: ‏Debian 12/13 או Ubuntu, x86_64, 1 GB+ RAM (עם שלב ה-swap),
-~20 GB דיסק, אינטרנט יוצא. הקולקטור לא מאזין לשום דבר. ‏`install.sh`
+דרישות: Debian 12/13 או Ubuntu, x86_64, 1 GB+ RAM (עם שלב ה-swap),
+~20 GB דיסק, אינטרנט יוצא. הקולקטור לא מאזין לשום דבר. `install.sh`
 מניח image של GCP; אצל ספק אחר, הרץ את השלבים ידנית ושים את המפתח של
 Firebase ביד:
 
@@ -723,8 +714,9 @@ sudo systemctl enable --now collector.service
 <div dir="rtl">
 
 לאחר מכן החל את שלבי ה-swap, ה-env files וה-timer של מסלול א'. מצלמות
-איסטנבול עובדות מכל ASN ש-Cloudflare מגיע אליו; ‏ASN residential לא בהכרח
-זקוק ל-relay — בדוק עם `python -m tools.probe_country --country turkey`.
+איסטנבול עובדות מכל ASN ש-Cloudflare מגיע אליו; ASN residential לא
+בהכרח זקוק ל-relay - בדוק עם
+`python -m tools.probe_country --country turkey`.
 
 ### 4.9 הסרה
 
@@ -749,38 +741,34 @@ sudo systemctl daemon-reload
 
 ## 5. 10 שכבות הניתוח החי
 
-מאז fix 2 (‏2026-08), כל אריח בדשבורד יכול להריץ ניתוח חי על אותה מצלמה
-שהוא מנגן. מאז שיקום הניתוח החי (‏2026-08-14) האריח **ממשיך לנגן וידאו
-מלא**, והניתוח מצויר על קנבס שקוף מעל הווידאו, מוזן מ-
-`GET /api/analysis/data` (‏JSON של השכבה, poll כל 500ms); ה-JPEG המנותח
-(‏`/api/analysis/frame`) נשאר כ-fallback כשהווידאו לא מוכח כמתקדם. עד 4
-סשנים בגריד (אחד לכל אריח). מעבר בין שכבות באריח **משנה** את הסשן
-במקום — הזרם, ה-tracker וכל המצברים (‏heat, מונים, מונה מחוות) שורדים את
-המעבר. ה-VM לא מעורב; הכול רץ ב-`app/live_analysis.py` על מכונת המפעיל,
-על מנוע `yolov8s` המשותף (המחברת עצמה רצה עם `yolo26m`; מנוע הניתוח החי
-בכוונה משתמש במודל החיפוש שכבר טעון במקום להחזיק מנוע שני בזיכרון).
+כל אריח בדשבורד יכול להריץ ניתוח חי על אותה מצלמה שהוא מנגן. האריח
+**ממשיך לנגן וידאו מלא**, והניתוח מצויר על קנבס שקוף מעל הווידאו, מוזן
+מ-`GET /api/analysis/data` (JSON של השכבה, poll כל 500ms); ה-JPEG
+המנותח (`/api/analysis/frame`) נשאר כ-fallback כשהווידאו לא מוכח
+כמתקדם. עד 4 סשנים בגריד (אחד לכל אריח). מעבר בין שכבות באריח **משנה**
+את הסשן במקום - הזרם, ה-tracker וכל המצברים (heat, מונים, מונה מחוות)
+שורדים את המעבר. ה-VM לא מעורב; הכול רץ ב-`app/live_analysis.py` על
+מכונת המפעיל, על מנוע `yolov8s` המשותף.
 
-**למה התיבות נדבקות לעצם ולא קופאות בין טיקים (שכתוב 15.08):**
-הנגן רץ תמיד קצת מאחורי קצה-החי, אז הטיק שמגיע **אחרי** הרגע שהמפעיל
-רואה כבר קיים בבאפר. לולאת הציור (‏15fps) בוחרת את שני הטיקים שמקיפים
-את `playingDate` של הווידאו ומבצעת **אינטרפולציה לינארית אמיתית פר-track**
-בין שתי המיקומים האמיתיים שלהם - בלי חיזוי, בלי snap: התיבה רוכבת על
-המסלול הפיזי הנמדד של העצם (גם הקיפוינטים באים בלרפ מפרק-מפרק). רק
-**מעבר** לטיק החדש ביותר יש נפילה חזרה לאקסטרפולציה לאורך מהירות
-ה-tracker (‏vx,vy בפיקסלים/שנייה, מוחלקת EMA), כל טיק חתום בזמן `at`
-בשעון הווידאו עצמו (שעון קיר פחות ההיסט מקצה-החי של הפלייליסט, נמדד
-מחדש בכל רענון). חלון האקסטרפולציה מותאם אדפטיבית ל-~1.3× מרווח-הטיקים
-הנמדד של הסשן (‏EMA), ומעבר לחלון התיבות **דוהות בחן** (‏alpha 1 → 0.35
-לאורך ~0.7× החלון) במקום לקפוא בהירות - תיבה מיושנת שדוהה בשקט היא
-כנה, קפואה-בהירה משקרת. שערי תצוגה: track מופיע רק אחרי 2 פגיעות רצופות
-ב-conf≥0.40, נעלם אחרי טיק אחד חסר; train/boat/airplane מסוננים לגמרי
-(בסצנת רחוב הם רק false positives).
+**דבקות התיבות לעצמים בין טיקים:** הנגן רץ קצת מאחורי קצה-החי, כך
+שהטיק שמגיע אחרי הרגע שהמפעיל רואה כבר קיים בבאפר. לולאת הציור (15fps)
+בוחרת את שני הטיקים שמקיפים את `playingDate` של הווידאו ומבצעת
+**אינטרפולציה לינארית פר-track** בין שתי המיקומים האמיתיים שלהם - בלי
+חיזוי, בלי snap: התיבה רוכבת על המסלול הפיזי הנמדד של העצם (גם
+הקיפוינטים באים בלרפ מפרק-מפרק). רק בטיק החדש ביותר יש נפילה חזרה
+לאקסטרפולציה לאורך מהירות ה-tracker (vx,vy בפיקסלים/שנייה, מוחלקת EMA);
+כל טיק חתום בזמן `at` בשעון הווידאו עצמו (שעון קיר פחות ההיסט מקצה-החי
+של הפלייליסט, נמדד מחדש בכל רענון). חלון האקסטרפולציה מותאם אדפטיבית
+ל-~1.3× מרווח-הטיקים הנמדד של הסשן (EMA), ומעבר לחלון התיבות דוהות
+בהדרגה (alpha 1 -> 0.35 לאורך ~0.7× החלון). שערי תצוגה: track מופיע רק
+אחרי 2 פגיעות רצופות ב-conf>=0.40, נעלם אחרי טיק אחד חסר;
+train/boat/airplane מסוננים לגמרי בסצנת רחוב.
 
-קצב כן, כפי שנמדד ב-2026-08-14 על מחשב המפעיל עם 4 סשנים ו-4 סרטונים
-מתנגנים: טיק חדש למצלמה כל ~12-15 שניות; סשן בודד לבדו: ~1-2 שניות לטיק.
-הווידאו לא נפגע — רק קצב שכבת הניתוח נמתח, והאקסטרפולציה שומרת אותו קריא.
+קצב נמדד עם 4 סשנים ו-4 סרטונים מתנגנים: טיק חדש למצלמה כל ~12-15
+שניות; סשן בודד לבדו: ~1-2 שניות לטיק. הווידאו לא נפגע; רק קצב שכבת
+הניתוח נמתח, והאקסטרפולציה שומרת אותו קריא.
 
-**הצינור המשותף (‏`LiveSession.run`, כל tick ≈ ‏TICK_TARGET_S = 0.8s):**
+**הצינור המשותף (`LiveSession.run`, כל tick =~ TICK_TARGET_S = 0.8s):**
 
 </div>
 
@@ -799,20 +787,22 @@ self._publish(img)                                # (ז) JPEG ללקוח
 
 <div dir="rtl">
 
-‏`INFER_LOCK` מסדר בטור כל קריאה למודל בתהליך הזה (‏Ultralytics `predict`
-לא thread-safe על מודל משותף). על CPU: סשן חי אחד — 1-2 fps, ארבעה במקביל —
-0.3-0.5 fps כל אחד — יורד בחן במקום להפיל את המודל.
+`INFER_LOCK` מסדר בטור כל קריאה למודל בתהליך הזה (Ultralytics `predict`
+לא thread-safe על מודל משותף). על CPU: סשן חי אחד - 1-2 fps, ארבעה
+במקביל - 0.3-0.5 fps כל אחד.
 
-**זיהוי המצלמה לאריח הנבחר:** ‏`resolve_cam` קודם מחפש `cam_id` בקטלוג
-(‏`app/cameras.py`); אם זה מפספס, קורא את `web/local_grid.json` (נכתב על ידי
-תא 33 במחברת) וממפה את ה-slot ל-dict של ‏`kind ∈ {youtube, hls, webcamera24, skyline}`.
-המצלמה שהמפעיל רואה בפועל היא בדיוק זו שנפתחת לניתוח.
+**זיהוי המצלמה לאריח הנבחר:** `resolve_cam` קודם מחפש `cam_id` בקטלוג
+(`app/cameras.py`); אם זה מפספס, קורא את `web/local_grid.json` (נכתב
+על ידי תא 33 במחברת) וממפה את ה-slot ל-dict של
+`kind ∈ {youtube, hls, webcamera24, skyline}`. המצלמה שהמפעיל רואה
+בפועל היא זו שנפתחת לניתוח.
 
-### 5.1 ‏Paths & speeds — ‏`draw_paths_layer`
+### 5.1 Paths & speeds - `draw_paths_layer`
 
 מסלולים + תיבות פר-track עם id + תגיות ("chips") של km/h. השכבה היחידה
-שמציגה תיבות זיהוי לכל המחלקות. היסטוריית ה-track מוגבלת ל-‏`TRAIL_MAX_PTS = 40`
-נקודות centroid; קו צבעוני נמתח דרך ה-centroids בצבע ה-track (יציב פר-id).
+שמציגה תיבות זיהוי לכל המחלקות. היסטוריית ה-track מוגבלת
+ל-`TRAIL_MAX_PTS = 40` נקודות centroid; קו צבעוני נמתח דרך ה-centroids
+בצבע ה-track (יציב פר-id).
 
 אומדן קמ"ש לרכבים מגיע מ-`track_stats`:
 
@@ -828,28 +818,27 @@ if real_len and speeds:
 
 <div dir="rtl">
 
-טווח השגיאה: ±30-50% (הרכב לא תמיד מקביל למישור התמונה). הדוח מציג את זה
-רק כשלמצלמה יש מסה סטטיסטית מספיקה (≥5 דגימות **וגם** ≥10% מהסבבים).
+טווח השגיאה: +/-30-50% (הרכב לא תמיד מקביל למישור התמונה). הדוח מציג
+את זה רק כשלמצלמה יש מסה סטטיסטית מספיקה (>=5 דגימות **וגם** >=10%
+מהסבבים).
 
 על הקנבס החי אותה שכבה מתייגת כל track ב**דרגת מהירות** במקום קמ"ש,
-מחושבת ב"אורכי גוף לשנייה": ‏`blps = מהירות_בפיקסלים_לשנייה / אלכסון_התיבה`.
-הסיבה: פיקסלים/שנייה תלויים במרחק מהמצלמה; חלוקה בגודל הנראה של האובייקט
-עצמו היא הנרמול היחיד שלא דורש כיול מצלמה, והיא הופכת הולך רגל קרוב
-ואופנוע רחוק לברי-השוואה. הדרגות: `static` < 0.05 (רק אחרי ≥3 פגיעות
-ו-≥4 שניות ותק, כדי ש-track טרי לעולם לא יתויג "static" בטעות),
-`slow` < 0.25, ‏`moving` < 0.8, ‏`fast` ≥ 0.8 (יורה אירוע לפס האירועים).
-צ'יפ הקמ"ש על ה-JPEG מוצג רק ב-≥8 קמ"ש עם ≥5 תצפיות - מתחת לזה הסרגל
-בדגימת-טיקים נמצא בתוך רצועת הרעש של עצמו (אודיט 14.08: אופנוע בנסיעה
-קיבל "2.3 קמ"ש"), ומספר שגוי גרוע מהיעדר מספר.
+מחושבת ב"אורכי גוף לשנייה":
+`blps = מהירות_בפיקסלים_לשנייה / אלכסון_התיבה`. חלוקה בגודל הנראה של
+האובייקט עצמו היא הנרמול היחיד שלא דורש כיול מצלמה, והיא הופכת הולך
+רגל קרוב ואופנוע רחוק לברי-השוואה. הדרגות: `static` < 0.05 (רק אחרי
+>=3 פגיעות ו->=4 שניות ותק, כדי ש-track טרי לא יתויג "static" בטעות),
+`slow` < 0.25, `moving` < 0.8, `fast` >= 0.8 (יורה אירוע לפס האירועים).
+צ'יפ הקמ"ש על ה-JPEG מוצג רק ב->=8 קמ"ש עם >=5 תצפיות.
 
-### 5.2 ‏Pose & skeleton — ‏`draw_pose_layer`
+### 5.2 Pose & skeleton - `draw_pose_layer`
 
-שלדים בלבד, על אנשים קרובים מספיק ל-pose pass — אין תיבות זיהוי, אין
+שלדים בלבד, על אנשים קרובים מספיק ל-pose pass - אין תיבות זיהוי, אין
 רכבים. מפני שאדם ברחוב תופס 30-120 פיקסלים ו-pose pass על הפריים המלא
-ב-640 נותן למודל ~15px של אדם ולא מוצא כלום, השכבה הזאת מריצה **top-down pose**:
-לכל תיבת person של הדטקטור, קוצצים את השכנות עם 25% padding ומריצים
-YOLOv8n-pose על ה-crop בלבד. ה-pose-person הטוב ביותר בכל crop זוכה
-בתיבה הזאת:
+ב-640 נותן למודל ~15px של אדם ולא מוצא כלום, השכבה הזאת מריצה
+**top-down pose**: לכל תיבת person של הדטקטור, קוצצים את השכנות עם 25%
+padding ומריצים YOLOv8n-pose על ה-crop בלבד. ה-pose-person הטוב ביותר
+בכל crop זוכה בתיבה הזאת:
 
 </div>
 
@@ -877,56 +866,52 @@ def attach_keypoints_crops(model, frame, boxes,
 
 <div dir="rtl">
 
-הפלט: 17 מפרקי COCO (אף, עיניים, אוזניים, כתפיים, מרפקים, שורשי כף היד,
-אגן, ברכיים, קרסוליים) מצוירים על כל אדם מספיק קרוב. מה שרחוק מדי כתוב
-ביושר: "skeletons on 3 of 12 people, rest too far".
+הפלט: 17 מפרקי COCO (אף, עיניים, אוזניים, כתפיים, מרפקים, שורשי כף
+היד, אגן, ברכיים, קרסוליים) מצוירים על כל אדם מספיק קרוב. מה שרחוק
+מדי מדווח: "skeletons on 3 of 12 people, rest too far".
 
-### 5.3 ‏Hand gestures — ‏`draw_gestures_layer` + ‏`app/gestures.py`
+### 5.3 Hand gestures - `draw_gestures_layer` + `app/gestures.py`
 
-שלוש מחוות ברמת זרוע על אותם שלדים: ‏`hand_raised` (שורש כף היד מעל
-הכתף למשך ≥3 פריימי pose), ‏`both_hands_up` (שני השורשים מעל שתי הכתפיים),
-‏`wave` (שורש כף היד עובר את המרפק ≥2 פעמים). הסשן שומר מונה מצטבר
-(‏`self.gesture_counts`) כדי שהכיתוב יקרא "session: hand_raised x3, wave x1"
-ברגע שמישהו עשה משהו. סצנה ריקה תקרא "no gestures detected right now" —
-זה תקין, לא באג.
+שלוש מחוות ברמת זרוע על אותם שלדים: `hand_raised` (שורש כף היד מעל
+הכתף למשך >=3 פריימי pose), `both_hands_up` (שני השורשים מעל שתי
+הכתפיים), `wave` (שורש כף היד עובר את המרפק >=2 פעמים). הסשן שומר מונה
+מצטבר (`self.gesture_counts`) כדי שהכיתוב יקרא "session: hand_raised
+x3, wave x1" ברגע שמישהו עשה משהו. סצנה ריקה תקרא "no gestures detected
+right now".
 
-### 5.4 ‏Body anomalies — ‏`draw_body_layer`
+### 5.4 Body anomalies - `draw_body_layer`
 
-תצוגת חי בסגנון Fall Detection. ‏`label_track` (‏`app/behavior_labels.py`)
-מריץ שלוש שכבות פר-‏track ומחזיר תווית **אחת** בדיוק:
+תצוגת חי בסגנון Fall Detection. `label_track` (`app/behavior_labels.py`)
+מריץ שלוש שכבות פר-track ומחזיר תווית **אחת** בדיוק:
 
-1. **‏Pose flags מהשלד** (‏`pose_flags_of`): התיל בין מרכז הכתפיים למרכז
-   האגן — הזווית מהאנך; ‏> ‏`FALL_TORSO_DEG = 60°` למשך ‏≥ ‏`POSE_FLAG_MIN_FRAMES = 2`
-   פריימים ‏→ ‏`fall_suspect`.
-2. **‏Course reversals** (‏`heading_turns`): כמה חזרות אחורה חדות של >100°
-   על פני המסלול; ‏≥3 ‏→ ‏`erratic`. שני שומרי ריצוד (אודיט 14.08, אחרי
-   4-6 התראות ERRATIC כוזבות לטיק על קבוצה יושבת): צעד משמעותי חייב לכסות
-   ‏≥35% מהאלכסון של **האובייקט עצמו** (ריצוד תיבה גדל עם גודל התיבה),
-   ו-erratic דורש ‏moving_frac ≥ 0.30 על track לא-נייח - מי שכמעט לא זז
-   לא יכול לזגזג. רוכבים (תיבת אדם ≥45% בתוך תיבת רכב) מוחרגים מפסקי
-   הדין ההתנהגותיים לגמרי.
+1. **Pose flags מהשלד** (`pose_flags_of`): התיל בין מרכז הכתפיים למרכז
+   האגן; הזווית מהאנך; > `FALL_TORSO_DEG = 60°` למשך
+   >= `POSE_FLAG_MIN_FRAMES = 2` פריימים -> `fall_suspect`.
+2. **Course reversals** (`heading_turns`): כמה חזרות אחורה חדות של
+   >100° על פני המסלול; >=3 -> `erratic`. שני שומרי ריצוד: צעד משמעותי
+   חייב לכסות >=35% מהאלכסון של **האובייקט עצמו**, ו-erratic דורש
+   `moving_frac >= 0.30` על track לא-נייח. רוכבים (תיבת אדם >=45% בתוך
+   תיבת רכב) מוחרגים מפסקי הדין ההתנהגותיים.
 3. **קינמטיקה טהורה:** מהירות ממוצעת, moving fraction, תזוזה נטו לאורך
-   המסלול — מקבלים ‏`running` / ‏`walking` / ‏`standing` / ‏`dwelling` /
-   ‏`driving` / ‏`parked` / ‏`normal`.
+   המסלול - מקבלים `running` / `walking` / `standing` / `dwelling` /
+   `driving` / `parked` / `normal`.
 
 השכבה מציגה **רק** את התוויות ברמת התראה
-(‏`BODY_ANOMALY_LABELS = {"fall_suspect", "erratic", "running"}`): תיבה
-אדומה או כתומה + overlay של שלד + תגית של התווית על אנשים שסומנו, ‏HUD
-בפינה שמאלית עליונה (‏`persons in view: N, flagged: M`), ובאנר ALERT
+(`BODY_ANOMALY_LABELS = {"fall_suspect", "erratic", "running"}`): תיבה
+אדומה או כתומה + overlay של שלד + תגית של התווית על אנשים שסומנו, HUD
+בפינה שמאלית עליונה (`persons in view: N, flagged: M`), ובאנר ALERT
 אדום בזמן שדגל של `fall`/`erratic` חי.
 
-### 5.5 ‏Face detection — ‏`draw_faces_layer_img` + ‏`app/faces.py`
+### 5.5 Face detection - `draw_faces_layer_img` + `app/faces.py`
 
-מלבני זיהוי בלבד (בלי embeddings, בלי מסד נתונים). הדטקטור הוא
-**‏YuNet** (‏OpenCV Zoo, ~230KB ONNX), ‏CPU בלבד, ~15ms על פריים
-‏960×540. במרחק רחוב פנים לרוב מתחת לרזולוציית הדטקטור — הכיתוב
-"no faces at this distance/resolution" הוא כנה.
+מלבני זיהוי בלבד (בלי embeddings, בלי מסד נתונים). הדטקטור הוא **YuNet**
+(OpenCV Zoo, ~230KB ONNX), CPU בלבד, ~15ms על פריים 960×540. במרחק
+רחוב פנים לרוב מתחת לרזולוציית הדטקטור.
 
-### 5.6 ‏Heat vision — ‏`draw_heat_layer`
+### 5.6 Heat vision - `draw_heat_layer`
 
-התמונה כולה משתנה כשבוחרים את השכבה הזאת (‏fix 3 requirement).
-לא חיישן תרמי — מפת צבע מסוגננת שמונעת על ידי בהירות בתוספת הצטברות
-ה-dwell של הסשן:
+התמונה כולה משתנה כשבוחרים את השכבה הזאת. לא חיישן תרמי - מפת צבע
+מסוגננת שמונעת על ידי בהירות בתוספת הצטברות ה-dwell של הסשן:
 
 </div>
 
@@ -944,17 +929,17 @@ out = cv2.applyColorMap((signal*255).astype(np.uint8), cv2.COLORMAP_INFERNO)
 
 <div dir="rtl">
 
-‏`grid` היא מטריצת GRID_H × GRID_W (‏27 × 48) של שניות שהייה פר-cell;
-‏`bump_heat` מוסיף בכל tick את משקל הזמן שעבר מה-tick הקודם לכל cell
-שמתחת לרגלי אנשים/כלי-רכב. מעבר בין שכבות ואז חזרה ל-heat שומר את הצבירה
-— המפה ממשיכה לגדול.
+`grid` היא מטריצת GRID_H × GRID_W (27 × 48) של שניות שהייה פר-cell;
+`bump_heat` מוסיף בכל tick את משקל הזמן שעבר מה-tick הקודם לכל cell
+שמתחת לרגלי אנשים/כלי-רכב. מעבר בין שכבות ואז חזרה ל-heat שומר את
+הצבירה - המפה ממשיכה לגדול.
 
-### 5.7 ‏Line crossing — ‏`draw_line_layer` + ‏`update_crossings`
+### 5.7 Line crossing - `draw_line_layer` + `update_crossings`
 
 קו סופר (מוגדר פר-מצלמה ב-`app/cameras.py`, או ה-default האופקי
-‏`DEFAULT_LINE = [[0.10, 0.62], [0.90, 0.62]]` — רצועת המדרכה). כל שינוי
+`DEFAULT_LINE = [[0.10, 0.62], [0.90, 0.62]]` - רצועת המדרכה). כל שינוי
 סימן קפדני של foot point של track על פני הקו הוא אירוע חצייה; הכיוון
-(‏in/out) נקבע לפי סדר הנקודות A→B (צד שלילי → צד חיובי = "in"):
+(in/out) נקבע לפי סדר הנקודות A->B (צד שלילי -> צד חיובי = "in"):
 
 </div>
 
@@ -976,78 +961,75 @@ def update_crossings(side_state, tracks, frame_shape, line, cross):
 
 <div dir="rtl">
 
-‏`side == 0` (נחיתה בדיוק על הקו) מדולג בכוונה — אמביוולנטי והיה גורם ל-jitter
-כפול סביב הגבול. הכיתוב מציג "IN x / OUT y (session total)". בנוסף יש
-צינון של 2 שניות פר-track (‏`CROSSING_COOLDOWN_S`) שבולע נקודת רגל שרועדת
-על הקו; כל חצייה נרשמת כשורת JSONL (‏`data/crossings/<cam>.jsonl`, נשמרות
-50 האחרונות) + קרופ של החוצה לפס החציות, וקובץ הקו נקרא מחדש כל 5 שניות
-כך ששרטוט מחדש נתפס תוך כדי ריצה. מצלמה בלי קו שמור מקבלת את
-`DEFAULT_LINE = [[0.10,0.62],[0.90,0.62]]` — רצועת המדרכה בשוט רחוב טיפוסי.
+`side == 0` (נחיתה בדיוק על הקו) מדולג בכוונה. הכיתוב מציג "IN x /
+OUT y (session total)". בנוסף יש צינון של 2 שניות פר-track
+(`CROSSING_COOLDOWN_S`) שבולע נקודת רגל שרועדת על הקו; כל חצייה
+נרשמת כשורת JSONL (`data/crossings/<cam>.jsonl`, נשמרות 50 האחרונות)
++ קרופ של החוצה לפס החציות, וקובץ הקו נקרא מחדש כל 5 שניות כך ששרטוט
+מחדש נתפס תוך כדי ריצה. מצלמה בלי קו שמור מקבלת את
+`DEFAULT_LINE = [[0.10,0.62],[0.90,0.62]]` - רצועת המדרכה בשוט רחוב
+טיפוסי.
 
-### 5.8 אזורים ושיהוי — `loiter`
+### 5.8 אזורים ושיהוי - `loiter`
 
-פוליגונים שהמפעיל מצייר על האריח (‏kind=loiter, סף שיהוי 5-3600 שניות;
-ברירות מחדל 300 שניות לאדם / 900 לרכב, עם דריסה פר-מצלמה — "כמה זמן זה
-חשוד" הוא תכונה של **המקום**: כיכר עם ספסלים סובלת רבע שעה, לובי כספומט
-לא). ‏track שנקודת הרגל שלו בתוך פוליגון מתחיל שעון; רצף הנוכחות סולח
-לטיק בודד חסר; חציית הסף הופכת את האזור להתראה ויורה אירוע על קצה
-המעבר בלבד. האזורים נטענים מחדש מ-`data/zones/<cam>.json` כל 5 שניות,
-באותו חוזה של הקו.
+פוליגונים שהמפעיל מצייר על האריח (kind=loiter, סף שיהוי 5-3600 שניות;
+ברירות מחדל 300 שניות לאדם / 900 לרכב, עם דריסה פר-מצלמה). track
+שנקודת הרגל שלו בתוך פוליגון מתחיל שעון; רצף הנוכחות סולח לטיק בודד
+חסר; חציית הסף הופכת את האזור להתראה ויורה אירוע על קצה המעבר בלבד.
+האזורים נטענים מחדש מ-`data/zones/<cam>.json` כל 5 שניות, באותו חוזה
+של הקו.
 
-### 5.9 תפוסת חניה — `parking`
+### 5.9 תפוסת חניה - `parking`
 
-פוליגונים מסוג `parking`: מקום תפוס כש-track נייח ממחלקת רכב מכסה ‏≥30%
-מהתא (היסטרזיס אסימטרי: 2 טיקים חיוביים להפוך לתפוס, 4 לפנוי). האירוע
-נורה רק על **היפוך** תפוס/פנוי — שינוי מצב הוא מידע, מצב יציב הוא טפט.
-חישובי התפוסה והשיהוי נעשים פעם אחת לטיק ומשותפים לרינדור ה-JPEG
-ולפרסום ה-JSON.
+פוליגונים מסוג `parking`: מקום תפוס כש-track נייח ממחלקת רכב מכסה
+>=30% מהתא (היסטרזיס אסימטרי: 2 טיקים חיוביים להפוך לתפוס, 4 לפנוי).
+האירוע נורה רק על **היפוך** תפוס/פנוי. חישובי התפוסה והשיהוי נעשים
+פעם אחת לטיק ומשותפים לרינדור ה-JPEG ולפרסום ה-JSON.
 
-**בדיקת-עומק בלי tracker** (אודיט 14.08: תאים מלאים בקטנועים חונים דיווחו
-"0/2 occupied" כי קטנוע חונה בלילה לא עובר את שערי האישור של ה-tracker):
-כל 12 שניות שכבת החניה מריצה זיהוי מחדש על קרופ מוגדל x2 של התא עצמו
-(‏`_parking_probe`, ‏imgsz 320, מחלקות רכב בלבד); פגיעה טרייה נכנסת לאותו
-היסטרזיס פר-תא כמו מועמד מה-tracker.
+**בדיקת-עומק בלי tracker:** כל 12 שניות שכבת החניה מריצה זיהוי מחדש
+על קרופ מוגדל x2 של התא עצמו (`_parking_probe`, imgsz 320, מחלקות רכב
+בלבד); פגיעה טרייה נכנסת לאותו היסטרזיס פר-תא כמו מועמד מה-tracker.
+זה תופס כלי רכב חונים (כמו קטנועים בלילה) שלא עוברים את שערי האישור
+של ה-tracker.
 
-### 5.10 לוחיות רישוי (LPR) — `plates` + ‏`app/plates.py`
+### 5.10 לוחיות רישוי (LPR) - `plates` + `app/plates.py`
 
 שני שלבים מופרדים + מטמון פר-track:
 
-1. **זיהוי לוחית** — גלאי ייעודי `yolov8n-plate` (מנוע OpenVINO) מחפש
+1. **זיהוי לוחית** - גלאי ייעודי `yolov8n-plate` (מנוע OpenVINO) מחפש
    תיבת לוחית **רק בתוך** תיבות רכב שרחבות מספיק לשאת לוחית קריאה: רכב
-   ≥96px רוחב (אופנוע ≥72), תיבת לוחית ≥32px, ‏conf 0.30, עד 3 רכבים
+   >=96px רוחב (אופנוע >=72), תיבת לוחית >=32px, conf 0.30, עד 3 רכבים
    לטיק (הרחבים קודם), ועד 6 ניסיונות OCR פר-track.
-2. **OCR** — הקרופ של הלוחית (מוגדל x2 קוביק כשהוא צר מ-128px) עובר דרך
-   `plate_ocr_global.onnx` — מפענח CTC עם 9 משבצות ואלפבית **גנרי לכל
-   מדינה**: ‏`0-9 A-Z _`. בלי דקדוק פר-מדינה, בכוונה: אותו קורא משרת
-   לוחיות תורכיות, אמריקאיות, יפניות ותאילנדיות בתוכן הלטיני/ספרתי שלהן,
-   וכתב תאי/יפני שמחוץ לאלפבית מדווח ככזה במקום להמציא ספרות.
+2. **OCR** - הקרופ של הלוחית (מוגדל x2 קוביק כשהוא צר מ-128px) עובר
+   דרך `plate_ocr_global.onnx` - מפענח CTC עם 9 משבצות ואלפבית **גנרי
+   לכל מדינה**: `0-9 A-Z _`. בלי דקדוק פר-מדינה: אותו קורא משרת לוחיות
+   תורכיות, אמריקאיות, יפניות ותאילנדיות בתוכן הלטיני/ספרתי שלהן, וכתב
+   תאי/יפני שמחוץ לאלפבית מדווח ככזה במקום להמציא ספרות.
 
-קריאה מתקבלת ב-conf ≥ 0.45 עם ≥ 4 תווים; כל track שומר את הקריאה הטובה
-ביותר שלו וממשיך לנסות עד conf ≥ 0.70 או סוף תקציב הניסיונות — best-of-N
-על פני פריימים, אף פעם לא פריים בודד שרירותי. שלוש תוספות מ-14.08:
-**שער חדות** (‏Laplacian ≥ 45 על קרופ הלוחית, אחרת מדלגים על ה-OCR
-והניסיון מוחזר - לוחית מרוחת-תנועה בלילה יכולה רק להזות), **העדפת
-קרבה מקסימלית** (לא שורפים תקציב כשרכב לא-נקרא הצטמק מתחת ל-85% מרוחב
-השיא של עצמו), ו**ניסיון חוזר לסטטיים**: ‏track שמוצה-אך-לא-נקרא מקבל
-תקציב טרי כל 120 שניות - לוחית קריאה של רכב חונה לא נידונה בגלל ששת
-הטיקים הראשונים של הסשן. זיהוי ו-OCR הם פסקי דין
-נפרדים: המעטפת של השכבה תמיד מדווחת את המשפך הכן —
-"N רכבים · M בטווח לוחית (‏≥96px) · K נקראו". קריאה ראשונה מוצלחת יורה
-אירוע לפס האירועים עם הטקסט.
+קריאה מתקבלת ב-conf >= 0.45 עם >= 4 תווים; כל track שומר את הקריאה
+הטובה ביותר שלו וממשיך לנסות עד conf >= 0.70 או סוף תקציב הניסיונות -
+best-of-N על פני פריימים. שלוש הגנות נוספות: **שער חדות**
+(Laplacian >= 45 על קרופ הלוחית, אחרת מדלגים על ה-OCR והניסיון מוחזר),
+**העדפת קרבה מקסימלית** (לא שורפים תקציב כשרכב לא-נקרא הצטמק מתחת
+ל-85% מרוחב השיא של עצמו), ו**ניסיון חוזר לסטטיים**: track
+שמוצה-אך-לא-נקרא מקבל תקציב טרי כל 120 שניות. זיהוי ו-OCR הם פסקי דין
+נפרדים: המעטפת של השכבה תמיד מדווחת את המשפך: "N רכבים · M בטווח
+לוחית (>=96px) · K נקראו". קריאה ראשונה מוצלחת יורה אירוע לפס האירועים
+עם הטקסט.
 
 ### 5.11 פס האירועים החם, שמירה, וטאב Investigation
 
-כל שכבה מזינה טבעת אירועים פר-מצלמה (50 אירועים): קריאת לוחית, חציית קו,
-התראת שיהוי, היפוך חניה, מחווה חדשה, דגל גוף, שלד שנרכש, נע-מהר, עליית
-מונה פנים (מרווח ≥30s), ‏hotspot של חום (מרווח ≥120s). הפס מתחת לווידאו
-עושה poll ל-`GET /api/analysis/events` כל 2.5 שניות ומציג צ'יפ עם תמונה
-ממוזערת לכל אירוע; צ'יפים מתפנים בגלישת הטבעת (או 30 ב-DOM). לחיצה על 💾
-בצ'יפ שולחת `POST /api/analysis/event/save`: השרת כותב את **הפריים המלא
-המתויג** — התיבה שהציתה את האירוע + פס כיתוב צרובים בתמונה — אל
+כל שכבה מזינה טבעת אירועים פר-מצלמה (50 אירועים): קריאת לוחית, חציית
+קו, התראת שיהוי, היפוך חניה, מחווה חדשה, דגל גוף, שלד שנרכש, נע-מהר,
+עליית מונה פנים (מרווח >=30s), hotspot של חום (מרווח >=120s). הפס
+מתחת לווידאו עושה poll ל-`GET /api/analysis/events` כל 2.5 שניות ומציג
+צ'יפ עם תמונה ממוזערת לכל אירוע; צ'יפים מתפנים בגלישת הטבעת (או 30
+ב-DOM). לחיצה על סמל השמירה בצ'יפ שולחת
+`POST /api/analysis/event/save`: השרת כותב את **הפריים המלא המתויג**
+(התיבה שהציתה את האירוע + פס כיתוב צרובים בתמונה) אל
 `web/snapshots/detections/<cam>_<id>.jpg` ומוסיף שורת מניפסט
-(‏`saved.json`, עד 500). טאב **Investigation** מרנדר את המניפסט הזה דרך
-קבע (רענון כל 20 שניות) — דגימה שמורה שורדת את הסשן ואפשר לחזור אליה
-ולהתווכח עם האלגוריתם פריים מול פריים.
+(`saved.json`, עד 500). טאב **Investigation** מרנדר את המניפסט הזה
+(רענון כל 20 שניות) - דגימה שמורה שורדת את הסשן.
 
 </div>
 
@@ -1057,30 +1039,31 @@ def update_crossings(side_state, tracks, frame_shape, line, cross):
 
 ## 6. ניתוח חלון עמוק (`behavior.analyze_window`)
 
-מנוע נפרד, לפי דרישה: תופס חלון ארוך יותר (ברירת מחדל 12 פריימים ב-stride 12
-≈ ‏0.5s בין פריימים) ממצלמה אחת, מריץ את אותו זיהוי מדולל פר-פריים, שוזר
-אותם לתוך tracks פר-פרט עם `BurstTracker`, ומחזיר פרופיל פר-פרט:
+מנוע נפרד, לפי דרישה: תופס חלון ארוך יותר (ברירת מחדל 12 פריימים
+ב-stride 12 =~ 0.5s בין פריימים) ממצלמה אחת, מריץ את אותו זיהוי מדולל
+פר-פריים, שוזר אותם לתוך tracks פר-פרט עם `BurstTracker`, ומחזיר
+פרופיל פר-פרט:
 
-- ‏`path` — מסלול foot-point (מנורמל, JSON-safe)
-- ‏`distance / speed` — אורך מסלול, תזוזה נטו, mean/max px/s, ואומדן km/h
-  לרכבים (אותו טווח ±30-50% כמו השכבה החיה)
-- ‏`moving_frac` — חלק הצעדים שאכן זזו ("עמד ללא תנועה ב-80% מהחלון")
-- ‏`direction` — כיוון מסך דומיננטי של התזוזה הנטו
-- ‏`zones` — cells של heatmap שביקר בהם (קושר את המסלול למפת ה-dwell
-  ארוכת-הטווח)
-- ‏`nn_min / mean_px` — השכן הקרוב ביותר מאותה מחלקה על פני החלון (אות
+- `path` - מסלול foot-point (מנורמל, JSON-safe)
+- `distance / speed` - אורך מסלול, תזוזה נטו, mean/max px/s, ואומדן
+  km/h לרכבים (אותו טווח +/-30-50% כמו השכבה החיה)
+- `moving_frac` - חלק הצעדים שאכן זזו ("עמד ללא תנועה ב-80% מהחלון")
+- `direction` - כיוון מסך דומיננטי של התזוזה הנטו
+- `zones` - cells של heatmap שביקר בהם
+- `nn_min / mean_px` - השכן הקרוב ביותר מאותה מחלקה על פני החלון (אות
   צפיפות / זוגיות)
-- ‏`label` — תווית התנהגות אחת קריאה פר-פרט (מ-`label_track`) עם הראיה
+- `label` - תווית התנהגות אחת קריאה פר-פרט (מ-`label_track`) עם הראיה
   שלה ב-`label_reasons`
-- ‏`gestures` — מחוות ברמת זרוע על פני החלון, במצב pose בלבד
+- `gestures` - מחוות ברמת זרוע על פני החלון, במצב pose בלבד
 
 שכבות אופציונליות לפי בקשה:
 
-- ‏`pose=1` — מריץ pose pass top-down, מעשיר את `label` ומאכלס `gestures`.
-- ‏`want_faces=1` — זיהוי פנים על הפריים האחרון.
-- ‏`lock=auto` או ‏`lock=<track_id>` — מצייר crosshair target lock על אותו
-  פרט ומחזיר את ה-offset המנורמל ממרכז הפריים (‏`dx, dy` ∈ ‏`[-0.5, 0.5]` —
-  בדיוק האות שבקר pan/tilt היה צורך בו אם הייתה חומרה מקומית).
+- `pose=1` - מריץ pose pass top-down, מעשיר את `label` ומאכלס
+  `gestures`.
+- `want_faces=1` - זיהוי פנים על הפריים האחרון.
+- `lock=auto` או `lock=<track_id>` - מצייר crosshair target lock על
+  אותו פרט ומחזיר את ה-offset המנורמל ממרכז הפריים
+  (`dx, dy` ∈ `[-0.5, 0.5]`).
 
 צורת CLI:
 
@@ -1093,8 +1076,9 @@ python -m tools.analyze_window --cam taksim_yeni --pose --faces --lock auto
 
 <div dir="rtl">
 
-פלט: JPEG מסומן + פרופיל JSON תחת `web/snapshots/behavior/`, ‏LRU של 40
-קבצים. כפתור "Analyze window" בדשבורד קורא ל-`POST /api/deep-analyze?cam=<id>`.
+פלט: JPEG מסומן + פרופיל JSON תחת `web/snapshots/behavior/`, LRU של
+40 קבצים. כפתור "Analyze window" בדשבורד קורא
+ל-`POST /api/deep-analyze?cam=<id>`.
 
 </div>
 
@@ -1102,52 +1086,46 @@ python -m tools.analyze_window --cam taksim_yeni --pose --faces --lock auto
 
 <div dir="rtl">
 
-## 7. המחברת — אנליטיקה מקומית
+## 7. המחברת
 
-המחברת הראשית היא `turkey_business_activity.ipynb` (בשורש הריפו;
+המחברת היא `turkey_business_activity_yolov8s.ipynb` (בשורש הריפו;
 ה-imports מוצאים את `src/app/` אוטומטית). היא משתמשת באותם מודולי
-‏`detect_core` ו-`reid` כמו הקולקטור, כך שהמספרים מתיישבים. שנים-עשר סעיפים:
+`detect_core` ו-`reid` כמו הקולקטור, כך שהמספרים מתיישבים. שנים-עשר
+סעיפים:
 
 | # | נושא התא | מה הוא עושה |
 |---|---|---|
-| 0 | ‏Setup | בדיקת תלויות + `MODEL_WEIGHTS = 'yolo26m.pt'` + `load_model` פעם אחת |
-| 1 | ‏Camera picker | קטלוג ממוספר על פני כל המדינות; המפעיל בוחר 4 לפי מספר (כולן חייבות להיות מאותה מדינה); בדיקה חיה דוחה בחירות מתות |
-| 2 | ‏Single-frame check | תופס פריים אחד מהבחירה הראשונה ומסמן אותו |
-| 3 | ‏Footfall time series | דגימה דלילה כל `interval_s`; DataFrame + peak-hour chart |
-| 4 | אנומליות + פרופיל peak-hour | ‏Robust rolling z (median + MAD × 1.4826) מסמן אנומליות |
-| 5 | ‏Dwell / prolonged stops | ‏burst צפוף + ByteTrack לחלון קצר; per-track dwell + movement |
-| 5b | ‏Re-identification | ‏ReidStore על N פריימים; per-class unique / seen-again / regulars (≥3) |
-| 6 | ‏Business score | הרכב `volume_median × w0 + linger_rate × w1 + consistency × w2` (data ריק ‏→ `None` כנה + note מפורש) |
-| 7 | ‏Live cloud dashboard | כותב `web/local_grid.json` = המצלמות שנבחרו, מרים `http.server` ב-`localhost:8000`, פותח דפדפן |
+| 0 | Setup | בדיקת תלויות + `MODEL_WEIGHTS = 'yolov8s.pt'` + `load_model` פעם אחת |
+| 1 | Camera picker | קטלוג ממוספר על פני כל המדינות; המפעיל בוחר 4 לפי מספר (כולן מאותה מדינה); בדיקה חיה דוחה בחירות מתות |
+| 2 | Single-frame check | תופס פריים אחד מהבחירה הראשונה ומסמן אותו |
+| 3 | Footfall time series | דגימה דלילה כל `interval_s`; DataFrame + peak-hour chart |
+| 4 | אנומליות + פרופיל peak-hour | Robust rolling z (median + MAD × 1.4826) מסמן אנומליות |
+| 5 | Dwell / prolonged stops | burst צפוף + ByteTrack לחלון קצר; per-track dwell + movement |
+| 5b | Re-identification | ReidStore על N פריימים; per-class unique / seen-again / regulars (>=3) |
+| 6 | Business score | הרכב `volume_median × w0 + linger_rate × w1 + consistency × w2` (data ריק -> `None` עם note מפורש) |
+| 7 | Live cloud dashboard | כותב `web/local_grid.json` = המצלמות שנבחרו, מרים `http.server` ב-`localhost:8000`, פותח דפדפן |
 | 8 | השוואה בין אתרים | מדרג את המצלמות שנבחרו לפי פעילות |
-| 9 | ‏Live summary | סיכום הסשן + גרף מתמיד של footfall/anomaly |
-| 10 | כיול דיוק | ‏10a תופס פריימים + חיזויים ב-640/960; 10b תיוג אינטראקטיבי; 10c MAE + bias פר-מצלמה פר-גודל |
-| 11 | חיזוי | ‏11a delta fetch מ-Firestore ל-CSV cache; 11b grid של 15-min + eligibility; 11c persistence / seasonal-naive / hour-of-week profile / closed-form ridge; 11d GRU קטן |
+| 9 | Live summary | סיכום הסשן + גרף מתמיד של footfall/anomaly |
+| 10 | כיול דיוק | 10a תופס פריימים + חיזויים; 10b תיוג אינטראקטיבי; 10c MAE + bias פר-מצלמה |
+| 11 | חיזוי | 11a delta fetch מ-Firestore ל-CSV cache; 11b grid של 15-min + eligibility; 11c persistence / seasonal-naive / hour-of-week profile / closed-form ridge; 11d GRU קטן |
 
-### 7.1 המחברת התאומה המקומית
+### 7.1 חלק 11 חיזוי - איך מחליט
 
-‏`turkey_business_activity_yolov8n.ipynb` (מוחרג בגיט — אף פעם לא נמצאת בריפו)
-היא עותק ידני של המחברת הראשית עם ‏`MODEL_WEIGHTS = 'yolov8s.pt'` (או
-`yolov8n.pt`) כדי שהמפעיל יראה את מה שה-VM רואה על אותם פריימים.
-מתועד ב-`.gitignore:54`.
+כל מודל מתוחכם חייב להביס את "אותו זמן אתמול" (seasonal-naive) על MAE
+לאורך 25% האחרונים של ה-cache (לא נגעו בו במהלך fitting). הסולם:
 
-### 7.2 חלק 11 חיזוי — איך מחליט
+- **persistence** - `y_{t+h} = y_t`
+- **seasnaive24** - `y_{t+h} = y_{t+h - 24h}` (בייסליין)
+- **profile** - חציון פר-slot local (hour-of-day), או (hour-of-week)
+  ברגע שה-cache נושא >=7 ימים
+- **ridge** - closed-form numpy ridge על lags (1, 2, 3, 4, 96),
+  rolling means (4, 12), sin/cos של שעת ה-hour-of-day היעד, one-hots
+  פר-מצלמה
+- **gru** - GRU קטן (hidden 32, ~15k params) קורא 24h ופולט 12h;
+  מתאמן על CPU בפחות מדקה; מצטרף לסולם ברגע שה-cache נושא מספיק חלונות
 
-כל מודל מתוחכם חייב להביס את "אותו זמן אתמול" (‏seasonal-naive) על MAE
-לאורך 25% האחרונים של ה-cache (מעולם לא נגעו בו במהלך fitting). הסולם:
-
-- **‏persistence** — ‏`y_{t+h} = y_t`
-- **‏seasnaive24** — ‏`y_{t+h} = y_{t+h - 24h}` (בייסליין הכנות — כל
-  מודל מתוחכם חייב להביס אותו כדי להצדיק את קיומו)
-- **‏profile** — חציון פר-slot local (hour-of-day), או (hour-of-week)
-  ברגע שה-cache נושא ≥7 ימים
-- **‏ridge** — ‏closed-form numpy ridge על lags (‏1, 2, 3, 4, 96), ‏rolling
-  means (‏4, 12), ‏sin/cos של שעת ה-hour-of-day היעד, ‏one-hots פר-מצלמה
-- **‏gru** — ‏GRU קטן (hidden 32, ~15k params) קורא 24h ופולט 12h; מתאמן
-  על CPU בפחות מדקה; מצטרף לסולם ברגע שה-cache נושא מספיק חלונות
-
-‏`skill = 1 - mae / mae['seasnaive24']` (חיובי = טוב יותר). זרם יציב לגמרי
-(‏`seasnaive24 MAE = 0`) נותן ‏`n/a` במקום infinities מטעים.
+`skill = 1 - mae / mae['seasnaive24']` (חיובי = טוב יותר). זרם יציב
+לגמרי (`seasnaive24 MAE = 0`) נותן `n/a` במקום infinities.
 
 </div>
 
@@ -1157,45 +1135,43 @@ python -m tools.analyze_window --cam taksim_yeni --pose --faces --lock auto
 
 ## 8. בחירת המודל והפרמטרים
 
-### 8.1 שני דטקטורים, שני זמני-ריצה
+### 8.1 הדטקטור והפרמטרים
 
-‏`yolov8s.pt` על ה-VM (מאז 2026-08-05, ‏`@ 640`); ‏`yolo26m.pt` במחברת
-(‏`@ 960`). המחברת היא ההפניה לדיוק; על אותם פריימים חיים: ‏`yolov8n@512`
-(תצורת VM לפני 2026-08) מצא 0 אנשים ב-Taksim ו-0 רכבים ב-Sarachane;
-‏`yolov8s@960` מצא 5 ו-7; ‏`yolo26m@960` מצא 6 ו-16 + אוטובוס.
-תת-הספירות היו התצורה, לא המצלמות.
+הקולקטור על ה-VM מריץ `yolov8s.pt @ imgsz 640` מאז 2026-08-05. תצורת
+`yolov8n @ 512` הקודמת אבדה אובייקטים קטנים; העלייה ל-`yolov8s @ 640`
+מחזירה אותם בתוך תקציב ה-CPU של ה-e2-micro.
 
-סולם גדלי המודל (‏COCO):
+סולם גדלי המודל (COCO):
 
-| מודל | פרמטרים | ‏mAP50 | מעבר CPU 1080p | פסק דין |
+| מודל | פרמטרים | mAP50 | מעבר CPU 1080p | פסק דין |
 |---|---|---|---|---|
-| ‏`yolov8n` | 3.2M | 37.3 | ~120ms | תצורת VM ישנה; recall נמוך על מצלמות רחוב רחבות |
-| **‏`yolov8s`** | **11.2M** | **44.9** | **~280ms** | **‏VM הנוכחי (@640, מאז 2026-08-05)** |
-| ‏`yolov8m` | 25.9M | 50.2 | ~700ms | ‏Peak RSS > 900 MB → oom-kill על e2-micro |
-| ‏`yolov8l` | 43.7M | 52.9 | ~1400ms | לא ריאלי על e2-micro |
-| ‏`yolo26m` | ~30M | ~50 (NMS-free) | ~800ms CPU | מחברת בלבד |
+| `yolov8n` | 3.2M | 37.3 | ~120ms | fallback לזיכרון בלבד (@768); recall נמוך על מצלמות רחוב רחבות |
+| **`yolov8s`** | **11.2M** | **44.9** | **~280ms** | **VM הנוכחי (@640)** |
+| `yolov8m` | 25.9M | 50.2 | ~700ms | Peak RSS > 900 MB -> oom-kill על e2-micro |
+| `yolov8l` | 43.7M | 52.9 | ~1400ms | לא ריאלי על e2-micro |
 
 ### 8.2 הכפתורים המרכזיים
 
-| ‏Env / flag | ערך | למה |
+| Env / flag | ערך | למה |
 |---|---|---|
-| ‏`--imgsz 640` | היה 512 עד 2026-08-05 | ‏640 מחזיר אובייקטים קטנים שה-512 pass איבד; ~‏0.39s / pass על ה-VM (× 2 frames × 4 cams = ~3s / 40s round) |
-| ‏`--burst 2 --burst-stride 13` | שני פריימים ~0.5s אחד מהשני | חציון הורג flicker של פריים בודד; שתי נקודות מזינות את אומדן המהירות |
-| ‏`--interval 40` | שניות | ‏bound על ידי מכסת Firestore (~17k writes/day מתוך 20k) |
-| ‏`MemoryHigh=760M / MemoryMax=900M` | מגבלות cgroup | מתאים ל-‏e2-micro של 1 GB עם מרווח |
-| ‏`OMP_NUM_THREADS=2` | | תואם למספר ה-vCPUs השיתופיים; default של torch oversubscribes |
-| ‏`MALLOC_ARENA_MAX=2` | | ‏glibc per-thread arenas עולים 50-150 MB של RSS על פייתון מרובה threads |
-| ‏`DEFAULT_PER_CLASS_CONF` (ב-‏`detect_core.py`) | מפת gate פר-מחלקה | ‏night_adjusted_conf(+0.08) בלילה + boosts פר-מצלמה שנלמדים ב-review |
-| ‏`EXTRA_CLASSES` env | ‏`bird, dog, cat, backpack, handbag, suitcase, umbrella` | מזין את מעקב-חפץ-נטוש + שורת "other objects" בדוח |
-| ‏`FALL_CHECK=1` env | | ‏person-loiter ‏→ ‏pose pass אחד על ה-crop; ‏torso אופקי ‏→ "Possible FALL" |
+| `--imgsz 640` | היה 512 עד 2026-08-05 | 640 מחזיר אובייקטים קטנים שה-512 pass איבד; ~0.39s / pass על ה-VM (× 2 frames × 4 cams = ~3s / 40s round) |
+| `--burst 2 --burst-stride 13` | שני פריימים ~0.5s אחד מהשני | חציון הורג flicker של פריים בודד; שתי נקודות מזינות את אומדן המהירות |
+| `--interval 40` | שניות | bound על ידי מכסת Firestore (~17k writes/day מתוך 20k) |
+| `MemoryHigh=760M / MemoryMax=900M` | מגבלות cgroup | מתאים ל-e2-micro של 1 GB עם מרווח |
+| `OMP_NUM_THREADS=2` | | תואם למספר ה-vCPUs השיתופיים; default של torch oversubscribes |
+| `MALLOC_ARENA_MAX=2` | | glibc per-thread arenas עולים 50-150 MB של RSS על פייתון מרובה threads |
+| `DEFAULT_PER_CLASS_CONF` (ב-`detect_core.py`) | מפת gate פר-מחלקה | night_adjusted_conf(+0.08) בלילה + boosts פר-מצלמה שנלמדים ב-review |
+| `EXTRA_CLASSES` env | `bird, dog, cat, backpack, handbag, suitcase, umbrella` | מזין את מעקב-חפץ-נטוש + שורת "other objects" בדוח |
+| `FALL_CHECK=1` env | | person-loiter -> pose pass אחד על ה-crop; torso אופקי -> "Possible FALL" |
 
 ### 8.3 כיול confidence פר-מצלמה
 
-‏`tools/calibrate_conf.py` קורא את היסטוריית ה-verdicts של המפעיל, מחשב
+`tools/calibrate_conf.py` קורא את היסטוריית ה-verdicts של המפעיל, מחשב
 מטריצת בלבול פר-`(camera, class)`, ובוחר את הסף הנמוך ביותר שמשיג
-**‏precision ≥ 0.90** עם **≥ 30 verdicts** — כותב ל-‏`data/per_camera_conf.json`.
-‏`cameras._merge_per_camera_conf()` רץ אחרי ‏`_merge_confidence_boost` וגובר
-עליו פר-זוג. זוג שכויל מסומן ‏`source=calibration` בפאנל Learning-proof.
+**precision >= 0.90** עם **>= 30 verdicts** - כותב
+ל-`data/per_camera_conf.json`. `cameras._merge_per_camera_conf()` רץ
+אחרי `_merge_confidence_boost` וגובר עליו פר-זוג. זוג שכויל מסומן
+`source=calibration` בפאנל Learning-proof.
 
 </div>
 
@@ -1205,34 +1181,35 @@ python -m tools.analyze_window --cam taksim_yeni --pose --faces --lock auto
 
 ## 9. אנומליות ודיווח
 
-הקולקטור מריץ סט של שערי אנומליה דטרמיניסטיים פר-סבב ופר-מצלמה. לכל שער
-יש טריגר מפורש + חלון debounce כדי שהדיגסט לא יציף.
+הקולקטור מריץ סט של שערי אנומליה דטרמיניסטיים פר-סבב ופר-מצלמה. לכל
+שער יש טריגר מפורש + חלון debounce כדי שהדיגסט לא יציף.
 
-| שער | טריגר | ‏Debounce |
+| שער | טריגר | Debounce |
 |---|---|---|
 | עומס קיצוני | ספירת אנשים / רכבים מעל סף rolling robust-z | 3 סבבים |
 | מצלמה חסומה | הבהירות הממוצעת יורדת מתחת ל-night floor בזמן שהשעון אומר יום | 5 סבבים |
-| מצלמה חשוכה | ‏MISSes של דגימה חורגים מתזמון המנוחה-והבדיקה | 3 סבבים |
-| ‏Loiter | אותו track של אדם נשאר בתוך תיבה למשך ‏≥ ‏`loiter_s` של המצלמה | תקרה ‏10/יום/מצלמה |
-| מבקר חוזר | אותה זהות OSNet נראית במרחק ≥ 1.2× box-scale מהמפגש הקודם | אדם בלבד, ‏≥ 64px floor |
-| חפץ נטוש | תיק / מזוודה ללא אדם-בעלים בקרבת מקום למשך ‏≥ 90s | שער owner-nearby |
-| חשד לנפילה | ‏person-loiter + torso אופקי מ-pose pass אחד | תחת ‏`FALL_CHECK=1` |
-| ‏Crowd rush | ‏spike פתאומי של speed × density | 2 סבבים |
+| מצלמה חשוכה | MISSes של דגימה חורגים מתזמון המנוחה-והבדיקה | 3 סבבים |
+| Loiter | אותו track של אדם נשאר בתוך תיבה למשך >= `loiter_s` של המצלמה | תקרה 10/יום/מצלמה |
+| מבקר חוזר | אותה זהות OSNet נראית במרחק >= 1.2× box-scale מהמפגש הקודם | אדם בלבד, >= 64px floor |
+| חפץ נטוש | תיק / מזוודה ללא אדם-בעלים בקרבת מקום למשך >= 90s | שער owner-nearby |
+| חשד לנפילה | person-loiter + torso אופקי מ-pose pass אחד | תחת `FALL_CHECK=1` |
+| Crowd rush | spike פתאומי של speed × density | 2 סבבים |
 
-ראיות אנומליה נלכדות כ-JPEG מסומן תחת ‏`snapshots/anomalies/<cam>/<ts>.jpg`
-(‏24h lifecycle ב-Storage). כל אירוע גם נוחת ב-`events/` ב-Firestore
-(גם 24h TTL) כדי שרצועת ה-"Events" בדשבורד תוכל להראות אותו חי.
+ראיות אנומליה נלכדות כ-JPEG מסומן תחת
+`snapshots/anomalies/<cam>/<ts>.jpg` (24h lifecycle ב-Storage). כל
+אירוע גם נוחת ב-`events/` ב-Firestore (גם 24h TTL) כדי שרצועת
+ה-"Events" בדשבורד תוכל להראות אותו חי.
 
 **דיווח:**
 
-- דיגסט ארכיון פעמיים ביום (12:00 + 20:00 שעון ישראל) → תיבת הארכיון של
-  הפרויקט בלבד, דרך ‏`digest.timer`. משתמש ב-`tools/daily_digest.py`.
-- ‏PDF לפי דרישה מכותרת הדשבורד (אריח פרטי: "Send Report From VM" ←
-  `POST /api/send-report`; אריח ציבורי: GitHub Actions workflow dispatch).
-  אותו composer של PDF (`tools/report_pdf.py`), sender שונה.
+- דיגסט ארכיון פעמיים ביום (12:00 + 20:00 שעון ישראל) -> תיבת הארכיון
+  של הפרויקט בלבד, דרך `digest.timer`. משתמש ב-`tools/daily_digest.py`.
+- PDF לפי דרישה מכותרת הדשבורד (אריח פרטי: "Send Report From VM" ->
+  `POST /api/send-report`; אריח ציבורי: GitHub Actions workflow
+  dispatch). אותו composer של PDF (`tools/report_pdf.py`), sender שונה.
 
-הדוח כן לגבי מסה סטטיסטית: שדות ה-km/h מתפרסמים רק כשיש ‏≥ ‏5 דגימות
-מהירות **וגם** ‏≥ 10% מהסבבים נושאים כאלה — אחרת ‏`-`.
+הדוח מפרסם את שדות ה-km/h רק כשיש >= 5 דגימות מהירות **וגם** >= 10%
+מהסבבים נושאים כאלה - אחרת `-`.
 
 </div>
 
@@ -1242,71 +1219,73 @@ python -m tools.analyze_window --cam taksim_yeni --pose --faces --lock auto
 
 ## 10. לולאת הלמידה הפעילה
 
-כל פריים שעבר תיוג הופך לנתוני אימון; מדי לילה (או לפי דרישה) רץ fine-tune
-של הראש בלבד ב-GitHub Actions; הראש שקודם נוחת ב-Storage; הקולקטור מבצע
-hot-swap ללא restart. הלולאה כולה משתמשת באפס משאבים בתשלום.
+כל פריים שעבר תיוג הופך לנתוני אימון; מדי לילה (או לפי דרישה) רץ
+fine-tune של הראש בלבד ב-GitHub Actions; הראש שקודם נוחת ב-Storage;
+הקולקטור מבצע hot-swap ללא restart. הלולאה כולה משתמשת באפס משאבים
+בתשלום.
 
 ### 10.1 תור פריימים uncertainty-first
 
-כל תיבה שנשמרה נושאת ‏`uncertainty ∈ [0,1]` מ-`app/uncertainty.py`:
+כל תיבה שנשמרה נושאת `uncertainty ∈ [0,1]` מ-`app/uncertainty.py`:
 
 ```
 uncertainty = 0.6 * margin + 0.4 * flip_delta
 ```
 
-- ‏`margin(conf, gate, span=0.25)` — בגובה 1.0 בדיוק על ה-gate של המחלקה,
-  יורד לינארית ל-0 ב-‏`gate ± span`. זול: לכל תיבה כבר יש `conf` וגם ה-gate
-  האפקטיבי שה-burst רץ איתו.
-- ‏`flip_delta` (אופציונלי, על bursts שנדגמו בלבד) — pass נוסף אחד על
-  הפריים ההפוך אופקית; ‏per-box IoU-matched conf delta. עולה pass אחד על
-  ~‏1-מתוך-5 bursts על מצלמה אחת כאשר ‏`UNCERTAINTY_FLIP=1`.
+- `margin(conf, gate, span=0.25)` - בגובה 1.0 בדיוק על ה-gate של
+  המחלקה, יורד לינארית ל-0 ב-`gate ± span`. זול: לכל תיבה כבר יש
+  `conf` וגם ה-gate האפקטיבי שה-burst רץ איתו.
+- `flip_delta` (אופציונלי, על bursts שנדגמו בלבד) - pass נוסף אחד על
+  הפריים ההפוך אופקית; per-box IoU-matched conf delta. עולה pass אחד
+  על ~1-מתוך-5 bursts על מצלמה אחת כאשר `UNCERTAINTY_FLIP=1`.
 
-נשמר: פריימים ‏→ ‏sidecar JSON `metadata.boxes[i].uncertainty`; crops ‏→
-‏suffix בשם הקובץ ‏`_uNN` (למשל ‏`..._u87.jpg` = 0.87). ה-‏labels.frame_uncertainty
-של ה-review UI מעדיפה את הערך שנשמר; חסר ‏→ fallback ל-margin. הסמפלר
-הנאיבי-אקראי של פריימים לא קיים יותר.
+נשמר: פריימים -> sidecar JSON `metadata.boxes[i].uncertainty`; crops
+-> suffix בשם הקובץ `_uNN` (למשל `..._u87.jpg` = 0.87).
+ה-`labels.frame_uncertainty` של ה-review UI מעדיפה את הערך שנשמר;
+חסר -> fallback ל-margin.
 
-### 10.2 ‏BADGE crop sampler
+### 10.2 BADGE crop sampler
 
-‏`app/badge.py`: ‏k-means++ init עצמי בוחר batch מגוון משוקלל לפי
-uncertainty — ‏OSNet embeddings ככיוון, uncertainty כגודל. ‏env switch
-‏`REVIEW_SAMPLER=badge|naive` (ברירת מחדל ‏`naive`); דריסה פר-בקשה
-‏`?strategy=` על ‏`/api/review-sample`. שורות review מתעדות ‏`sampler` +
-‏`uncertainty_at_selection` כדי ש-replay של יעילות naive-vs-BADGE יוכל
-לרוץ offline.
+`app/badge.py`: k-means++ init עצמי בוחר batch מגוון משוקלל לפי
+uncertainty - OSNet embeddings ככיוון, uncertainty כגודל. env switch
+`REVIEW_SAMPLER=badge|naive` (ברירת מחדל `naive`); דריסה פר-בקשה
+`?strategy=` על `/api/review-sample`. שורות review מתעדות `sampler`
++ `uncertainty_at_selection` כדי ש-replay של יעילות naive-vs-BADGE
+יוכל לרוץ offline.
 
-### 10.3 ‏Fine-tune של ראש בלבד + שער קידום
+### 10.3 Fine-tune של ראש בלבד + שער קידום
 
-‏`tools/train_head.py` עוטף את ‏`yolo detect train` עם backbone קפוא
-(‏`freeze=<all-but-head>`), ‏mosaic/mixup כבויים, ‏HSV + flip פעילים, ‏≤ 10
-epochs עם early-stop. פולט ‏`data/adapters/<cam>/head_<ts>.pt` — ‏tensors
-של Detect head בלבד (~4-6 MB).
+`tools/train_head.py` עוטף את `yolo detect train` עם backbone קפוא
+(`freeze=<all-but-head>`), mosaic/mixup כבויים, HSV + flip פעילים,
+<= 10 epochs עם early-stop. פולט `data/adapters/<cam>/head_<ts>.pt` -
+tensors של Detect head בלבד (~4-6 MB).
 
-‏`tools/promote_adapter.py` מריץ ‏`val` על ה-split הכרונולוגי 90/10 של
-ה-exporter — גם ל-baseline וגם ל-candidate; שער:
+`tools/promote_adapter.py` מריץ `val` על ה-split הכרונולוגי 90/10 של
+ה-exporter - גם ל-baseline וגם ל-candidate; שער:
 
-- ‏`ΔmAP50 ≥ +0.5` נקודות אחוז, **וגם**
-- אין מחלקות שיורדות ‏> ‏2pp (‏person / car: ‏0pp — הספירות שמניעות כל דוח).
+- `ΔmAP50 >= +0.5` נקודות אחוז, **וגם**
+- אין מחלקות שיורדות > 2pp (person / car: 0pp - הספירות שמניעות כל
+  דוח).
 
-עבר ‏→ עדכון atomic של המצביע ‏`current` + הוספה ל-‏`history.jsonl`.
-נכשל ‏→ שורה ‏`gate.log`. ‏`--rollback` משיב את המצביע הקודם.
+עבר -> עדכון atomic של המצביע `current` + הוספה ל-`history.jsonl`.
+נכשל -> שורה `gate.log`. `--rollback` משיב את המצביע הקודם.
 
 תעבורה: התוויות + פריימים המקומיים של המפעיל זורמים ל-Storage דרך
-‏`app/training_sync.py` (‏batched, ‏ledger-diffed); ‏GitHub Actions
-(‏`.github/workflows/train.yml`) מאמן על runners של ריפו ציבורי חינם;
-הראש שקודם נוחת ב-Storage; הקולקטור בודק ‏`current.json` כל 30 סבבים
+`app/training_sync.py` (batched, ledger-diffed); GitHub Actions
+(`.github/workflows/train.yml`) מאמן על runners של ריפו ציבורי חינם;
+הראש שקודם נוחת ב-Storage; הקולקטור בודק `current.json` כל 30 סבבים
 ומבצע hot-swap במקום.
 
-**‏Fallback byte-identical:** חסר / לא קריא ‏`current.json` ‏→ מודל הבסיס
-רץ ללא שינוי. אין adapter פעיל at-rest; הראש נטען לזיכרון רק אם קיים
-כזה שקודם ואומת.
+**Fallback byte-identical:** חסר / לא קריא `current.json` -> מודל
+הבסיס רץ ללא שינוי. אין adapter פעיל at-rest; הראש נטען לזיכרון רק
+אם קיים כזה שקודם ואומת.
 
-### 10.4 עקומת "‏Labels vs quality"
+### 10.4 עקומת "Labels vs quality"
 
-‏`GET /api/al-curve` קורא ‏`history.jsonl` (‏+ מראה Firestore
-‏`training_events`, ‏TTL 30d, כתיבה אחת לקידום) והדשבורד מצייר קו
-‏Chart.js: ‏labels_total על X, ‏mAP50 על Y, ‏candidates שנדחו באפור,
-‏baseline מקווקו. הצ'רט מתמלא אחרי שבוע של ריצות ליליות.
+`GET /api/al-curve` קורא `history.jsonl` (+ מראה Firestore
+`training_events`, TTL 30d, כתיבה אחת לקידום) והדשבורד מצייר קו
+Chart.js: labels_total על X, mAP50 על Y, candidates שנדחו באפור,
+baseline מקווקו.
 
 </div>
 
@@ -1316,11 +1295,11 @@ epochs עם early-stop. פולט ‏`data/adapters/<cam>/head_<ts>.pt` — ‏te
 
 ## 11. הגדרות פרויקט Firebase
 
-הדשבורד ‏onSnapshot חי — כל כתיבה של הקולקטור מגיעה לדפדפן מיד, בלי
+הדשבורד onSnapshot חי - כל כתיבה של הקולקטור מגיעה לדפדפן מיד, בלי
 polling. ההגדרות, פעם אחת לפרויקט:
 
-**1. יצירת הפרויקט.** ‏`console.firebase.google.com` ‏← ‏Add project ‏←
-הפעל Firestore במצב test (יינעל לפני הפריסה הציבורית — ראה שלב 5).
+**1. יצירת הפרויקט.** `console.firebase.google.com` -> Add project ->
+הפעל Firestore במצב test (יינעל לפני הפריסה הציבורית - ראה שלב 5).
 
 **2. אישורי backend לקולקטור.**
 
@@ -1346,13 +1325,13 @@ python -m app.collector --backend firebase --interval 20 \
 
 <div dir="rtl">
 
-כל סבב כותב doc היסטוריה אחד פר-מצלמה ל-`footfall` ודורס את `latest/{cam_id}`.
-הרץ ברשת פתוחה (‏IBB/YouTube חוסמים sandboxes מוגבלים). שמור על החיים
-עם systemd / Docker / `nohup`.
+כל סבב כותב doc היסטוריה אחד פר-מצלמה ל-`footfall` ודורס את
+`latest/{cam_id}`. הרץ ברשת פתוחה (IBB/YouTube חוסמים sandboxes
+מוגבלים). שמור על החיים עם systemd / Docker / `nohup`.
 
-**4. ‏Web frontend.** ‏Firebase Console ‏← ‏Project settings ‏← ‏Web app ‏←
-העתק את קונפיג ה-SDK. צור ‏`web/firebase-config.js` עם
-‏`export const firebaseConfig = {...}`. ואז:
+**4. Web frontend.** Firebase Console -> Project settings -> Web app
+-> העתק את קונפיג ה-SDK. צור `web/firebase-config.js` עם
+`export const firebaseConfig = {...}`. ואז:
 
 </div>
 
@@ -1362,16 +1341,16 @@ cd src/web && python -m http.server 8000     # http://localhost:8000
 
 <div dir="rtl">
 
-הדף נרשם עם ‏`onSnapshot` וכל כתיבה של הקולקטור מופיעה מיד.
+הדף נרשם עם `onSnapshot` וכל כתיבה של הקולקטור מופיעה מיד.
 
-**5. כללי אבטחה — זה מה שמגן על ה-DB.** מצב test מאפשר לכל אחד באינטרנט
-לקרוא **וגם לכתוב**. קונפיג ה-web-SDK הציבורי (‏`apiKey`, ‏`projectId`)
-נשלח בדפדפן של כל מבקר ו**אינו** סוד; כללי האבטחה כן.
+**5. כללי אבטחה.** מצב test מאפשר לכל אחד באינטרנט לקרוא **וגם
+לכתוב**. קונפיג ה-web-SDK הציבורי (`apiKey`, `projectId`) נשלח בדפדפן
+של כל מבקר ו**אינו** סוד; כללי האבטחה כן.
 
-הכללים המצומצמים חיים ב-`src/firestore.rules`: קריאה ציבורית על קולקציות
-הדשבורד (‏`footfall`, ‏`latest`, ‏`reid_stats`, ‏`events`, ‏`config`), כל
-כתיבות client נדחות (ה-Admin SDK עוקף כללים, לכן הקולקטור לא נפגע).
-פרוס אותם:
+הכללים המצומצמים חיים ב-`src/firestore.rules`: קריאה ציבורית על
+קולקציות הדשבורד (`footfall`, `latest`, `reid_stats`, `events`,
+`config`), כל כתיבות client נדחות (ה-Admin SDK עוקף כללים, לכן
+הקולקטור לא נפגע). פרוס אותם:
 
 </div>
 
@@ -1384,28 +1363,29 @@ firebase deploy --only firestore:rules
 
 <div dir="rtl">
 
-ואז ב-Firebase Console ← Firestore ← Rules, אמת שהכתיבות מציגות `if false`.
+ואז ב-Firebase Console -> Firestore -> Rules, אמת שהכתיבות מציגות
+`if false`.
 
-**6. מדיניות TTL.** ‏Firebase Console ‏← ‏Firestore ‏← ‏Time-to-live ‏←
-הוסף TTL על ‏`footfall.expire_at` **וגם** ‏`events.expire_at` (שניהם
+**6. מדיניות TTL.** Firebase Console -> Firestore -> Time-to-live ->
+הוסף TTL על `footfall.expire_at` **וגם** `events.expire_at` (שניהם
 מתנקים אחרי 24 שעות).
 
-**7. ‏App Check (הגנה מהתעללות / מכסת קריאה).** כללים הופכים את הנתונים
-לקריאה-בלבד אך scraper עדיין יכול לשרוף את מכסת הקריאה. ‏App Check דורש
+**7. App Check (הגנה מהתעללות / מכסת קריאה).** כללים הופכים את הנתונים
+לקריאה-בלבד אך scraper עדיין יכול לשרוף את מכסת הקריאה. App Check דורש
 שכל בקשה תישא attestation של reCAPTCHA v3.
 
-‏Firebase Console ‏← ‏App Check ‏← ‏Apps ‏← רשום את ה-web app עם provider
-‏reCAPTCHA v3. העתק את ה-site key ל-`web/firebase-config.js` בתור
-‏`recaptchaSiteKey`; ‏`web/app.js` מאתחל את App Check אוטומטית ברגע שהוא
-מוגדר. כשאתה בטוח, ‏App Check ‏← ‏Firestore ‏← ‏Enforce.
+Firebase Console -> App Check -> Apps -> רשום את ה-web app עם provider
+reCAPTCHA v3. העתק את ה-site key ל-`web/firebase-config.js` בתור
+`recaptchaSiteKey`; `web/app.js` מאתחל את App Check אוטומטית ברגע שהוא
+מוגדר. כשאתה בטוח, App Check -> Firestore -> Enforce.
 
-הפעל אכיפה **רק** לאחר שה-site key חי בעמוד — אחרת קריאות מאוכפות
+הפעל אכיפה **רק** לאחר שה-site key חי בעמוד - אחרת קריאות מאוכפות
 נדחות והדשבורד נהיה ריק.
 
-**8. ‏Rate limit + cost cap.** ‏Firestore Spark tier ‏≈ 20k writes/day.
+**8. Rate limit + cost cap.** Firestore Spark tier =~ 20k writes/day.
 הקולקטור מדפיס את ספירת הכתיבות היומית הצפויה בהפעלה ומגביל את
-‏`--interval` ל-5s. הגדר ‏budget alert ב-Google Cloud ‏← ‏Billing; במסלול
-‏Blaze, הגדר גם App Engine daily spending limit — זה ה-hard cap האמיתי.
+`--interval` ל-5s. הגדר budget alert ב-Google Cloud -> Billing; במסלול
+Blaze, הגדר גם App Engine daily spending limit - זה ה-hard cap האמיתי.
 ל-Firestore אין rate-limit פר-user משלו.
 
 </div>
@@ -1414,16 +1394,16 @@ firebase deploy --only firestore:rules
 
 <div dir="rtl">
 
-## 12. ‏Cloudflare Worker ל-IBB
+## 12. Cloudflare Worker ל-IBB
 
-‏`kamerayayin.ibb.istanbul` מסרב לכל טווח IP של Google Cloud (‏HTTP 403)
-אבל עונה בנורמליות מכל כתובת אחרת. ‏Cloudflare Worker במסלול החינמי (‏100k
-requests/day, העומס שלנו ~‏26k/day) מגלגל את בקשות IBB דרך edge של Cloudflare
-— ‏ASN שונה — ומשיב את ‏`taksim_yeni`, ‏`sultanahmet_1_yeni`,
-‏`eyup_sultan_yeni`, ‏`beyazit_meydan_yeni`.
+`kamerayayin.ibb.istanbul` מסרב לכל טווח IP של Google Cloud (HTTP 403)
+אבל עונה בנורמליות מכל כתובת אחרת. Cloudflare Worker במסלול החינמי
+(100k requests/day, העומס שלנו ~26k/day) מגלגל את בקשות IBB דרך edge
+של Cloudflare (ASN שונה) ומשיב את `taksim_yeni`, `sultanahmet_1_yeni`,
+`eyup_sultan_yeni`, `beyazit_meydan_yeni`.
 
 מקור ה-worker וקבצי הפריסה נשארים ב-`src/deploy/cloudflare-proxy/`:
-‏`worker.js` (ה-fetch handler) ו-`wrangler.toml` (קונפיג הפריסה).
+`worker.js` (ה-fetch handler) ו-`wrangler.toml` (קונפיג הפריסה).
 
 **הגדרה חד-פעמית (~5 דקות):**
 
@@ -1474,16 +1454,16 @@ curl -s -H "X-Proxy-Secret: <your secret>" \
 
 <div dir="rtl">
 
-**מה ה-worker **‏לא** עושה:**
+**מה ה-worker **לא** עושה:**
 
-- אין caching שישבור liveness (‏`cf.cacheTtl: 4` תואם לסבב HLS ‏~4s
+- אין caching שישבור liveness (`cf.cacheTtl: 4` תואם לסבב HLS ~4s
   segment rotation).
-- אין proxying של hosts אחרים (רק ‏`kamerayayin.ibb.istanbul`; כל דבר
+- אין proxying של hosts אחרים (רק `kamerayayin.ibb.istanbul`; כל דבר
   אחר מחזיר 403).
-- אין proxying של ‏`tvkur.com` (‏Konya, ‏Otogar ומצלמות תורכיות אחרות של
-  ‏webcamera24 — ‏tvkur מגביל גם ‏ASNs residential, ו-edge של Cloudflare
+- אין proxying של `tvkur.com` (Konya, Otogar ומצלמות תורכיות אחרות של
+  webcamera24 - tvkur מגביל גם ASNs residential, ו-edge של Cloudflare
   עומד באותו 403; אלו זקוקות ל-proxy עם IP תורכי ספציפי, מחוץ לתקציב
-  ה-‏free-tier).
+  ה-free-tier).
 
 </div>
 
@@ -1494,22 +1474,23 @@ curl -s -H "X-Proxy-Secret: <your secret>" \
 ## 13. ה-Killswitch של החיוב ב-GCP
 
 מכבה חיוב אוטומטית ב-`turkey-footfall` ברגע שסף תקציב של Cloud Billing
-נחצה. זה ההבדל בין "מייל ב-3 בבוקר שאתה מעל תקציב" (התראת תקציב פשוטה)
-לבין "השירותים הפסיקו לחייב אותך שלוש דקות אחרי שחצית $5" (זה).
+נחצה. זה ההבדל בין התראת תקציב פשוטה (מייל ב-3 בבוקר שאתה מעל תקציב)
+לבין ניתוק אוטומטי של החיוב בתוך שלוש דקות מחציית הסף.
 
-מקור נשאר ב-`src/deploy/gcp-billing-killswitch/`: ‏`main.py` (ה-Cloud
-Function), ‏`requirements.txt`.
+מקור נשאר ב-`src/deploy/gcp-billing-killswitch/`: `main.py` (ה-Cloud
+Function), `requirements.txt`.
 
 **מקדימים (פעם אחת):**
 
-1. **הפעל APIs**: ‏Cloud Pub/Sub, ‏Cloud Functions, ‏Cloud Build, ‏Cloud Billing.
+1. **הפעל APIs**: Cloud Pub/Sub, Cloud Functions, Cloud Build, Cloud
+   Billing.
 2. **צור נושא Pub/Sub** שהתקציב יפרסם אליו:
    ```bash
    gcloud pubsub topics create budget-alerts --project=turkey-footfall
    ```
-3. **חבר את הנושא לתקציב:** ‏GCP Console ‏← ‏Billing ‏← ‏Budgets & alerts ‏←
-   פתח את התקציב ‏← ‏Manage notifications ‏← ‏Connect a Pub/Sub topic ‏← בחר
-   ‏`projects/turkey-footfall/topics/budget-alerts`.
+3. **חבר את הנושא לתקציב:** GCP Console -> Billing -> Budgets & alerts
+   -> פתח את התקציב -> Manage notifications -> Connect a Pub/Sub topic
+   -> בחר `projects/turkey-footfall/topics/budget-alerts`.
 4. **צור את ה-runtime SA:**
    ```bash
    gcloud iam service-accounts create billing-killswitch \
@@ -1526,11 +1507,11 @@ Function), ‏`requirements.txt`.
      --member=serviceAccount:billing-killswitch@turkey-footfall.iam.gserviceaccount.com \
      --role=roles/browser
    ```
-   ל-‏`billing.projectManager` יש ‏`deleteBillingAssignment` (ה-unlink
-   בפועל). ל-‏`browser` יש ‏`resourcemanager.projects.get` הדרוש לבדיקת
-   ה-‏idempotency שרצה לפני ה-unlink.
-6. **הפעל בכפייה את ה-Pub/Sub service agent** (דלג רק אם הפרויקט השתמש
-   בעבר ב-Pub/Sub push-subscriptions):
+   ל-`billing.projectManager` יש `deleteBillingAssignment` (ה-unlink
+   בפועל). ל-`browser` יש `resourcemanager.projects.get` הדרוש לבדיקת
+   ה-idempotency שרצה לפני ה-unlink.
+6. **הפעל בכפייה את ה-Pub/Sub service agent** (דלג רק אם הפרויקט
+   השתמש בעבר ב-Pub/Sub push-subscriptions):
    ```bash
    gcloud beta services identity create --service=pubsub.googleapis.com \
      --project=turkey-footfall
@@ -1591,17 +1572,19 @@ gcloud functions logs read billing-killswitch --gen2 --region=us-east1 --limit=2
 
 <div dir="rtl">
 
-**הפעל מחדש את החיוב אחרי הבדיקה:** ‏GCP Console ‏← ‏Billing ‏← ‏Link this
-project to a billing account.
+**הפעל מחדש את החיוב אחרי הבדיקה:** GCP Console -> Billing -> Link
+this project to a billing account.
 
-**מה זה **‏לא** עושה:** לא מוחק resources (ה-VM, נתוני Firestore, דלי
-Storage, ה-function עצמה — כולם נשארים; הם פשוט מפסיקים לייצר אירועים
+**מה זה **לא** עושה:** לא מוחק resources (ה-VM, נתוני Firestore, דלי
+Storage, ה-function עצמה כולם נשארים; הם פשוט מפסיקים לייצר אירועים
 חייבים עד ש-billing account מחובר מחדש); לא נוגע בשירותי free-tier
-(ה-e2-micro ממשיך לרוץ); לא אכפת לו איזה סף נחצה (‏Google מפרסמת בכל
-סף מוגדר — ‏50/90/100/120%; ה-function מנתקת רק כאשר ‏`costAmount ≥ budgetAmount`).
+(ה-e2-micro ממשיך לרוץ); לא אכפת לו איזה סף נחצה (Google מפרסמת בכל
+סף מוגדר - 50/90/100/120%; ה-function מנתקת רק כאשר
+`costAmount >= budgetAmount`).
 
-עלות ה-killswitch עצמו: אפס — הודעת Pub/Sub אחת לחצייה, ‏Cloud Function
-invocation אחת (‏2M/חודש חינמיים), ‏Cloud Storage לקוד ה-function (‏Always Free).
+עלות ה-killswitch עצמו: אפס - הודעת Pub/Sub אחת לחצייה, Cloud Function
+invocation אחת (2M/חודש חינמיים), Cloud Storage לקוד ה-function
+(Always Free).
 
 </div>
 
@@ -1611,104 +1594,42 @@ invocation אחת (‏2M/חודש חינמיים), ‏Cloud Storage לקוד ה-
 
 ## 14. תקלות נפוצות ותשובות
 
-**"הספירות פר-אריח בדשבורד הן ‏'‏from Ns ago' והתווית אדומה."**
-הקולקטור לא עומד בקצב של ‏`--interval`. הרץ את בטריית ה-health-check
-(§4.5); אם הזיכרון בסדר אבל ה-CPU רווי, עבור ל-‏`--weights yolov8n.pt
+**"הספירות פר-אריח בדשבורד הן 'from Ns ago' והתווית אדומה."**
+הקולקטור לא עומד בקצב של `--interval`. הרץ את בטריית ה-health-check
+(§4.5); אם הזיכרון בסדר אבל ה-CPU רווי, עבור ל-`--weights yolov8n.pt
 --imgsz 768` בשורת ה-ExecStart (§3.4).
 
-**"ניתוח חי על מצלמת skyline שנבחרה מקבל 404."** תוקן בסבב האודיט —
-‏`_cam_from_slot` עכשיו מטפל ב-slots של ‏`kind="skyline"` מ-
-‏`web/local_grid.json`. גרסאות ישנות לפני התיקון נכשלו עם
-‏`ValueError("no analyzable stream")`.
+**"ניתוח חי על מצלמת skyline שנבחרה מקבל 404."** `_cam_from_slot`
+עכשיו מטפל ב-slots של `kind="skyline"` מ-`web/local_grid.json`.
+גרסאות ישנות לפני התיקון נכשלו עם `ValueError("no analyzable stream")`.
 
-**"מייל הדיגסט היומי לא מגיע."** בדוק ‏`/etc/turkey-footfall/digest.env`
-קיים עם app password אמיתי של Gmail (‏`sudo cat` כ-root); בדוק
-‏`sudo systemctl status digest.timer` לזמן ה-fire הבא; הרץ
-‏`sudo systemctl start digest.service` להרצה ידנית מיידית.
+**"מייל הדיגסט היומי לא מגיע."** בדוק `/etc/turkey-footfall/digest.env`
+קיים עם app password אמיתי של Gmail (`sudo cat` כ-root); בדוק
+`sudo systemctl status digest.timer` לזמן ה-fire הבא; הרץ
+`sudo systemctl start digest.service` להרצה ידנית מיידית.
 
-**"מצלמות טורקיה תמיד ‏MISS מה-VM."** ‏IBB חוסם גיאוגרפית ‏ASNs של Google
+**"מצלמות טורקיה תמיד MISS מה-VM."** IBB חוסם גיאוגרפית ASNs של Google
 Cloud. או שאתה מחבר את ה-Cloudflare Worker (§12), או שאתה מקבל שהגריד
-נופל לתאילנד / יפן / ארה"ב עד ש-IBB משתחררת. ‏`tools/probe_country
+נופל לתאילנד / יפן / ארה"ב עד ש-IBB משתחררת. `tools/probe_country
 --country turkey` מראה מצב חי של כל מצלמת טורקיה.
 
-**"איך אני מוסיף מצלמה חדשה?"** ערוך את ‏`src/app/cameras.py`: בחר
-‏`cam_id` יציב, מלא את ה-‏`kind` (‏`hls | youtube | webcamera24 | skyline`),
-את ה-URL ואת ה-page, שם התצוגה, וכל ‏`roi` / ‏`roi_exclude` / ‏`line`
-overrides. ‏`python -m tools.probe_country --country <c>` מאמת אותה.
-לא צריך שינוי ב-VM — ‏`git pull + systemctl restart` תופס את זה.
+**"איך אני מוסיף מצלמה חדשה?"** ערוך את `src/app/cameras.py`: בחר
+`cam_id` יציב, מלא את ה-`kind` (`hls | youtube | webcamera24 |
+skyline`), את ה-URL ואת ה-page, שם התצוגה, וכל `roi` / `roi_exclude`
+/ `line` overrides. `python -m tools.probe_country --country <c>`
+מאמת אותה. לא צריך שינוי ב-VM - `git pull + systemctl restart` תופס
+את זה.
 
 **"איך לוקחים את ה-VM offline לשבוע?"**
-‏`gcloud compute instances stop turkey-collector --zone=us-east1-c` —
-Firestore שומרת את 24 השעות האחרונות (‏TTL), הדשבורד מציג את המצב הידוע
-האחרון. ‏`gcloud compute instances start ...` כשחוזרים.
+`gcloud compute instances stop turkey-collector --zone=us-east1-c` -
+Firestore שומרת את 24 השעות האחרונות (TTL), הדשבורד מציג את המצב
+הידוע האחרון. `gcloud compute instances start ...` כשחוזרים.
 
-**"כמה זה באמת עולה בחודש?"** ‏$0 בהפעלה נורמלית. ה-e2-micro הוא Always
-Free; ‏Firestore Spark tier נשארת מתחת ל-20k writes/day; ‏Firebase Storage
-נשארת מתחת ל-5 GB חינמיים (~50 MB פעילים עם TTL 24h); ‏egress מ-GCP
-ל-Firebase (אותו region) חינמי. ה-killswitch שומר מפני חריגות מפתיעות
-(§13).
-
-**"המחברת התאומה חסרה אחרי clone."** בכוונה — ראה ‏`.gitignore:54`.
-התאומה (‏`turkey_business_activity_yolov8n.ipynb`) מקומית בלבד: העתק את
-המחברת הראשית ושנה ‏`MODEL_WEIGHTS = 'yolov8s.pt'`.
-
-</div>
-
----
-
-<div dir="rtl">
-
-## 15. נספח: החלטות עיצוב שהתקבלו
-
-רטרוספקטיבי. סקירה הנדסית שורה-שורה של ה-SPEC המקורי של הלמידה הפעילה
-מול מה שהקוד וסביבת הפרודקשן באמת דרשו. כל verdict מתאר מה שרד, מה
-הוחלף, ולמה. נשמר כאן לקורא שרוצה את ה-WHY מאחורי הצורה הנוכחית.
-
-**‏D1 — ‏MC-Dropout uncertainty:** ‏REJECTED. ל-YOLOv8 detection יש
-**אפס** ‏`nn.Dropout` modules — ה-variance של T=10 stochastic-pass היה
-בדיוק 0. ההחלפה (‏WS1, שנשלח): ‏margin מול ה-gate האפקטיבי פר-מחלקה (‏0.6)
-בתוספת ‏one-pass flip delta על bursts שנדגמו (‏0.4). אותו contract downstream,
-עלות כמעט אפסית.
-
-**‏D2 — ‏LoRA-via-peft:** ‏REPLACED. ‏peft-wrapping של ה-Detect של
-‏Ultralytics שובר גישה ל-attributes (‏`stride`, ‏`nc`, ‏`reg_max`), ‏EMA
-deep-copies ו-checkpoint pickling. ‏`yolo detect train freeze=<all-but-head>`
-native מספק את אותה תוצאה של "‏artifact קטן, ‏backbone קפוא" בלי deps
-אקזוטיים. ה-head-only `.pt` (~4-6 MB) הוא ה-"‏adapter".
-
-**‏D3 — ‏COCO export:** ‏SUPERSEDED. ‏`tools/export_labels.py` כבר פולט
-‏dataset בפורמט YOLO (פיצול כרונולוגי 90/10, מיפוי verdict כולל
-‏relabel + operator-added misses). ‏Ultralytics מתאמן מזה native; ניתן
-להוסיף converter ל-COCO מאוחר יותר אם איזה כלי חיצוני יזדקק לו.
-
-**‏D4 — ‏BADGE embeddings:** ‏UPGRADED input. ‏OSNet ONNX עכשיו נשלח
-בריפו והוא ה-embedder הדיפולטיבי בכל מקום (‏auto-detected). ‏BADGE מקבל
-וקטורים ‏identity-grade של ‏512-d מהיום הראשון; ‏k-means++ init הוא
-עצמי (~30 שורות) — ‏sklearn נשאר מחוץ ל-VM.
-
-**‏D5 — ‏Architecture option B (‏split VM / external trainer):** ‏CONFIRMED.
-‏`app/pool_sync.py` כבר מזיז artefacts ‏VM↔Storage↔operator עם manifests,
-batching, ו-public URLs; ‏round-trip האימון משתמש בו מחדש תחת קידומת
-‏`training/`.
-
-**‏D6 — ‏Bit-identical fallback:** ‏TRIVIALLY SATISFIED. ‏Head-overlay
-loading פירושו "אין adapter file" = מודל בסיס ללא שינוי — ‏byte-identical.
-אין ‏identity-LoRA gymnastics.
-
-**‏D7 — ‏VM resource envelope:** ‏TIGHTENED אחרי אירועי oom-kill חיים.
-מעטפה סטנדרטית לכל תוספת VM: ‏`MALLOC_ARENA_MAX=2`, ‏`OMP_NUM_THREADS=2`,
-‏`/swapfile` של 2 GB, כל חישוב חדש פר-סבב שומר את הסבב שנמדד מתחת ל-~‏30s,
-כל upload path חדש עושה batching (‏≤ 40 objects/pass), ‏Firestore נשארת
-מתחת ל-20k writes/day.
-
-**‏D8 — ניסוח mAP:** ‏ADJUSTED. יעדי ‏mAP נמדדים עם ‏Ultralytics ‏`val`
-על ה-split הכרונולוגי של ה-exporter. הכותרת של "‏40% פחות labels"
-נמדדת ‏naive-vs-BADGE על checkpoints מותאמים-‏label-count בהשוואה
-כרונולוגית; ‏two-camera A/B הוא stretch אופציונלי, לא שער.
-
-**‏D9 — ‏Trainer host + ‏adapter retention:** נחתם על ידי המפעיל בהתנעה.
-ברירות מחדל נוכחיות: ‏GitHub Actions לאימון (‏runners של ריפו ציבורי,
-חינם); ‏adapter retention = היסטוריה מלאה ב-‏`history.jsonl`.
+**"כמה זה באמת עולה בחודש?"** $0 בהפעלה נורמלית. ה-e2-micro הוא Always
+Free; Firestore Spark tier נשארת מתחת ל-20k writes/day; Firebase
+Storage נשארת מתחת ל-5 GB חינמיים (~50 MB פעילים עם TTL 24h); egress
+מ-GCP ל-Firebase (אותו region) חינמי. ה-killswitch שומר מפני חריגות
+מפתיעות (§13).
 
 </div>
 

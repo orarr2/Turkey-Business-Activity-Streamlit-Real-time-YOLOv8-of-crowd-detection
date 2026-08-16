@@ -1,12 +1,10 @@
 <div dir="rtl">
 
-# מדריך תא-אחר-תא - המחברת התאומה (turkey_business_activity_yolov8s.ipynb)
+# מדריך תא-אחר-תא - turkey_business_activity_yolov8s.ipynb
 
-מסמך זה מלווה את **המחברת התאומה** של הפרויקט, תא-אחר-תא. התאומה היא מראה של המחברת הראשית עם שינוי אחד קריטי: `MODEL_WEIGHTS = 'yolov8s.pt'`, בדיוק המשקולות המקובעות בקולקטור שרץ 24/7 על ה-VM מסוג `e2-micro` ב-GCP. המחברת הראשית רצה עם `yolo26m` (מודל דור 2026, גרסה medium) - מודל חזק שמשמש כהפניית דיוק (ground truth) מקומית; התאומה רצה עם המודל החלש יותר בדיוק כדי שהתוצאות המקומיות ניתנות להשוואה ישירה למספרים המצטברים בדשבורד הענן. הקובץ הזה עבר שינוי-שם היום מהשם ההיסטורי `_yolov8n` לאחר שהמשקולות ב-VM שודרגו מ-nano ל-small.
+מסמך זה מלווה את המחברת של הפרויקט תא-אחר-תא. המחברת רצה עם `MODEL_WEIGHTS = 'yolov8s.pt'`, אותן משקולות המקובעות בקולקטור שרץ 24/7 על ה-VM מסוג `e2-micro` ב-GCP.
 
-כשתא כאן זהה לתא במחברת הראשית מציינים זאת מפורשות, יחד עם ההשלכה המעשית של השימוש במודל החלש (חוסר-דיוק מדוד, שנצבע בפרק הקליברציה).
-
-הדשבורד שהתאומה מרימה בפרק 7 הוא אותו דשבורד של הראשית, כולל עשר שכבות הניתוח החי (‏paths, pose, gestures, body, faces, line, loiter, parking, plates, heat). ההסבר המלא מנגנון-אחר-מנגנון, עם הספים והנימוקים לכל שכבה: ‏PROJECT_GUIDE_HE פרק 5 ("10 שכבות הניתוח החי").
+הדשבורד שהמחברת מרימה בפרק 7 כולל עשר שכבות הניתוח החי (paths, pose, gestures, body, faces, line, loiter, parking, plates, heat). ההסבר המלא מנגנון-אחר-מנגנון, עם הספים והנימוקים לכל שכבה: PROJECT_GUIDE_HE פרק 5 ("10 שכבות הניתוח החי").
 
 </div>
 
@@ -16,96 +14,95 @@
 
 ## תוכן עניינים
 
-### מבוא (תאים 0-3)
+### מבוא (תאים 0-2)
 
 1. [תא 0 - כותרת + סיכום מלמעלה למטה](#cell-0)
 2. [תא 1 - מציאות רשת](#cell-1)
 3. [תא 2 - סולם ה-fallback של המדינות](#cell-2)
-4. [תא 3 - שני זמני-ריצה: המחברת מול ה-VM](#cell-3)
 
-### חלק 0 - Setup (תאים 4-6)
+### חלק 0 - Setup (תאים 3-5)
 
-5. [תא 4 - כותרת החלק](#cell-4)
-6. [תא 5 - בדיקת תלויות](#cell-5)
-7. [תא 6 - יבואים + טעינת מודל (‏VM parity)](#cell-6)
+4. [תא 3 - כותרת החלק](#cell-4)
+5. [תא 4 - בדיקת תלויות](#cell-5)
+6. [תא 5 - יבואים + טעינת מודל](#cell-6)
 
-### חלק 1 - בחירת מצלמה (תאים 7-13)
+### חלק 1 - בחירת מצלמה (תאים 6-12)
 
-8. [תא 7 - סבר-בורר מצלמות](#cell-7)
-9. [תא 8 - קטלוג המצלמות עם קישורים](#cell-8)
-10. [תא 9 - הבורר עצמו + auto-follow ל-VM](#cell-9)
-11. [תא 10 - כותרת: מצלמות שנבחרו](#cell-10)
-12. [תא 11 - checkpoint של הבחירה](#cell-11)
-13. [תא 12 - הסבר: `resolve_stream` ו-kinds](#cell-12)
-14. [תא 13 - טעינת המצלמה הראשונה](#cell-13)
+7. [תא 6 - הסבר הבורר](#cell-7)
+8. [תא 7 - קטלוג המצלמות עם קישורים](#cell-8)
+9. [תא 8 - הבורר עצמו + auto-follow ל-VM](#cell-9)
+10. [תא 9 - כותרת: מצלמות שנבחרו](#cell-10)
+11. [תא 10 - checkpoint של הבחירה](#cell-11)
+12. [תא 11 - הסבר: `resolve_stream` ו-kinds](#cell-12)
+13. [תא 12 - טעינת המצלמה הראשונה](#cell-13)
 
-### חלק 2 - בדיקת פריים בודד (תאים 14-15)
+### חלק 2 - בדיקת פריים בודד (תאים 13-14)
 
-15. [תא 14 - כותרת + הסבר](#cell-14)
-16. [תא 15 - grab_frame + YOLO + הצגה](#cell-15)
+14. [תא 13 - כותרת + הסבר](#cell-14)
+15. [תא 14 - grab_frame + YOLO + הצגה](#cell-15)
 
-### חלק 3 - סדרת זמן של footfall (תאים 16-17)
+### חלק 3 - סדרת זמן של footfall (תאים 15-16)
 
-17. [תא 16 - כותרת + הסבר](#cell-16)
-18. [תא 17 - `footfall_series` והרצה קצרה](#cell-17)
+16. [תא 15 - כותרת + הסבר](#cell-16)
+17. [תא 16 - `footfall_series` והרצה קצרה](#cell-17)
 
-### חלק 4 - אנומליות + פרופיל שעה (תאים 18-19)
+### חלק 4 - אנומליות + פרופיל שעה (תאים 17-18)
 
-19. [תא 18 - כותרת + הסבר](#cell-18)
-20. [תא 19 - robust-z (‏median + MAD) + גרפים](#cell-19)
+18. [תא 17 - כותרת + הסבר](#cell-18)
+19. [תא 18 - robust-z (median + MAD) + גרפים](#cell-19)
 
-### חלק 5 - Dwell-time / עצירות ממושכות (תאים 20-22)
+### חלק 5 - Dwell-time / עצירות ממושכות (תאים 19-21)
 
-21. [תא 20 - כותרת + מוטיבציה](#cell-20)
-22. [תא 21 - `dwell_analysis` עם ByteTrack](#cell-21)
-23. [תא 22 - סימון עצירות ממושכות + Linger rate](#cell-22)
+20. [תא 19 - כותרת + מוטיבציה](#cell-20)
+21. [תא 20 - `dwell_analysis` עם ByteTrack](#cell-21)
+22. [תא 21 - סימון עצירות ממושכות + Linger rate](#cell-22)
 
-### חלק 5b - Re-identification (תאים 23-28)
+### חלק 5b - Re-identification (תאים 22-27)
 
-24. [תא 23 - כותרת + הסבר האלגוריתם](#cell-23)
-25. [תא 24 - הכנת מאגר Re-ID](#cell-24)
-26. [תא 25 - לולאת דגימה + עדכון re-ID](#cell-25)
-27. [תא 26 - roll-up: יישויות ייחודיות + regulars](#cell-26)
-28. [תא 27 - גרף עקומת המבקרים החוזרים](#cell-27)
-29. [תא 28 - הערת איכות + מסלול פרודקשן](#cell-28)
+23. [תא 22 - כותרת + הסבר האלגוריתם](#cell-23)
+24. [תא 23 - הכנת מאגר Re-ID](#cell-24)
+25. [תא 24 - לולאת דגימה + עדכון re-ID](#cell-25)
+26. [תא 25 - roll-up: יישויות ייחודיות + regulars](#cell-26)
+27. [תא 26 - גרף עקומת המבקרים החוזרים](#cell-27)
+28. [תא 27 - הערת איכות + מסלול פרודקשן](#cell-28)
 
-### חלק 6 - ציון "האם כדאי לפתוח כאן עסק" (תאים 29-30)
+### חלק 6 - ציון "האם כדאי לפתוח כאן עסק" (תאים 28-29)
 
-30. [תא 29 - כותרת + נוסחת הציון](#cell-29)
-31. [תא 30 - `business_score` והדפסה](#cell-30)
+29. [תא 28 - כותרת + נוסחת הציון](#cell-29)
+30. [תא 29 - `business_score` והדפסה](#cell-30)
 
-### חלק 7 - השוואה לדשבורד הענן החי (תאים 31-32)
+### חלק 7 - השוואה לדשבורד הענן החי (תאים 30-31)
 
-32. [תא 31 - כותרת + מוטיבציה](#cell-31)
-33. [תא 32 - שרת local + local_grid.json + הטמעה ב-iframe](#cell-32)
+31. [תא 30 - כותרת + מוטיבציה](#cell-31)
+32. [תא 31 - שרת local + local_grid.json + הטמעה ב-iframe](#cell-32)
 
-### חלק 8 - השוואת אתרים מסחריים מרובים (תאים 33-34)
+### חלק 8 - השוואת אתרים מסחריים מרובים (תאים 32-33)
 
-34. [תא 33 - כותרת + הסבר](#cell-33)
-35. [תא 34 - דירוג המצלמות שנבחרו](#cell-34)
+33. [תא 32 - כותרת + הסבר](#cell-33)
+34. [תא 33 - דירוג המצלמות שנבחרו](#cell-34)
 
-### חלק 9 - סיכום חי (תאים 35-36)
+### חלק 9 - סיכום חי (תאים 34-35)
 
-36. [תא 35 - כותרת + הסבר](#cell-35)
-37. [תא 36 - איסוף אנומליות + re-ID + גרף](#cell-36)
+35. [תא 34 - כותרת + הסבר](#cell-35)
+36. [תא 35 - איסוף אנומליות + re-ID + גרף](#cell-36)
 
-### חלק 10 - קליברציית דיוק (תאים 37-40)
+### חלק 10 - קליברציית דיוק (תאים 36-39)
 
-38. [תא 37 - כותרת + workflow](#cell-37)
-39. [תא 38 - 10a: capture פריימים + ריצת YOLO בשני imgsz](#cell-38)
-40. [תא 39 - 10b: תיוג אינטראקטיבי](#cell-39)
-41. [תא 40 - 10c: דוח MAE + bias](#cell-40)
+37. [תא 36 - כותרת + workflow](#cell-37)
+38. [תא 37 - 10a: capture פריימים + ריצת YOLO בשני imgsz](#cell-38)
+39. [תא 38 - 10b: תיוג אינטראקטיבי](#cell-39)
+40. [תא 39 - 10c: דוח MAE + bias](#cell-40)
 
-### חלק 11 - חיזוי (תאים 41-44)
+### חלק 11 - חיזוי (תאים 40-43)
 
-42. [תא 41 - כותרת + הפילוסופיה: רק המנצח האופרטיבי](#cell-41)
-43. [תא 42 - 11a: משיכת ההיסטוריה מ-Firestore ל-cache מקומי](#cell-42)
-44. [תא 43 - 11b: resample לרשת 15 דקות + סינון epoch](#cell-43)
-45. [תא 44 - 11c-VM: profile x EWMA + band](#cell-44)
+41. [תא 40 - כותרת + הפילוסופיה: מנצח אופרטיבי](#cell-41)
+42. [תא 41 - 11a: משיכת ההיסטוריה מ-Firestore ל-cache מקומי](#cell-42)
+43. [תא 42 - 11b: resample לרשת 15 דקות + סינון epoch](#cell-43)
+44. [תא 43 - 11c: profile x EWMA + band](#cell-44)
 
-### חלק 12 - איך הדשבורד עובד במצב twin (תא 45)
+### חלק 12 - איך הדשבורד עובד (תא 44)
 
-46. [תא 45 - הסבר על tabs + פורט + restart](#cell-45)
+45. [תא 44 - הסבר על tabs + פורט + restart](#cell-45)
 
 </div>
 
@@ -118,19 +115,15 @@
 
 ### תא 0 - markdown - כותרת + סיכום מלמעלה למטה
 
-**מה עושה:** תא הפתיחה של המחברת. מכיל שורת פרולוג ("Twin notebook - runs the same pinned yolov8s weights as the GCP collector"), כותרת ראשית ופסקת רקע: מה יקרה מלמעלה למטה כשמריצים את המחברת מקצה-לקצה, ולמה בכלל להריץ אותה מקומית במקום להסתכל על הדשבורד. הרעיון: לנתח דגימה קצרה של YOLO מ**מצלמה פומברית** אחת (טורקיה / תאילנד / יפן / ארה"ב) ולהשוות את התוצאה **לחי** להיסטוריית 24 השעות שנצברה בענן.
+**מה עושה:** תא הפתיחה של המחברת. מכיל כותרת ראשית ופסקת רקע: מה יקרה מלמעלה למטה כשמריצים את המחברת מקצה-לקצה. הרעיון: לנתח דגימה קצרה של YOLO ממצלמה פומבית אחת (טורקיה / תאילנד / יפן / ארה"ב) ולהשוות את התוצאה לחי להיסטוריית 24 השעות שנצברה בענן.
 
 **למה:** תא המבוא מכוון את הקורא. הוא מבהיר שהמחברת אינה סתם demo של YOLO, אלא כלי השוואה: אתה מריץ אצלך דקה של דגימה על מצלמה, ומיד רואה איך היא נראית מול מספרי הענן על אותה יחידת זמן.
 
 **פלטים:** רק תוכן markdown שמוצג ב-Jupyter (אין קוד להריץ). מפורט מה תקבל בכל שלב: setup, קטלוג + בורר, פרקים 1-6 עם ניתוחים, פרק 7 שמראה את הדשבורד עצמו מוטמע, ואחר-כך פרקים לחישוב ציון, דירוג, קליברציה וסיכום.
 
-**שונה מהראשית?** כן. הכותרת מוסיפה שורה בראש ("Twin notebook - runs the same pinned yolov8s weights") שאינה קיימת בראשית, ובתיאור המפורט של setup נכתב במפורש "this twin = the VM's yolov8s". שאר התוכן זהה.
-
 </div>
 
 ```markdown
-Twin notebook - runs the same pinned yolov8s weights as the GCP collector.
-
 # Business Activity - Live Footfall
 
 Run this end-to-end to analyze **your own** short YOLO sample from a public
@@ -140,7 +133,7 @@ running on a GCP e2-micro).
 
 What you get, top-to-bottom:
 
-- Setup: dependency check, then load the detector (this twin = the VM's yolov8s).
+- Setup: dependency check, then load the detector (yolov8s @ imgsz 640).
 - Camera catalog + picker: pick 4 cameras from ONE country by number.
 - Sections 1-6: verify the stream decodes, then footfall, anomalies, dwell-time
   tracking and appearance-based re-identification on your picks.
@@ -160,8 +153,6 @@ What you get, top-to-bottom:
 **למה:** מנע ניסיונות ריצה כושלים. הקורא שיפעיל את המחברת בענן (Colab, sandbox) יגלה שכל המצלמות התורכיות מחזירות `None` ולא יבין למה - התא הזה חוסך את הזמן.
 
 **פלטים:** רק תוכן markdown. אין קוד.
-
-**שונה מהראשית?** לא, זהה.
 
 </div>
 
@@ -185,17 +176,15 @@ streams resolve. Heavy 1080p segments are downloaded head-only (first
 **מה עושה:** מסביר איך הקולקטור ב-VM בוחר מצלמות: אף פעם לא נעול על סט קבוע, אלא מריץ מחלקת `CountryDirector` שתמיד מציגה 4 מצלמות ממדינה אחת ונופלת בסולם עדיפות **טורקיה - תאילנד - יפן - ארה"ב** רק כשהמדינה הפעילה כולה חשוכה. בתוך כל מדינה יש סולם משנה (רשימת המצלמות של אותה מדינה) עם ארבעה כללים:
 
 1. **בריאות פר-מצלמה** - מצלמה שמחטיאה 3 דגימות ברצף נחה 15 דקות; הגריד ממלא מהספסל של אותה מדינה. מצלמה מסוג `tvkur` (קוניה) היא בדיקה בסיכון נמוך - החטאה אחת מכניסה אותה למנוחה.
-2. **מנתק-זרם ברמת ה-host** - כשה-host כולו מסרב גישה (‏HTTP 403/429, מה שקורה למצלמות IBB איסטנבול מ-GCP), *כל* המצלמות שלו נחות 20 דקות ובקשת גישוש בודדת קובעת מתי הן חוזרות. זה מונע מהקולקטור להכות ב-CDN חוסם.
+2. **מנתק-זרם ברמת ה-host** - כשה-host כולו מסרב גישה (HTTP 403/429, מה שקורה למצלמות IBB איסטנבול מ-GCP), *כל* המצלמות שלו נחות 20 דקות ובקשת גישוש בודדת קובעת מתי הן חוזרות. זה מונע מהקולקטור להכות ב-CDN חוסם.
 3. **התקדמות מדינה** - רק כשהמדינה הפעילה לא יכולה להעמיד ולו מצלמה חיה אחת הגריד עובר למדינה הבאה. מצלמה מתה אחת לעולם לא מזיזה את הגריד ממדינה - היא רק ממולאת.
 4. **התאוששות לפני הדוח** - כמה דקות לפני כל דוח יומי הקולקטור מבצע re-probe למדינות עדיפות גבוהה יותר. טורקיה היא הנושא, לכן הגריד קופץ אליה חזרה ברגע שהחסימה משתחררת.
 
 שדות הדוח (כותרת, אזור-זמן ל-baseline של שעה-של-שבוע, שער יום/לילה) עוקבים אחר איזו מדינה - ואיזו מצלמה - חיה כרגע.
 
-**למה:** הכלל הזה שולט על מה תראה במחברת התאומה כשהיא ב-auto-follow. אם ה-VM ברגע נתון על ספסל ארה"ב, גם התאומה שלך תרוץ על אותן 4 מצלמות ארה"ב, לא על המצלמות שקיווית לראות.
+**למה:** הכלל הזה שולט על מה תראה במחברת כשהיא ב-auto-follow. אם ה-VM ברגע נתון על ספסל ארה"ב, גם המחברת שלך תרוץ על אותן 4 מצלמות ארה"ב, לא על המצלמות שקיווית לראות.
 
 **פלטים:** רק תוכן markdown.
-
-**שונה מהראשית?** לא, זהה.
 
 </div>
 
@@ -231,67 +220,14 @@ street and an Istanbul square cross into night at different UTC hours, and the
 US bench alone spans Eastern, Central and Pacific time.
 ```
 
-<a id="cell-3"></a>
-<div dir="rtl">
-
-### תא 3 - markdown - שני זמני-ריצה: המחברת מול ה-VM
-
-**מה עושה:** מציג טבלת השוואה בין המחברת המקומית (החזקה) לקולקטור ה-VM (החלש) עם ארבעה עמודים: מטרה, מודל, גודל קלט, חומרה, עלות. הקטע העיקרי שהתאומה חולקת עליו: הראשית מתוארת כרצה `yolo26m` ב-`imgsz=960`, וה-VM כרץ `yolov8s` ב-`imgsz=640` (עד 2026-08-05 היה `yolov8n`). **התא נשאר כפי שהוא גם בתאומה** ולא הוחלף - הוא נשאר טקסט הסבר על הפער בין המקומי לענן, למרות שהתאומה עצמה כבר לא "המקומית החזקה" אלא בעצם המצב של ה-VM.
-
-מספרים מדודים ב-2026-08-05 על אותם פריימים חיים: `yolov8n@512` מצא 0 אנשים בטקסים ו-0 כלי רכב בסראחנה; `yolov8s@960` מצא 5 ו-7; `yolo26m@960` מצא 6 אנשים ו-16 כלי רכב + אוטובוס. ההערה בסוף מפנה למחברת התאומה (הזאת): `turkey_business_activity_yolov8s.ipynb` (השם ההיסטורי, טרם עודכן ל-`yolov8s`) - הרץ אותה כדי לראות בדיוק מה ה-VM רואה.
-
-**למה:** לתאר את פער-הדיוק הצפוי. מי שמסתכל על המספרים בענן ומצפה למספרים שלמים ומדויקים צריך לדעת שהמודל שמייצר אותם מגיב חלש למצלמות רחוב רחבות; המחברת הראשית + הקליברציה נמדדים את הפער.
-
-**פלטים:** רק תוכן markdown.
-
-**שונה מהראשית?** בתוכן - לא. במעמד - כן: התא מדבר על "This notebook (local, strong)" מול "The VM collector (weak)", בעוד שהתאומה עצמה **היא** המצב החלש. ההערה בסוף עדיין מפנה לתאומה בשם היסטורי (`_yolov8n`) שכבר לא רלוונטי מאז השינוי לשם `_yolov8s`. הקורא מוזמן לפרש: המחברת שאתה מריץ עכשיו = המחברת שההערה מפנה אליה.
-
-</div>
-
-```markdown
-### Two runtimes: this notebook (strong) vs the VM collector (weak)
-
-The exact same detection pipeline runs in two places, tuned differently:
-
-| | **This notebook (local)** | **The VM collector (cloud)** |
-|---|---|---|
-| Purpose | Explore, calibrate, prove accuracy | 24/7 aggregation into Firestore |
-| Model | **YOLO26-m** (2026 generation, medium) | **`yolov8s`** (small; nano until 2026-08-05) |
-| Input size (`imgsz`) | 960 (recovers small/distant objects) | 640 (fits the free-tier CPU/RAM) |
-| Hardware | your machine (can use a GPU) | GCP `e2-micro`, 2 shared vCPU, 1 GB |
-| Cost | free, run on demand | must stay inside the Always-Free tier |
-
-**Why weaker on the VM?** The `e2-micro` has ~1 GB RAM and two *shared* vCPUs.
-A model like YOLO26-m at `imgsz=960` would blow the memory budget, so the VM
-runs the strongest configuration that fits: `yolov8s` at `imgsz=640` (measured
-on the live VM 2026-08-05: ~3 s of model time per 40 s round, RSS within the
-service's 760M ceiling). The earlier `yolov8n@512` era was an OOM fix from the
-5-camera days and undercounted badly - Sarachane peaked at 0 people in seven
-straight digests. What the small model still misses vs the YOLO26-m reference
-is the accuracy gap the calibration section measures.
-
-**How big is the gap?** Measured 2026-08-05 on identical live frames: the old
-`yolov8n@512` found **0** people at Taksim and **0** vehicles at Sarachane;
-`yolov8s@960` found 5 and 7; **YOLO26-m@960 found 6 people and 16 vehicles
-plus a bus.** So: the YOLO26-m notebook is the accurate reference; the VM is
-the cheap, always-on estimator. The calibration section quantifies the gap.
-
-> There are two notebooks. **This one** (`turkey_business_activity.ipynb`, on
-> GitHub) is the YOLO26-m reference. A local-only twin
-> (`turkey_business_activity_yolov8s.ipynb`) is identical except it loads
-> `yolov8n` - run it to see EXACTLY what the VM sees.
-```
-
 <a id="cell-4"></a>
 <div dir="rtl">
 
 ## חלק 0 - Setup
 
-### תא 4 - markdown - כותרת החלק
+### תא 3 - markdown - כותרת החלק
 
 **מה עושה:** כותרת חלק בלבד (`## 0. Setup`). מסמן את המעבר מהמבוא לחלק ההכנה הטכני.
-
-**שונה מהראשית?** לא.
 
 </div>
 
@@ -302,13 +238,11 @@ the cheap, always-on estimator. The calibration section quantifies the gap.
 <a id="cell-5"></a>
 <div dir="rtl">
 
-### תא 5 - code - בדיקת תלויות
+### תא 4 - code - בדיקת תלויות
 
 **מה עושה:** רץ פעם אחת ומוודא שכל הספריות שהמחברת צריכה מותקנות; מה שחסר, מותקן ב-`pip install -q`; בסוף מדפיס גרסאות מותקנות. הרשימה `REQUIREMENTS` מזווגת שם ייבוא לשם חבילה ב-pip: `cv2` -> `opencv-python-headless`, `PIL` -> `Pillow`, `yt_dlp` -> `yt-dlp`, `firebase_admin` -> `firebase-admin`, וכולי. `ipywidgets` מודבק ב-`>=8` כי הדשבורד ב-Jupyter דורש את זה.
 
 **למה:** אם ההרצה הראשונה נפלה על `ModuleNotFoundError` באמצע פרק 5 זה מעצבן; להתקין הכל בהתחלה זול, בטוח לחזור ולהריץ (הפעלות עוקבות הן רק dump של גרסאות).
-
-**אלטרנטיבות:** `requirements.txt` + `pip install -r` היה אלגנטי יותר בפרויקט אמיתי, אבל במחברת שרצה גם על מכונה חדשה בלי הכנה מקדימה, קוד שמזהה ומתקן חסרים חוסך שלב.
 
 **פלטים:** טבלת סטטוס כמו:
 
@@ -322,8 +256,6 @@ ultralytics        ultralytics              OK  v8.3.44
 ```
 
 אם משהו התקין, מודפסת בסוף הערה: "restart the kernel and re-run from the top" - חובה אחרי התקנת חבילות בזמן ריצת קרנל.
-
-**שונה מהראשית?** לא, זהה.
 
 </div>
 
@@ -383,28 +315,24 @@ if missing:
 <a id="cell-6"></a>
 <div dir="rtl">
 
-### תא 6 - code - יבואים + טעינת מודל (‏VM parity)
+### תא 5 - code - יבואים + טעינת מודל
 
 **מה עושה:** תא ההכנה הגדול של המחברת. מבצע ארבעה דברים:
 
 1. **יבואים סטנדרטיים** - `sys`, `time`, `datetime`, `defaultdict`, `Path`, `cv2`, `numpy`, `pandas`, `matplotlib.pyplot`.
 2. **איתור עץ `src/`** - הבלוק מנחש איפה נמצאת חבילת `app`: אם `cwd/src/app` קיים אז `_src_dir = cwd/src`, אחרת `_src_dir = cwd`. זה מאפשר להריץ את המחברת גם מתיקיית השורש (הפריסה הרגילה) וגם מתוך `src/` עצמו.
 3. **יבואים מ-`app`** - `load_model`, `detect_and_count`, `grab_frame`, `resolve_youtube`, `resolve_stream`, `VEHICLE_NAMES` מ-`detect_core`; `CAMERAS`, `active_cameras`, `GRID_CAMERAS` מ-`cameras`.
-4. **טעינת המודל עם VM parity** - `MODEL_WEIGHTS = 'yolov8s.pt'`. `DATA_DIR = _src_dir / 'data'` נוצרת אם חסרה, ו-`model = load_model(str(_src_dir / MODEL_WEIGHTS))` טוענת את המשקולות. מוצגים בסוף: שם המודל, רשימת המצלמות הזמינות, וה-`GRID_CAMERAS` (4 המצלמות של גריד ברירת-המחדל).
+4. **טעינת המודל** - `MODEL_WEIGHTS = 'yolov8s.pt'`. `DATA_DIR = _src_dir / 'data'` נוצרת אם חסרה, ו-`model = load_model(str(_src_dir / MODEL_WEIGHTS))` טוענת את המשקולות. מוצגים בסוף: שם המודל, רשימת המצלמות הזמינות, וה-`GRID_CAMERAS` (4 המצלמות של גריד ברירת-המחדל).
 
-**למה:** התא הזה הוא **הלב של התאומה**. הערת ה-`# --- Model: VM parity ---` בקוד מסבירה שהמחברת הזאת מדביקה בדיוק את מה שרץ 24/7 ב-VM: `yolov8s` ב-`imgsz 640`, מקובע ב-`deploy/gcp-vm/collector.service` מ-2026-08-05 (התקופה של `yolov8n@512` הכשילה במניה חסרה). הדפוס `(VM-parity: this IS the VM model, @640)` בפלט מוודא שהמפעיל מזהה מיד את המצב.
-
-**אלטרנטיבות:** אפשר היה לטעון את `yolo26m.pt` ולקבל תוצאות מדויקות יותר - אבל אז המחברת הופכת לעוד עותק של הראשית ומאבדת את היעד שלה: להוציא מספרים שאפשר להשוות אחד-לאחד ל-Firestore ולדשבורד.
+**למה:** המחברת מדביקה בדיוק את מה שרץ 24/7 ב-VM: `yolov8s` ב-`imgsz 640`, מקובע ב-`deploy/gcp-vm/collector.service` מ-2026-08-05.
 
 **פלטים:** שלוש שורות:
 
 ```
-model: yolov8s.pt (VM-parity: this IS the VM model, @640)
+model: yolov8s.pt (@640)
 cameras available: [ ... כל cam_id-ים ]
 dashboard grid (4 live cameras): [ ... GRID_CAMERAS ...]
 ```
-
-**שונה מהראשית?** כן, זה **התא המכריע**. בראשית `MODEL_WEIGHTS = 'yolo26m.pt'` (המודל החזק), כאן `MODEL_WEIGHTS = 'yolov8s.pt'` והערת VM parity ארוכה בקוד. כל התאים שלאחר-מכן מייצרים מספרים שונים בהתאם - נמוכים יותר בממוצע, אבל תואמים לענן.
 
 </div>
 
@@ -425,15 +353,13 @@ sys.path.append(str(_src_dir))
 from app.detect_core import load_model, detect_and_count, grab_frame, resolve_youtube, resolve_stream, VEHICLE_NAMES
 from app.cameras import CAMERAS, active_cameras, GRID_CAMERAS
 
-# --- Model: VM parity ------------------------------------------------------
-# This TWIN mirrors EXACTLY what the 24/7 cloud VM runs on its 1 GB e2-micro:
+# Model: matches EXACTLY what the 24/7 cloud VM runs on its 1 GB e2-micro:
 # yolov8s at imgsz 640 (pinned in deploy/gcp-vm/collector.service since
-# 2026-08-05; the nano@512 era undercounted badly). The GitHub notebook
-# (turkey_business_activity.ipynb) is the strong YOLO26-m reference.
+# 2026-08-05).
 MODEL_WEIGHTS = 'yolov8s.pt'
 DATA_DIR = _src_dir / 'data'; DATA_DIR.mkdir(parents=True, exist_ok=True)
 model = load_model(str(_src_dir / MODEL_WEIGHTS))
-print('model:', MODEL_WEIGHTS, '(VM-parity: this IS the VM model, @640)')
+print('model:', MODEL_WEIGHTS, '(@640)')
 print('cameras available:', list(active_cameras()))
 print('dashboard grid (4 live cameras):', GRID_CAMERAS)
 ```
@@ -443,15 +369,13 @@ print('dashboard grid (4 live cameras):', GRID_CAMERAS)
 
 ## חלק 1 - בחירת מצלמה
 
-### תא 7 - markdown - הסבר הבורר
+### תא 6 - markdown - הסבר הבורר
 
-**מה עושה:** מבוא לתאים 8-11: התא הבא ידפיס את **הקטלוג המלא של המצלמות** כרשימה ממוספרת אחת, מקובצת לפי מדינה, ואז ישאל אותך **ארבע פעמים** על מספר מצלמה - אחת לכל תא בגריד. הארבע חייבות להיות **שונות** וכולן מ**אותה מדינה** (הגריד מנתח מדינה אחת בכל פעם, בדיוק כמו הקולקטור). אחרי המספר הרביעי מודפסת הבחירה, וכל שאר המחברת מנתחת את ארבע המצלמות האלה. ההערה בסוף: הבחירה נשמרת לכל חיי הקרנל הזה, כך ש-**Run All** זורם ישר אחרי ההקלדה. לשינוי: **Kernel > Restart Kernel** ואז בורר מחדש.
+**מה עושה:** מבוא לתאים 7-10: התא הבא ידפיס את **הקטלוג המלא של המצלמות** כרשימה ממוספרת אחת, מקובצת לפי מדינה, ואז ישאל אותך **ארבע פעמים** על מספר מצלמה - אחת לכל תא בגריד. הארבע חייבות להיות **שונות** וכולן מ**אותה מדינה** (הגריד מנתח מדינה אחת בכל פעם, בדיוק כמו הקולקטור). אחרי המספר הרביעי מודפסת הבחירה, וכל שאר המחברת מנתחת את ארבע המצלמות האלה. הבחירה נשמרת לכל חיי הקרנל הזה, כך ש-**Run All** זורם ישר אחרי ההקלדה. לשינוי: **Kernel > Restart Kernel** ואז בורר מחדש.
 
 **למה:** להבטיח שהמפעיל יבין שהוא הולך להיות שאול ולא ייבהל מבקשת input באמצע Run All. גם מסביר מדוע 4 מצלמות ולמה מאותה מדינה - תואם התנהגות הקולקטור.
 
 **פלטים:** רק תוכן markdown.
-
-**שונה מהראשית?** לא, זהה.
 
 </div>
 
@@ -474,15 +398,13 @@ the rest of the notebook analyses those four cameras.
 <a id="cell-8"></a>
 <div dir="rtl">
 
-### תא 8 - code - קטלוג המצלמות עם קישורים
+### תא 7 - code - קטלוג המצלמות עם קישורים
 
 **מה עושה:** מייצר טבלה עשירה של HTML עם כל המצלמות בקטלוג, מקובצות לפי מדינה, כשכל שם מצלמה הוא לינק לדף המקור שלה (webcamera24 / IBB / tvkur). השדות בדף בורר החוזר של מבנה הנתונים: `flag`, `display` של המדינה; `name`, `city`, `page`, `url` של המצלמה. כל מדינה יוצרת רשימה `<ol>` עם התכולה, וכל item מנומם רץ עם `value="{מספר גלובלי}"`. בסוף מודפס סכום המצלמות והערה שהבורר משתמש באותם מספרים.
 
 **למה:** מאפשר למפעיל להסתכל, לחפש לפי שם, ולפתוח את דף המקור בלחיצה - קטלוג טהור באתר בלי טקסט text-only כמו בתא הבא.
 
 **פלטים:** בלוק HTML גלול (max-height 360px), עם לינקים ניתנים ללחיצה שנפתחים בטאב חדש (`target="_blank" rel="noopener"`).
-
-**שונה מהראשית?** לא, זהה.
 
 </div>
 
@@ -519,19 +441,17 @@ _disp(_H(''.join(_rows)))
 <a id="cell-9"></a>
 <div dir="rtl">
 
-### תא 9 - code - הבורר עצמו + auto-follow ל-VM
+### תא 8 - code - הבורר עצמו + auto-follow ל-VM
 
 **מה עושה:** התא המשמעותי ביותר בפרק 1. שלוש פסקאות עבודה עיקריות:
 
 1. **בניית הקטלוג הממוספר** - `_CAT_IDS` היא רשימה שטוחה של כל ה-`cam_id`-ים לפי סדר `_ORDER` (סולם הענדפויות של המדינות: טורקיה, תאילנד, יפן, ארה"ב). מספר גלובלי 1 = המצלמה הראשונה של טורקיה, וכו'. מודפסת כותרת גדולה + טבלה אנושית עם דגלים ומספרים.
 2. **פונקציית `_probe_picks`** - בדיקה חיה של הבחירה: קריאת פריים אחד מכל מצלמה שנבחרה. אם מצלמה מחזירה `None` - היא מסומנת DEAD ומודפסת אזהרה. זה נוסף ב-2026-07-18 כדי לתפוס גריד מת בזמן בחירה, לא לגלות MISS אחרי חמישה פרקים של ניתוחים ריקים. המצלמות של IBB איסטנבול חסומות מ-IP-ים לא-טורקיים ברמת HLS גם אם דף האינטרנט משחק.
-3. **VM-grid auto-follow (רק בתאומה)** - כשהדגל `FORCE_MANUAL_PICK = False` (ברירת המחדל) והבחירה עוד לא הוחלה: הקוד מנסה לקרוא מ-Firestore את המסמך `config/grid`, לחלץ את שדות `country` ו-`slots[].active_cam`, ולעקוב **אחר מה שה-VM מפעיל ברגע זה**. אם ההתחברות ל-Firebase הצליחה והנתונים תקינים: `SELECTED_CAMS` = אותן 4 מצלמות מהגריד של ה-VM, `SELECTED_COUNTRY` = אותה מדינה. חיפוש credentials: `FIREBASE_CREDENTIALS` בסביבה, אחרת קובץ בעל תבנית `*adminsdk*.json` בתיקייה הנוכחית או ההורה.
+3. **VM-grid auto-follow** - כשהדגל `FORCE_MANUAL_PICK = False` (ברירת המחדל) והבחירה עוד לא הוחלה: הקוד מנסה לקרוא מ-Firestore את המסמך `config/grid`, לחלץ את שדות `country` ו-`slots[].active_cam`, ולעקוב **אחר מה שה-VM מפעיל ברגע זה**. אם ההתחברות ל-Firebase הצליחה והנתונים תקינים: `SELECTED_CAMS` = אותן 4 מצלמות מהגריד של ה-VM, `SELECTED_COUNTRY` = אותה מדינה. חיפוש credentials: `FIREBASE_CREDENTIALS` בסביבה, אחרת קובץ בעל תבנית `*adminsdk*.json` בתיקייה הנוכחית או ההורה.
 
 לבסוף, אם אין auto-follow או המשתמש הגדיר `FORCE_MANUAL_PICK = True`: לולאה `while len(_picks) < 4` שקוראת מספר מ-`input()`, מוודאת שהמספר בטווח, שהמצלמה לא כבר נבחרה, ושהמדינה שלה תואמת לקודמות. אחרי 4 מוצלחות: `SELECTED_CAMS_APPLIED = True` וקורא ל-`_probe_picks`.
 
-**למה:** התא הזה הוא שער הכניסה של המחברת. ההוספה של VM auto-follow ייחודית לתאומה: המטרה שלה היא לשקף את ה-VM, לכן ברירת המחדל היא לעקוב אחריו אוטומטית. אם המפעיל רוצה לבחור ידנית - הוא משנה את הדגל בקוד.
-
-**אלטרנטיבות:** ipywidgets Selectionmenu היה נחמד יותר ויזואלית, אבל `input()` בטוח יותר בסביבות כמו JupyterLab desktop / VS Code Notebooks שלפעמים לא מרנדרים widgets נכון. הבחירה של lax on `_KEEP` (שמירת בחירה קיימת בין הרצות) חוסכת רה-בחירה בכל Run All.
+**למה:** התא הזה הוא שער הכניסה של המחברת. ברירת המחדל היא לעקוב אחר ה-VM אוטומטית. אם המפעיל רוצה לבחור ידנית - הוא משנה את הדגל בקוד.
 
 **פלטים:** בזמן ריצה - טבלה עשירה של קטלוג, שאלות `input()`, שורות `ok N/4:`, בסוף:
 
@@ -550,8 +470,6 @@ FOLLOWING THE VM GRID - this notebook mirrors the live collector.
 APPLIED: turkey -> ['ibb_taksim', ...]
 (set FORCE_MANUAL_PICK = True in this cell to pick manually)
 ```
-
-**שונה מהראשית?** כן, מהותית. הראשית לא כוללת את הבלוק של `VM-grid auto-follow` - היא תמיד מבקשת בחירה ידנית. התאומה כברירת מחדל **עוקבת אחר ה-VM** (זה תפקידה), ורק דגל `FORCE_MANUAL_PICK` מחזיר את הבורר הידני. זו ההבחנה הפונקציונלית העיקרית בין השתיים בחלק 1.
 
 </div>
 
@@ -619,9 +537,9 @@ def _probe_picks(_cids):
         print(f'(probe skipped: {type(_pe).__name__}: {_pe})')
 
 
-# --- VM-grid auto-follow (twin only): this notebook exists to MIRROR the
-# collector, so by default it analyzes exactly the cameras the VM is on
-# right now (config/grid). Manual picking stays available via the flag.
+# VM-grid auto-follow: this notebook MIRRORS the collector, so by default it
+# analyzes exactly the cameras the VM is on right now (config/grid). Manual
+# picking stays available via the flag.
 FORCE_MANUAL_PICK = False
 
 _auto = None
@@ -717,11 +635,9 @@ else:
 <a id="cell-10"></a>
 <div dir="rtl">
 
-### תא 10 - markdown - כותרת: מצלמות שנבחרו
+### תא 9 - markdown - כותרת: מצלמות שנבחרו
 
 **מה עושה:** כותרת קצרה שמסבירה שהתא הבא הוא ה-checkpoint היחיד שכל שאר המחברת סומכת עליו. לפני שמריצים את הבורר הוא עוצר בנימוס (צפוי בהרצה טרייה); אחרי Apply הוא רושם את הבחירה הסופית שכל הריצה תשתמש בה.
-
-**שונה מהראשית?** לא, זהה.
 
 </div>
 
@@ -736,7 +652,7 @@ Apply it records the final selection the whole run will use.
 <a id="cell-11"></a>
 <div dir="rtl">
 
-### תא 11 - code - checkpoint של הבחירה
+### תא 10 - code - checkpoint של הבחירה
 
 **מה עושה:** מוודא ש-`SELECTED_CAMS_APPLIED` דלוק. אם לא - זורק חריגה מותאמת `_ApplyFirst` שה-Jupyter מציג כטרייסבק ידידותי בן שלוש שורות: "PAUSED: no cameras selected yet (expected on a fresh run). In the picker cell above: enter your 4 camera numbers, then run this cell - or Run All." אם כן: מייצר קופסת HTML ירוקה שמציגה את המדינה, רשימת המצלמות שנבחרו והכיתוב "The rest of the notebook will analyse THESE 4 cameras from <country>".
 
@@ -751,8 +667,6 @@ APPLIED. COUNTRY = turkey | SELECTED_CAMS = ['ibb_taksim', ...]
 ...
 The rest of the notebook will analyse THESE 4 cameras from turkey.
 ```
-
-**שונה מהראשית?** לא, זהה.
 
 </div>
 
@@ -784,7 +698,7 @@ display(HTML(
 <a id="cell-12"></a>
 <div dir="rtl">
 
-### תא 12 - markdown - הסבר: `resolve_stream` ו-kinds
+### תא 11 - markdown - הסבר: `resolve_stream` ו-kinds
 
 **מה עושה:** כותרת חלק (`## 1. Pick a camera`) עם רקע נרחב יותר: הקטלוג המלא נמצא ב-`app/cameras.py`, מאורגן ל-pools לפי מדינה (`COUNTRIES` / `country_pool`). הקולקטור בענן צועד על סולם מדינות (טורקיה - תאילנד - יפן - ארה"ב): מריץ 4 מצלמות שונות ממדינה אחת ונופל לבאה כשהנוכחית חסומה. הבורר שלמעלה משקף את זה - אתה בוחר 4 מצלמות ממדינה אחת ו-`SELECTED_CAMS[0]` היא זו שהחלק הזה בודק.
 
@@ -800,8 +714,6 @@ display(HTML(
 **למה:** להסביר למה בורר קטלוג עובד גם על מצלמות מסוגים כל-כך שונים - כי `resolve_stream` מנרמל את כולן ל-URL של HLS ברמת ה-API.
 
 **פלטים:** רק תוכן markdown.
-
-**שונה מהראשית?** לא, זהה.
 
 </div>
 
@@ -832,9 +744,9 @@ in a restricted sandbox those cameras fail while the YouTube-backed ones work.
 <a id="cell-13"></a>
 <div dir="rtl">
 
-### תא 13 - code - טעינת המצלמה הראשונה
+### תא 12 - code - טעינת המצלמה הראשונה
 
-**מה עושה:** שוב מוודא `SELECTED_CAMS_APPLIED` (אותו pattern כמו בתא 11). לאחר-מכן: `CAM_ID = SELECTED_CAMS[0]` - מצלמה #1 מהבחירה של המפעיל. `cam = CAMERAS[CAM_ID]` שולף את המילון של המצלמה, ו-`stream_url = resolve_stream(cam)` מנרמל אותה ל-HLS. מדפיס את השם ואת ה-URL.
+**מה עושה:** שוב מוודא `SELECTED_CAMS_APPLIED` (אותו pattern כמו בתא 10). לאחר-מכן: `CAM_ID = SELECTED_CAMS[0]` - מצלמה #1 מהבחירה של המפעיל. `cam = CAMERAS[CAM_ID]` שולף את המילון של המצלמה, ו-`stream_url = resolve_stream(cam)` מנרמל אותה ל-HLS. מדפיס את השם ואת ה-URL.
 
 **למה:** לקבע את "המצלמה הראשית של הרצה" - כל הפרקים 2-6 (בדיקת פריים, footfall, אנומליות, dwell, re-ID) עובדים עליה. הפרקים 8/10 שרלוונטיים לכל 4 המצלמות מסתמכים גם הם ישירות על `SELECTED_CAMS`.
 
@@ -843,8 +755,6 @@ in a restricted sandbox those cameras fail while the YouTube-backed ones work.
 ```
 Taksim Square -> https://kamerayayin.ibb.istanbul/.../playlist.m3u8?...
 ```
-
-**שונה מהראשית?** לא, זהה.
 
 </div>
 
@@ -868,11 +778,9 @@ print(cam['name'], '->', stream_url)
 
 ## חלק 2 - בדיקת פריים בודד
 
-### תא 14 - markdown - כותרת + הסבר
+### תא 13 - markdown - כותרת + הסבר
 
 **מה עושה:** כותרת החלק ומשפט הסבר קצר: "Confirm the stream decodes and YOLO sees the crowd before collecting anything." לפני שמריצים דגימה ארוכה, בודקים שהזרם באמת פותח, שהמצלמה שולחת ביטים, ושהמודל מזהה עצמים סבירים.
-
-**שונה מהראשית?** לא, זהה.
 
 </div>
 
@@ -885,7 +793,7 @@ Confirm the stream decodes and YOLO sees the crowd before collecting anything.
 <a id="cell-15"></a>
 <div dir="rtl">
 
-### תא 15 - code - grab_frame + YOLO + הצגה
+### תא 14 - code - grab_frame + YOLO + הצגה
 
 **מה עושה:** קורא `grab_frame(stream_url)`. אם הפריים `None` - מודפסת הוראה איך לשנות מצלמה (Kernel > Restart Kernel, בחר מצלמה אחרת או מדינה אחרת - תאילנד/יפן/ארה"ב מגובות YouTube ועובדות מכל מקום). אם קיים: מודפסים `frame.shape` ותוצאת `detect_and_count(model, frame)`.
 
@@ -895,7 +803,7 @@ Confirm the stream decodes and YOLO sees the crowd before collecting anything.
 - `classes=[0,1,2,3,5,6,7]` - מסנן ל-COCO IDs: 0 person, 1 bicycle, 2 car, 3 motorcycle, 5 bus, 6 train, 7 truck.
 - מדפיס את `res.plot()` שממחיש את הזיהויים כתמונה עם bounding boxes וצבעי מחלקה, ומציג עם matplotlib (`figsize=(11, 6)`).
 
-**למה:** בדיקת שפיות ויזואלית. אם מודל nano מדבר על "0 person" בכיכר עסוקה - יש בעיה (זה בדיוק מה שקרה בעידן `yolov8n@512` ב-VM). כמו כן, אישור שהקורא רואה **מה** המודל מזהה, לא רק כמה.
+**למה:** בדיקת שפיות ויזואלית - אישור שהקורא רואה **מה** המודל מזהה, לא רק כמה.
 
 **פלטים:**
 
@@ -904,9 +812,7 @@ frame shape: (1080, 1920, 3)
 counts: {'person': 5, 'vehicles': 7}
 ```
 
-+ תמונה עם boxes של כל הזיהויים.
-
-**שונה מהראשית?** לא בקוד. במעשה כן: במחברת הראשית עם `yolo26m@960` תראה יותר boxes ותקבל מספרים גבוהים יותר; כאן, עם `yolov8s@640`, המספרים נמוכים יותר - שוב, בכוונה, לחפיפה מלאה עם ה-VM.
+בתוספת תמונה עם boxes של כל הזיהויים.
 
 </div>
 
@@ -933,11 +839,9 @@ else:
 
 ## חלק 3 - סדרת זמן של footfall (דגימה דלילה)
 
-### תא 16 - markdown - כותרת + הסבר
+### תא 15 - markdown - כותרת + הסבר
 
 **מה עושה:** מסביר שלמענה על השאלה "כמה / מתי" לא צריך כל פריים - דגימה אחת כל 15-30 שניות מספיקה, ועדינה לשרת. זאת אותה לוגיקה שהקולקטור מריץ ברציפות.
-
-**שונה מהראשית?** לא, זהה.
 
 </div>
 
@@ -951,7 +855,7 @@ is gentle on the server. This is the same logic the collector runs continuously.
 <a id="cell-17"></a>
 <div dir="rtl">
 
-### תא 17 - code - `footfall_series` והרצה קצרה
+### תא 16 - code - `footfall_series` והרצה קצרה
 
 **מה עושה:** מגדיר `footfall_series(stream_url, cam_name, interval_s=20, duration_min=1.0)`: לולאה שמסתיימת ב-`t_end = time.time() + duration_min*60`. בכל איטרציה:
 
@@ -966,9 +870,7 @@ is gentle on the server. This is the same logic the collector runs continuously.
 
 הקריאה הישירה: `df = footfall_series(stream_url, cam['name'], interval_s=10, duration_min=1.0)` - דקה של דגימה כל 10 שניות, כלומר 6 דגימות. שומר ל-`data/footfall_{CAM_ID}.csv` ומראה את 5 השורות הראשונות.
 
-**למה:** לייצר מדגם קטן שעליו יעבדו כל הפרקים הבאים (אנומליות, ציון business). "דקה" זה מוזל - למחקר אמיתי כתוב "just leave the collector daemon (`python -m app.collector`) running for genuine 24/7 data".
-
-**אלטרנטיבות:** דגימה כל פריים נותנת רזולוציה גבוהה יותר, אבל: מכפילה את עלות ה-CPU פי כמה, ומחייבת אחסון גדול; לא נצרך למגמות שעתיות ויומיות.
+**למה:** לייצר מדגם קטן שעליו יעבדו כל הפרקים הבאים (אנומליות, ציון business). למחקר אמיתי כתוב "just leave the collector daemon (`python -m app.collector`) running for genuine 24/7 data".
 
 **פלטים:** 6 שורות log כמו `[14:32:15] person=5 vehicles=7`, ואז הראש (5 שורות) של ה-DataFrame:
 
@@ -978,9 +880,7 @@ is gentle on the server. This is the same logic the collector runs continuously.
 ...
 ```
 
-+ קובץ `data/footfall_ibb_taksim.csv`.
-
-**שונה מהראשית?** לא, זהה. במעשה: התוצאות של `person`/`vehicles` יהיו נמוכות יותר מהראשית באותה מצלמה + דקה, כי `yolov8s@640` פחות רגיש לאובייקטים קטנים/רחוקים - זה הפער שהקליברציה בפרק 10 מודדת.
+בתוספת קובץ `data/footfall_ibb_taksim.csv`.
 
 </div>
 
@@ -1008,11 +908,11 @@ df.head()
 
 ## חלק 4 - אנומליות + פרופיל שעה
 
-### תא 18 - markdown - כותרת + הסבר
+### תא 17 - markdown - כותרת + הסבר
 
 **מה עושה:** מסביר את הרעיון: **אנומליה = rolling z-score > 2.5** על סדרת ה-footfall - זינוק פתאומי (אירוע/מבצע/הפגנה) או צניחה חריגה (סגירה/מזג-אוויר). פרופיל שעה אומר לך *מתי* חלון-הזמן המסחרי.
 
-**שונה מהראשית?** לא, זהה. (בקוד בפועל התא הבא משתמש ב-z=3.5, לא 2.5 כפי שכתוב במרקדאון - הבדל היסטורי; הראשית זהה גם היא.)
+בקוד בפועל התא הבא משתמש ב-z=3.5, לא 2.5 כפי שכתוב במרקדאון - הבדל היסטורי.
 
 </div>
 
@@ -1026,12 +926,12 @@ unusual drop (closure/weather). Peak-hour profile tells you *when* the commercia
 <a id="cell-19"></a>
 <div dir="rtl">
 
-### תא 19 - code - robust-z (‏median + MAD) + גרפים
+### תא 18 - code - robust-z (median + MAD) + גרפים
 
 **מה עושה:** מגדיר `flag_anomalies(s, window=12, z=3.5, min_delta=3)`. זו הפונקציה של הקולקטור בשם אחר, מיושמת על סדרת ה-`person` המקומית:
 
 1. `med = s.rolling(window, min_periods=4).median()` - חציון גולל של הסדרה.
-2. `mad = (s - med).abs().rolling(window, min_periods=4).median() * 1.4826` - MAD (‏Median Absolute Deviation) מכוון כדי לתת אומדן חסון של סטיית התקן; המקדם 1.4826 הופך את ה-MAD לאומדן consistent של sigma תחת גאוסיאני.
+2. `mad = (s - med).abs().rolling(window, min_periods=4).median() * 1.4826` - MAD (Median Absolute Deviation) מכוון כדי לתת אומדן חסון של סטיית התקן; המקדם 1.4826 הופך את ה-MAD לאומדן consistent של sigma תחת גאוסיאני.
 3. `spread = mad.clip(lower=1.0)` - מונע spread=0 כשה-MAD אפס (סדרה יציבה); בסופר של הזיהוי, הספירות שלמות, לכן רף אפס אפשרי כשכל הסביבה זהה.
 4. `robust_z = (s - med) / spread` - z חסון.
 5. מחזיר `(|robust_z| > z) & (|s - med| >= min_delta)` - שני התנאים ביחד: גם חריגות סטטיסטית וגם שינוי מוחלט משמעותי (לפחות 3 אנשים).
@@ -1043,11 +943,9 @@ unusual drop (closure/weather). Peak-hour profile tells you *when* the commercia
 - **שמאל:** `person` על ציר הזמן עם `marker='o'`; מעליו scatter אדום של הנקודות שסומנו כאנומליה.
 - **ימין:** ממוצע `person` פר שעה של היום, כ-bar chart - פרופיל שעת השיא.
 
-**למה:** להדגים בעין המפעיל מדד ואיכות של החוסן. באנומליה של דקה בזרם קצר של 6 דגימות סביר להניח שלא יופיע כלום; זה במכוון, זה שיפוט של המדד.
+**למה:** להדגים בעין המפעיל מדד ואיכות של החוסן. באנומליה של דקה בזרם קצר של 6 דגימות סביר להניח שלא יופיע כלום; זה במכוון.
 
 **פלטים:** גרף כפול. הימני אפור-כמעט-ריק כי כל הדגימות היו באותה שעה של היום.
-
-**שונה מהראשית?** לא בקוד. בפועל: אותם ערכי סף על מספרים נמוכים יותר יגרמו לפחות אנומליות פר יחידת-זמן במחברת התאומה - עוד גילוי-חסר של המודל החלש.
 
 </div>
 
@@ -1082,14 +980,12 @@ plt.tight_layout(); plt.show()
 
 ## חלק 5 - Dwell-time / עצירות ממושכות (tracking)
 
-### תא 20 - markdown - כותרת + מוטיבציה
+### תא 19 - markdown - כותרת + מוטיבציה
 
-**מה עושה:** מסביר את שינוי הפרדיגמה: "כמה זמן אדם או רכב נשאר מול המצלמה?" - זו שאלה שמחייבת **object tracking** (‏IDs יציבים לאורך פריימים), שעובד רק על פריימים **רצופים** - לכן לוקחים כאן **burst צפוף** קצר (כמה fps ל-~60 שניות) במקום דגימה דלילה. `model.track()` של Ultralytics (‏ByteTrack) נותן id לכל אובייקט; מצטברים כמה פריימים כל id נראה וכמה מעט הוא זז.
+**מה עושה:** מסביר את שינוי הפרדיגמה: "כמה זמן אדם או רכב נשאר מול המצלמה?" - זו שאלה שמחייבת **object tracking** (IDs יציבים לאורך פריימים), שעובד רק על פריימים **רצופים** - לכן לוקחים כאן **burst צפוף** קצר (כמה fps ל-~60 שניות) במקום דגימה דלילה. `model.track()` של Ultralytics (ByteTrack) נותן id לכל אובייקט; מצטברים כמה פריימים כל id נראה וכמה מעט הוא זז.
 
 - **שהייה ארוכה + תנועה נמוכה** = lingering: window-shopping / תור / רכב חונה.
 - אחוז גבוה של אנשים lingering הוא סימן חזק לאיכות מסחרית (אנשים עוצרים, לא רק חולפים).
-
-**שונה מהראשית?** לא, זהה.
 
 </div>
 
@@ -1108,7 +1004,7 @@ object an id; we accumulate how many frames each id is seen and how little it mo
 <a id="cell-21"></a>
 <div dir="rtl">
 
-### תא 21 - code - `dwell_analysis` עם ByteTrack
+### תא 20 - code - `dwell_analysis` עם ByteTrack
 
 **מה עושה:** מגדיר `dwell_analysis(stream_url, seconds=30, target_fps=3, conf=0.35)`. שלושה בלוקים:
 
@@ -1120,9 +1016,7 @@ object an id; we accumulate how many frames each id is seen and how little it mo
 
 הקריאה: `dwell = dwell_analysis(stream_url, seconds=30, target_fps=3, conf=0.25)` - 30 שניות של burst ב-3 fps ~ 90 פריימים. `conf` הורד ל-0.25 (מה-0.35 של הפרק הקודם) כדי לתפוס יותר.
 
-**למה:** תרגיל האמונה החזק ביותר של המחברת. אחרי שדגימה דלילה נותנת רק ספירות, כאן רואים id-ים אמיתיים של אנשים ורכבים, כמה זמן הם נשארו, וכמה הם זזו.
-
-**אלטרנטיבות:** DeepSORT היה שם עם association יותר חזק; ByteTrack נבחר כי הוא מובנה ב-Ultralytics ולא דורש embedder נוסף.
+**למה:** רואים id-ים אמיתיים של אנשים ורכבים, כמה זמן הם נשארו, וכמה הם זזו.
 
 **פלטים:** DataFrame של 15 שורות ראשונות:
 
@@ -1132,8 +1026,6 @@ object an id; we accumulate how many frames each id is seen and how little it mo
 1         7 car          25.7         42.0
 ...
 ```
-
-**שונה מהראשית?** לא, זהה. בפועל: המחברת הראשית עם `yolo26m` תיצור יותר tracks, ותשמור אותם יציבים לאורך יותר פריימים (זיהוי טוב יותר -> פחות אובדן track -> יותר dwell זמן ארוך).
 
 </div>
 
@@ -1184,7 +1076,7 @@ dwell.head(15)
 <a id="cell-22"></a>
 <div dir="rtl">
 
-### תא 22 - code - סימון עצירות ממושכות + Linger rate
+### תא 21 - code - סימון עצירות ממושכות + Linger rate
 
 **מה עושה:** מגדיר שלושה קבועים: `PERSON_DWELL_S=25, VEHICLE_DWELL_S=40, MAX_MOVE_PX=60`. אם `dwell` לא ריק, מסמן `stationary` = כל שורה שבה:
 
@@ -1196,8 +1088,6 @@ dwell.head(15)
 
 **למה:** להוציא מ-DataFrame גולמי של dwell שני מדדים אנושיים: "כמה עצרו" ו-"איזה אחוז מהאנשים שנראו עצר". השני הוא הבסיס של רכיב `linger` בציון business בפרק 6.
 
-**אלטרנטיבות:** מעל 25 ו-40 שניות זה שרירותי; אפשר להתאים לפי מצלמה (רחבה יותר -> יותר זמן שהייה). מסמכי הפרויקט לא מציעים אמצעי כיול אוטומטי כאן; זו החלטת אחרונה של המפעיל.
-
 **פלטים:**
 
 ```
@@ -1205,8 +1095,6 @@ Prolonged stops detected: 3
 (טבלה של 3 שורות)
 Linger rate (people who stayed >= 25s): 33%
 ```
-
-**שונה מהראשית?** לא, זהה.
 
 </div>
 
@@ -1229,20 +1117,18 @@ if not dwell.empty:
 
 ## חלק 5b - Re-identification
 
-### תא 23 - markdown - כותרת + הסבר האלגוריתם
+### תא 22 - markdown - כותרת + הסבר האלגוריתם
 
 **מה עושה:** מסביר את הבעיה: הספירות בפרק 3 אומרות **כמה** אנשים נראים ברגע נתון, אבל סופרות פעמיים כל מי ששהה מול המצלמה. כדי לענות "כמה לקוחות ייחודיים חלפו היום?" או "האם זה אותו רכב משלוחים שראיתי אתמול?" - צריך **re-identification**: זהות מתמשכת שדבוקה לאדם/רכב שורדת חוצה פריימים, bursts וימים.
 
 יישום ב-`app/reid.py`:
 
 1. לכל זיהוי YOLO, לחתוך את ה-bounding box.
-2. לבנות היסטוגרמת HSV מוסָוה (‏masked) של הצבע: 8x8x8 bins, פיקסלים עם V<30 מסוננים החוצה (הופך את חוסר-הרגישות ללילות הצהובים של סודיום של הכיכר בקוניה), + יחס-אספקט + שטח מנורמל.
+2. לבנות היסטוגרמת HSV מוסָוה (masked) של הצבע: 8x8x8 bins, פיקסלים עם V<30 מסוננים החוצה (הופך את חוסר-הרגישות ללילות הצהובים של סודיום של הכיכר בקוניה), + יחס-אספקט + שטח מנורמל.
 3. L2-normalize -> וקטור מראה 514-ממדי.
 4. השוואה לכל יישות מאותה מחלקה שכבר ב-`data/reid.db` בקוסינוס. אם הטוב ביותר >= `threshold` (ברירת מחדל 0.92): עדכן `sightings` ו-`last_seen`; אחרת: רשום יישות חדשה.
 
 זו **חתימה ברמת demo**. עובד טוב באור יום (בגדים בצבעים שונים -> היסטוגרמות שונות בבירור). מפיק התאמות שקר בלילה כשכל הסצנה צבועה צהוב. להחליף `embed_crop()` ב-forward pass של OSNet/torchreid לרמת פרודקשן; רגיסטר SQLite סביבו נשאר כפי שהוא.
-
-**שונה מהראשית?** לא, זהה.
 
 </div>
 
@@ -1274,7 +1160,7 @@ production-grade re-ID; the SQLite registry around it stays the same.
 <a id="cell-24"></a>
 <div dir="rtl">
 
-### תא 24 - code - הכנת מאגר Re-ID
+### תא 23 - code - הכנת מאגר Re-ID
 
 **מה עושה:** תא ההכנה של פרק 5b. שלושה בלוקים:
 
@@ -1290,8 +1176,6 @@ production-grade re-ID; the SQLite registry around it stays the same.
 reid_notebook.db cleared - fresh demo registry
 feeding re-ID from Taksim Square
 ```
-
-**שונה מהראשית?** לא, זהה.
 
 </div>
 
@@ -1343,7 +1227,7 @@ print('feeding re-ID from', cam['name'])
 <a id="cell-25"></a>
 <div dir="rtl">
 
-### תא 25 - code - לולאת דגימה + עדכון re-ID
+### תא 24 - code - לולאת דגימה + עדכון re-ID
 
 **מה עושה:** לולאה קצרה של 8 דגימות כל 5 שניות. פרמטרים: `N_SAMPLES, INTERVAL_S, CONF = 8, 5, 0.25`. לכל דגימה:
 
@@ -1358,8 +1242,6 @@ print('feeding re-ID from', cam['name'])
 
 **למה:** להדגים בזמן אמת איך המאגר מתמלא. בהרצה ראשונה `new_ids` גבוה, `seen_again` נמוך; ככל שהזמן עובר `seen_again` עולה. זהו הצורה הבסיסית שהקולקטור מריץ ב-24/7, רק לזמן קצר.
 
-**אלטרנטיבות:** דגימה עם `iter_frames` הייתה יעילה יותר (יותר פריימים לזמן), אבל אין צורך לזמן קצר.
-
 **פלטים:** 8 שורות log וכשה-DataFrame מוצג בסוף:
 
 ```
@@ -1367,8 +1249,6 @@ print('feeding re-ID from', cam['name'])
 [01] person=6 vehicles=7 -> new=3  seen_again=9
 ...
 ```
-
-**שונה מהראשית?** לא, זהה. במעשה: המודל החלש שולף פחות boxes -> פחות ניסיונות re-ID -> `total_unique` נמוך יותר; זה שוב הפער היחסי בין הגרסאות.
 
 </div>
 
@@ -1400,7 +1280,7 @@ reid_df
 <a id="cell-26"></a>
 <div dir="rtl">
 
-### תא 26 - code - roll-up: יישויות ייחודיות + regulars
+### תא 25 - code - roll-up: יישויות ייחודיות + regulars
 
 **מה עושה:** תא סיכום קצר:
 
@@ -1422,8 +1302,6 @@ Top returning entities:
   ...
 ```
 
-**שונה מהראשית?** לא, זהה.
-
 </div>
 
 ```python
@@ -1444,7 +1322,7 @@ for r in reid.top_regulars(CAM_ID, n=10):
 <a id="cell-27"></a>
 <div dir="rtl">
 
-### תא 27 - code - גרף עקומת המבקרים החוזרים
+### תא 26 - code - גרף עקומת המבקרים החוזרים
 
 **מה עושה:** אם `len(reid_df) >= 3`: מחשב `returning_rate = seen_again / detections` (עם `.replace(0, NaN)` כדי לא לחלק באפס), ובונה גרף כפול:
 
@@ -1456,8 +1334,6 @@ for r in reid.top_regulars(CAM_ID, n=10):
 **למה:** הגרף השמאלי מראה איך הפוקוס עובר מ-"IDs חדשים" בהתחלה ל-"seen again" בסוף - עקומת ההתקדמות הטבעית של מאגר. הגרף הימני נותן מדד תמצית: אחוז המבקרים החוזרים לאורך זמן.
 
 **פלטים:** גרף כפול (יופיע אם מספיק דגימות).
-
-**שונה מהראשית?** לא, זהה.
 
 </div>
 
@@ -1485,7 +1361,7 @@ else:
 <a id="cell-28"></a>
 <div dir="rtl">
 
-### תא 28 - markdown - הערת איכות + מסלול פרודקשן
+### תא 27 - markdown - הערת איכות + מסלול פרודקשן
 
 **מה עושה:** הערה חשובה על איכות re-ID תלויה בסצנה. בכיכר הממשלה בקוניה בלילה כל הסצנה אחידה בצהוב-סודיום. re-ID מבוסס היסטוגרמת-צבע ימזג over-merge שם. כדי לאמת את הרעיון, הפנה את המצלמה ל-Grand Bazaar / Spice Bazaar באור יום (בגדים בצבעים שונים) או קבע `threshold=0.97` לסלקטיביות גבוהה.
 
@@ -1499,8 +1375,6 @@ def embed_crop(crop, cls): return extractor([crop])[0].cpu().numpy()
 ```
 
 ואז שמור על שאר `app/reid.py` בדיוק כפי שהוא. ה-embedding של OSNet ב-2,048 ממדים שורד שינויי תאורה, שינויי pose וחסימה חלקית טוב יותר בהרבה מהיסטוגרמת צבע.
-
-**שונה מהראשית?** לא, זהה.
 
 </div>
 
@@ -1527,15 +1401,13 @@ a color histogram.
 
 ## חלק 6 - ציון "האם כדאי לפתוח כאן עסק"
 
-### תא 29 - markdown - כותרת + נוסחת הציון
+### תא 28 - markdown - כותרת + נוסחת הציון
 
 **מה עושה:** מסביר את שלושת האותות שמעורבבים לציון אחד 0-100. כוונן את המשקולות לפי סוג העסק (בית קפה רוצה `linger` גבוה; דוכן רוצה `throughput` גבוה):
 
 - **Volume** - חציון footfall (ביקוש גולמי).
 - **Linger** - אחוז אנשים שעצרים (engagement / conversion potential).
-- **Consistency** - מקדם שונות (‏CV) נמוך (תנועה יציבה עדיפה על ספייקים).
-
-**שונה מהראשית?** לא, זהה.
+- **Consistency** - מקדם שונות (CV) נמוך (תנועה יציבה עדיפה על ספייקים).
 
 </div>
 
@@ -1553,7 +1425,7 @@ Combine three signals into one 0-100 score. Tune the weights to your business ty
 <a id="cell-30"></a>
 <div dir="rtl">
 
-### תא 30 - code - `business_score` והדפסה
+### תא 29 - code - `business_score` והדפסה
 
 **מה עושה:** מגדיר `business_score(footfall_df, dwell_df, w=(0.5, 0.3, 0.2))`:
 
@@ -1571,16 +1443,12 @@ Combine three signals into one 0-100 score. Tune the weights to your business ty
 
 **למה:** לתת מספר יחיד ניתן להשוואה בין מיקומים. `w=(0.5, 0.3, 0.2)` נותן משקל גדול ל-volume (חצי מהציון), פחות ל-linger, ומעט ל-consistency - מתאים לחנות פיזית. משתמש יכול להעביר משקולות משלו.
 
-**אלטרנטיבות:** מודל מפוקח (‏learned) על נתונים היסטוריים של מיקומים שהצליחו/נכשלו היה מדויק יותר; אבל דורש labels ואין להם כאן. הגישה החוקית: קומבינציה של אותות עם משקולות שאפשר להצדיק.
-
 **פלטים:**
 
 ```
 Taksim Square
 {'volume_median': 5.0, 'linger_rate': 0.33, 'consistency': 0.85, 'score_0_100': 42.7}
 ```
-
-**שונה מהראשית?** לא, זהה. במעשה: הציון בתאומה יהיה נמוך יותר משמעותית, כי `volume` תלוי במניית אנשים (חלשה) והוא הרכיב הכבד.
 
 </div>
 
@@ -1606,17 +1474,15 @@ business_score(df, dwell)
 
 ## חלק 7 - השוואה לדשבורד הענן החי
 
-### תא 31 - markdown - כותרת + מוטיבציה
+### תא 30 - markdown - כותרת + מוטיבציה
 
 **מה עושה:** מסביר את המעבר: שאר המחברת היה ניתוח **מקומי** - דקה של דגימה על מצלמה אחת. הקולקטור בענן רץ ברציפות ב-VM של GCP וצובר 4 מצלמות x 24 שעות ל-Firestore, וה-HTML דשבורד למטה נרשם לזה. השוואה בין השניים עונה על שאלות אמיתיות:
 
-- האם הרגע שדגמתי מייצג את כל היום? (‏הדקה שלי מול הגרף של 24 שעות)
+- האם הרגע שדגמתי מייצג את כל היום? (הדקה שלי מול הגרף של 24 שעות)
 - האם אני על שיא, שפל או ממוצע?
 - האם הופעלה אנומליה ב-24 השעות האחרונות שהחמצתי בגלל דגימה עכשיו?
 
 שום דבר כאן לא כותב ל-Firestore - זה דף HTML פשוט שקורא ממנה.
-
-**שונה מהראשית?** לא, זהה.
 
 </div>
 
@@ -1625,7 +1491,7 @@ business_score(df, dwell)
 
 The rest of this notebook was your **local** analysis - a minute of sampling on
 one camera. The cloud collector has been running non-stop on a GCP VM,
-accumulating 4 cameras × 24 hours into Firestore, and the HTML dashboard below
+accumulating 4 cameras x 24 hours into Firestore, and the HTML dashboard below
 subscribes to that. Comparing the two answers real questions:
 
 - Is the moment I sampled representative of the whole day? (my minute vs the 24h chart)
@@ -1638,26 +1504,24 @@ Nothing here writes to Firestore - it's a plain HTML page that reads from it.
 <a id="cell-32"></a>
 <div dir="rtl">
 
-### תא 32 - code - שרת local + local_grid.json + הטמעה ב-iframe
+### תא 31 - code - שרת local + local_grid.json + הטמעה ב-iframe
 
 **מה עושה:** התא הארוך והמהותי ביותר בחלק זה. שלושה בלוקים:
 
 1. **בניית `local_grid.json`** - יוצר קובץ שאומר לדשבורד "הצג את המצלמות שבחר המשתמש, לא את גריד ה-VM". פונקציית `_local_grid_slot(i, cam_id)` מנרמלת כל מצלמה מהקטלוג ל-`slot` תואם-דשבורד: `slot_id`, `display_area`, `placeholder_name`, ואחד מ-`placeholder_hls / placeholder_embed / placeholder_page`. חוקים לפי `kind`:
    - `youtube` -> `placeholder_embed = _yt_embed(video_id)` (מזרם `www.youtube.com/embed/...?autoplay=1&mute=1&playsinline=1&enablejsapi=1`).
    - `webcamera24` -> קודם קורא ל-`resolve_webcamera24` שגורף את דף המקור, שם מחפש `_TVKUR_ID_RE` (אם tvkur -> proxy `/tvkur/{id}/master.m3u8`), אחרת `_YOUTUBE_RE`.
-   - `hls` (‏default) -> tvkur ישיר עובר דרך proxy; IBB ישיר (בדרך כלל geo-blocked).
+   - `hls` (default) -> tvkur ישיר עובר דרך proxy; IBB ישיר (בדרך כלל geo-blocked).
    
    אם המצלמות נבחרו: כותב JSON ל-`web/local_grid.json`. אם לא: מוחק את הקובץ (כדי שהדשבורד יחזור לגריד ה-VM).
 
-2. **שרת HTTP מקומי** - חיפוש פורט חופשי בטווח 8000-8020 (מונע דריסה על שרת קיים). אם קיים שרת מהרצה קודמת (‏`_main._dash_server`): שימוש חוזר. אחרת: `ThreadingHTTPServer` עם `DashboardHandler` שמגיש מ-`WEB_DIR`. פועל ב-thread daemon.
+2. **שרת HTTP מקומי** - חיפוש פורט חופשי בטווח 8000-8020 (מונע דריסה על שרת קיים). אם קיים שרת מהרצה קודמת (`_main._dash_server`): שימוש חוזר. אחרת: `ThreadingHTTPServer` עם `DashboardHandler` שמגיש מ-`WEB_DIR`. פועל ב-thread daemon.
 
 3. **טעינת דפדפן + הטמעה ב-iframe** - `dash_url = f'http://localhost:{DASHBOARD_PORT}/?mode=twin'`. אם `_main._dash_browser_opened` False: `webbrowser.open(dash_url, new=2)` בפעם הראשונה. מציג לינק ב-HTML + IFrame בגודל 100%x640 בתא Jupyter.
 
-`?mode=twin` אומר ל-`web/app.js` איזה סט של פאנלים לרנדר.
+`?mode=twin` אומר ל-`web/app.js` איזה סט של פאנלים לרנדר. בפרק 12 של המדריך הזה יש הסבר מלא על מצב twin.
 
-**למה:** הזה הרגע ה-"ווא": אתה רואה **בו-זמנית**, בתוך ה-Jupyter, את המצלמות שבחרת + הספירות מהענן. הפורט האוטומטי מונע התנגשות עם dev servers אחרים.
-
-**אלטרנטיבות:** נגד "פשוט לפתוח דפדפן חיצוני" - IFrame מאפשר scroll טבעי בתוך ה-notebook ומחזיק את כל ה-scoring באותו סשן.
+**למה:** אתה רואה **בו-זמנית**, בתוך ה-Jupyter, את המצלמות שבחרת + הספירות מהענן. הפורט האוטומטי מונע התנגשות עם dev servers אחרים.
 
 **פלטים:**
 
@@ -1666,9 +1530,7 @@ Dashboard grid -> YOUR 4 picked cameras (turkey): ['Taksim Square', ...]
 Dashboard server started at http://localhost:8000/?mode=twin
 ```
 
-+ קישור + iframe מוטמע.
-
-**שונה מהראשית?** מהותית. הראשית פותחת עם `?mode=main` (או ללא query), התאומה עם `?mode=twin`. מצב twin נותן לדשבורד ה-JS לרנדר טאבים אחרים: Analysis + Search + **Reinforcement learning** (טאב שסקירה בפרק 12 של המדריך הזה). מצב main מציג יותר טאבים ואת כפתור "Send Report From VM" שלא רלוונטי כאן.
+בתוספת קישור + iframe מוטמע.
 
 </div>
 
@@ -1782,11 +1644,9 @@ display(IFrame(dash_url, width='100%', height=640))
 
 ## חלק 8 - השוואת אתרים מסחריים מרובים
 
-### תא 33 - markdown - כותרת + הסבר
+### תא 32 - markdown - כותרת + הסבר
 
 **מה עושה:** משפט קצר: לולל את דגימת ה-footfall מעל כמה מצלמות כדי לדרג מיקומים לפי פעילות - הקלט להחלטת בחירת אתר.
-
-**שונה מהראשית?** לא, זהה.
 
 </div>
 
@@ -1800,20 +1660,18 @@ site-selection decision.
 <a id="cell-34"></a>
 <div dir="rtl">
 
-### תא 34 - code - דירוג המצלמות שנבחרו
+### תא 33 - code - דירוג המצלמות שנבחרו
 
 **מה עושה:** checkpoint (`SELECTED_CAMS_APPLIED`), אחר-כך לולאה על כל cam ב-`SELECTED_CAMS`:
 
 1. `c = CAMERAS.get(cid)`; אם לא בקטלוג או ללא URL: skip.
 2. `url = resolve_stream(c)`; אם resolve נכשל: skip עם הודעה.
-3. `grab_frame(url)`; אם None (‏geo-blocked / down): skip.
+3. `grab_frame(url)`; אם None (geo-blocked / down): skip.
 4. אחרת: `sdf = footfall_series(url, c['name'], interval_s=10, duration_min=0.5)` - חצי דקה של דגימה (~3 דגימות). שומר `{'site': c['name'], 'median_people': sdf['person'].median(), 'max_people': sdf['person'].max()}`.
 
 בסוף: אם `summary` לא ריק - מציג `pd.DataFrame(summary).sort_values('median_people', ascending=False)`. אחרת: "No camera in SELECTED_CAMS produced usable frames".
 
 **למה:** להוכיח את הכלי לצורך "השוואת מיקומים". הדגימה חצי-דקה קצרה מדי לניתוח מהיר-רק (חכמה של פרודקשן) אבל מספיקה להבחין בין `median_people=5` ל-`median_people=25`.
-
-**אלטרנטיבות:** אפשר להריץ במקביל (‏multiprocessing) - חצי-דקה x 4 מצלמות = 2 דקות ברצף. הפרויקט בחר בבטחון וב-fail-tolerance במקום מקבילות.
 
 **פלטים:** DataFrame ממוין:
 
@@ -1824,8 +1682,6 @@ site-selection decision.
 2   Sarachane                   8          14
 ...
 ```
-
-**שונה מהראשית?** לא, זהה. במעשה: הדירוג עצמו סביר להישאר יציב בין הראשית לתאומה - העדיפויות היחסיות אמינות כי הפגיעות של המודל החלש די אחידה מעל מצלמות.
 
 </div>
 
@@ -1870,11 +1726,9 @@ else:
 
 ## חלק 9 - סיכום חי
 
-### תא 35 - markdown - כותרת + הסבר
+### תא 34 - markdown - כותרת + הסבר
 
 **מה עושה:** מסביר שהתא הבא מושך את כל מה שהמחברת ראתה בהרצה זו לבלוק אחד: האנומליות שסומנו מעל כל המצלמות שנדגמו, סך re-ID, וויזואליזציה קטנה שמציירת את כל האנומליות על ציר-זמן אחד. הרצה מחדש מרעננת את זה מאפס - אין חותמות זמן ישנות של סשן של מישהו אחר שמזליגות.
-
-**שונה מהראשית?** לא, זהה.
 
 </div>
 
@@ -1890,7 +1744,7 @@ this from scratch - no stale timestamps from someone else's session leak through
 <a id="cell-36"></a>
 <div dir="rtl">
 
-### תא 36 - code - איסוף אנומליות + re-ID + גרף
+### תא 35 - code - איסוף אנומליות + re-ID + גרף
 
 **מה עושה:** תא סיכום ב-`try/except` שסופג כל exception וידפיס אותו במקום להפיל את המחברת. חמישה בלוקים:
 
@@ -1902,11 +1756,9 @@ this from scratch - no stale timestamps from someone else's session leak through
 
 הבלוק בנוי ב-try/except כדי שאם קודם משהו נכשל (למשל `reid` לא נטען) - עדיין נראה משהו.
 
-**למה:** תא סיכום נדרש בכל מחברת מקצועית - מאפשר לקורא לחזור בסוף ולראות מה קרה. חשוב במיוחד למפעיל שרץ Run All: אל תרצה לגלול לאחור לפרק 4 לזכור אם נמצאה אנומליה.
+**למה:** תא סיכום מאפשר לקורא לחזור בסוף ולראות מה קרה. חשוב במיוחד למפעיל שרץ Run All: אל תרצה לגלול לאחור לפרק 4 לזכור אם נמצאה אנומליה.
 
 **פלטים:** בלוק טקסטואלי ארוך + גרף בסוף.
-
-**שונה מהראשית?** לא, זהה.
 
 </div>
 
@@ -1987,18 +1839,16 @@ except Exception as e:
 
 ## חלק 10 - קליברציית דיוק
 
-### תא 37 - markdown - כותרת + workflow
+### תא 36 - markdown - כותרת + workflow
 
-**מה עושה:** מסביר את המשמעות: הדשבורד אמין רק ככל ש-YOLO מדויק על **המצלמות האלו**. הפרק מודד את זה: לוכד פריימים מ-4 המצלמות החיות של הגריד, מריץ את הזיהוי בשני גדלי קלט (‏640 = ברירת מחדל ישנה, 960 = ברירת מחדל הקולקטור הנוכחי), אחר-כך אתה סופר people/vehicles בעצמך ומקבל MAE + bias פר מצלמה ופר גודל.
+**מה עושה:** מסביר את המשמעות: הדשבורד אמין רק ככל ש-YOLO מדויק על **המצלמות האלו**. הפרק מודד את זה: לוכד פריימים מ-4 המצלמות החיות של הגריד, מריץ את הזיהוי בשני גדלי קלט (640 = ברירת מחדל ישנה, 960 = ברירת מחדל הקולקטור הנוכחי), אחר-כך אתה סופר people/vehicles בעצמך ומקבל MAE + bias פר מצלמה ופר גודל.
 
 Workflow (הכל מקומי, ~10 דקות של תיוג):
 1. **10a** לוכד פריימים + תחזיות ל-`data/calibration/`;
 2. **10b** מציג כל פריים - אתה מקליד `true people,vehicles`;
 3. **10c** מדפיס טבלת דיוק והמלצת `conf/imgsz`.
 
-הזן את התוצאה חזרה: `imgsz` המנצח הולך ל-`--imgsz` של הקולקטור, ומצלמה עם bias שיטתית מקבלת `"conf"` override ב-`app/cameras.py` (‏bias < 0 -> הורד conf, bias > 0 -> העלה).
-
-**שונה מהראשית?** לא, זהה בטקסט. **המשמעות מהותית שונה:** בתאומה, ה-"ground truth" של הקליברציה (מה שאתה סופר בעיניים) הוא בדיוק מה שהמודל של הגרסה החזקה `yolo26m` היה מוצא. `imgsz=960` בהיפותזה לא ממש מציל כאן - `yolov8s@960` עדיין חלש יותר מ-`yolo26m@960`. הפרק שימושי לתאומה בעיקר להראות **כמה** ה-VM חסר, לא לתקן את זה.
+הזן את התוצאה חזרה: `imgsz` המנצח הולך ל-`--imgsz` של הקולקטור, ומצלמה עם bias שיטתית מקבלת `"conf"` override ב-`app/cameras.py` (bias < 0 -> הורד conf, bias > 0 -> העלה).
 
 </div>
 
@@ -2023,7 +1873,7 @@ override in `app/cameras.py` (bias < 0 -> lower conf, bias > 0 -> raise it).
 <a id="cell-38"></a>
 <div dir="rtl">
 
-### תא 38 - code - 10a: capture פריימים + ריצת YOLO בשני imgsz
+### תא 37 - code - 10a: capture פריימים + ריצת YOLO בשני imgsz
 
 **מה עושה:** checkpoint, ואז:
 
@@ -2032,13 +1882,11 @@ override in `app/cameras.py` (bias < 0 -> lower conf, bias > 0 -> raise it).
    - `frames = grab_burst(url, n=1)` - פריים בודד; אם `None` -> MISS + continue.
    - שמירת הפריים הגולמי ל-`{stem}.jpg` (`stem = f'{cam_id}_{k:02d}'`).
    - לכל `size` ב-`IMG_SIZES`: `counts, _ = detect_with_boxes(model, frame, conf=CALIB_CONF, imgsz=size)`. שדות `entry['person_640'], entry['vehicles_640'], entry['person_960'], entry['vehicles_960']`.
-   - שמירת annotation `{stem}_annotated.jpg` עם `annotate(model, frame, conf=CALIB_CONF, imgsz=max(IMG_SIZES))` (על ההגדרה החזקה יותר).
+   - שמירת annotation `{stem}_annotated.jpg` עם `annotate(model, frame, conf=CALIB_CONF, imgsz=max(IMG_SIZES))`.
    - `samples.append(entry)`, `got += 1`, `time.sleep(2)` להתקדמות הזרם.
 3. **שמירה** - `predictions.json` = רשימת כל ה-entries.
 
 **למה:** להפריד את שלב הלכידה (עולה זמן, לא דורש interactivity) מהתיוג (זמן קצר של אינטראקציה). כשמפצלים כך אפשר להריץ 10a בשקט ב-background ואז לפתוח את 10b כשמוכן.
-
-**אלטרנטיבות:** לגלגל את כל שלושה השלבים בתא אחד היה נחמד יותר, אבל אז המפעיל שסגר את החלון וחוזר מחר צריך לרוץ את הלכידה מחדש. הפרדה חוסכת עבודה.
 
 **פלטים:**
 
@@ -2049,9 +1897,7 @@ ibb_eminonu: captured 6 frames
 24 frames -> C:\Users\...\data\calibration
 ```
 
-+ 24 קבצי `.jpg` גולמיים, 24 קבצי `_annotated.jpg`, ו-`predictions.json`.
-
-**שונה מהראשית?** לא, זהה.
+בתוספת 24 קבצי `.jpg` גולמיים, 24 קבצי `_annotated.jpg`, ו-`predictions.json`.
 
 </div>
 
@@ -2104,7 +1950,7 @@ print(f'{len(samples)} frames -> {CALIB_DIR}')
 <a id="cell-39"></a>
 <div dir="rtl">
 
-### תא 39 - code - 10b: תיוג אינטראקטיבי
+### תא 38 - code - 10b: תיוג אינטראקטיבי
 
 **מה עושה:** תא אינטראקטיבי מוגן ב-flag: `RUN_LABELING = globals().get('RUN_LABELING', False)`. ברירת המחדל False - כדי שלא יעצור Run All עם `input()`. כשמוכן לתייג: לקבוע `RUN_LABELING = True` ולרוץ שוב.
 
@@ -2119,8 +1965,6 @@ print(f'{len(samples)} frames -> {CALIB_DIR}')
 
 **למה:** התיוג הידני הוא החלק הבלתי-ניתן-לאוטומציה של קליברציה - **אתה** משמש כ-ground truth. הצפייה בפריים המסומן (ולא בפריים הגולמי) עוזרת: אתה רואה מה המודל *חשב* שהוא רואה, ומקליד את מה שאתה **באמת** רואה.
 
-**אלטרנטיבות:** widget של ipywidgets היה נחמד יותר, אבל `input()` בטוח על פני כל סביבות ה-Jupyter. סימוני mouse-click בתמונה היו יעילים יותר אבל דורשים JS/canvas והרבה יותר קוד.
-
 **פלטים:**
 
 ```
@@ -2131,8 +1975,6 @@ true people,vehicles counts.
 ```
 
 או במצב אמיתי: 24 תמונות + 24 קלטים + `labeled 24 frames -> .../labeled.json`.
-
-**שונה מהראשית?** לא, זהה.
 
 </div>
 
@@ -2181,7 +2023,7 @@ else:
 <a id="cell-40"></a>
 <div dir="rtl">
 
-### תא 40 - code - 10c: דוח MAE + bias
+### תא 39 - code - 10c: דוח MAE + bias
 
 **מה עושה:** טוען `labeled.json`. אם ריק: זורק `_LabelFirst` בהודעה ידידותית ("PAUSED: no labeled frames yet - set RUN_LABELING = True in 10b, label a few frames, then run this cell again").
 
@@ -2213,8 +2055,6 @@ ibb_tak..  person  0.5   0.2  6
 ibb_tak.. vehicles 1.0  -0.5  6
 ...
 ```
-
-**שונה מהראשית?** לא בקוד. בפועל: התאומה תראה MAE גבוה יותר וב-bias שלילי חזק יותר, בפירוש כי `yolov8s` מגלה פחות. זו הוכחה מספרית לפער בין המחברת הראשית לבין ה-VM.
 
 </div>
 
@@ -2267,38 +2107,28 @@ How to read this:
 
 ## חלק 11 - חיזוי
 
-### תא 41 - markdown - כותרת + הפילוסופיה: רק המנצח האופרטיבי
+### תא 40 - markdown - כותרת + הפילוסופיה: מנצח אופרטיבי
 
-**מה עושה:** תא ההקדמה החשוב ביותר בתאומה - כותב מפורש: **"The VM-faithful version of the forecasting chapter"**. מסביר את חלוקת התפקידים:
+**מה עושה:** תא ההקדמה של פרק החיזוי. המחברת שומרת את **המנצח האופרטיבי** מקטגוריית הבוחר - חיזוי profile של שעה-של-יום/שבוע עם תיקון EWMA לרמה ורצועת אי-ודאות MAD. numpy טהור, ללא תלויות חדשות, אלפיות שנייה של חישוב: מה שה-e2-micro של 1 GB יכול להרשות לעצמו להריץ ליד הקולקטור.
 
-- **המחברת המקומית** (הראשית) היא המעבדה: מריצה סולם של מודלים (persistence, seasonal-naive, profile, ridge, GRU) ומראה איזה מהם מרוויח את הזמן שלו.
-- **המחברת הזאת** (התאומה) שומרת רק את **המנצח האופרטיבי** מקטגוריית הבוחר - חיזוי profile של שעה-של-יום/שבוע עם תיקון EWMA לרמה ורצועת אי-ודאות MAD. numpy טהור, ללא תלויות חדשות, אלפיות שנייה של חישוב: בדיוק מה שה-e2-micro של 1 GB יכול להרשות לעצמו להריץ ליד הקולקטור.
-
-שני תאים של סנטירת (זהים למחברת המקומית - ה-CSV cache משותף), ואז המחזה עצמו:
+שני תאים של סנטירת, ואז המחזה עצמו:
 
 - **עקומה צפויה** - לכל מצלמה עם מספיק היסטוריה: איך 12 השעות הבאות אמורות להיראות, שעה שעה.
 - **אנומליות סטייה** - `|actual - expected|` ביחידות MAD מסמן גם spikes וגם שקט חריג (כיכר מתה בשעת שיא). rolling-z של חלק 4 עיוור למקרה השקט מעצם התכנון; הזה משלים אותו.
 
 Firestore זוכרת רק כמה ימים אחורה, לכן תא המשיכה למטה הוא גם הארכיבר של הפרויקט: הרץ אותו כל כמה ימים ו-`data/footfall_history.csv` צובר את ההיסטוריה המלאה.
 
-**שונה מהראשית?** מהותית. הראשית מציגה **סולם שלם של מודלים**, מבצעת back-tests, ומדפיסה טבלה שמשווה persistence / seasonal-naive / profile / ridge / GRU. התאומה מפילה את כל זה ומשאירה **רק** את ה-profile - כי זה מה שהיה נבחר בפועל אחרי backtests, וזה מה שיכול לרוץ על VM זעיר. הפילוסופיה: המחברת הראשית מוכיחה WHY, התאומה מריצה WHAT.
-
 </div>
 
 ```markdown
 ## 11. Forecasting - expected activity + deviation anomalies (operational)
 
-The VM-faithful version of the forecasting chapter. The local notebook
-(`turkey_business_activity.ipynb`) is the lab: it backtests a ladder of
-models (persistence, seasonal-naive, profile, ridge, GRU) and shows which
-one earns its keep. THIS notebook keeps only the operational winner-class
-forecaster - an hour-of-day/week median profile with an EWMA level
-correction and a MAD uncertainty band. Pure numpy, no new dependencies,
-milliseconds of compute: exactly what the 1 GB e2-micro could afford to
-run next to the collector.
+The operational winner-class forecaster - an hour-of-day/week median profile
+with an EWMA level correction and a MAD uncertainty band. Pure numpy, no
+new dependencies, milliseconds of compute: exactly what the 1 GB e2-micro
+could afford to run next to the collector.
 
-Two cells of plumbing (identical to the local notebook - the CSV cache is
-shared), then the forecaster:
+Two cells of plumbing, then the forecaster:
 
 * **Expected curve** - for every camera with enough history: what the
   next 12h should look like, hour by hour.
@@ -2315,7 +2145,7 @@ the project's archivist: run it every couple of days and
 <a id="cell-42"></a>
 <div dir="rtl">
 
-### תא 42 - code - 11a: משיכת ההיסטוריה מ-Firestore ל-cache מקומי
+### תא 41 - code - 11a: משיכת ההיסטוריה מ-Firestore ל-cache מקומי
 
 **מה עושה:** תא ארוך שמושך את היסטוריית ה-footfall של הקולקטור ל-cache מקומי ב-`data/footfall_history.csv`, incrementally. שלושה בלוקים עיקריים:
 
@@ -2335,8 +2165,6 @@ the project's archivist: run it every couple of days and
 
 **למה:** Firestore ב-Spark plan מגבילה 50K reads/day. הפרויקט מרים archive מקומי ב-CSV שגדל incrementally - הרץ פעם ביומיים וקבל היסטוריה מלאה מבלי לפוצץ את המכסה.
 
-**אלטרנטיבות:** BigQuery / GCS export של Firestore היה נותן ארכיון עמיד יותר, אבל: עולה כסף וזמן; CSV מקומי מספיק לניתוח היסטורי.
-
 **פלטים:**
 
 ```
@@ -2345,9 +2173,7 @@ new docs on the server: 340
 cache now 12840 rows, 2026-07-20 -> 2026-08-13, 8 cameras -> footfall_history.csv
 ```
 
-+ טבלה של 12 מצלמות.
-
-**שונה מהראשית?** לא, זהה מילולית. הערה בהקדמה של פרק 11: "identical to the local notebook - the CSV cache is shared". שני המחברות טוענות מאותו CSV.
+בתוספת טבלה של 12 מצלמות.
 
 </div>
 
@@ -2450,22 +2276,20 @@ hist.groupby('cam_id').agg(rows=('ts', 'size'), ok=('ok', 'sum'),
 <a id="cell-43"></a>
 <div dir="rtl">
 
-### תא 43 - code - 11b: resample לרשת 15 דקות + סינון epoch
+### תא 42 - code - 11b: resample לרשת 15 דקות + סינון epoch
 
 **מה עושה:** תא שלב-ההכנה של החיזוי. הופך את הדגימות הגולמיות (כל 40-90 שניות עם jitter וחורים) לרשת נקייה של bins 15 דקות פר מצלמה. חמישה בלוקים:
 
 1. **קבועים** - `BIN_MIN = 15`, `BINS_PER_DAY = 96`, `MIN_HOURS = 36` (מצלמה צריכה >=36 שעות של bins נצפים כדי לשחק).
 2. **סינון + resample** - `ok = hist[hist.ok == 1]` (רק דגימות מוצלחות), `ts` -> `datetime UTC`. `bins = ok.groupby('cam_id').resample('15min').median()` על person/vehicles. `bins['n']` = size = מספר דגימות פר bin. ההערה: "median, not mean, so one hallucinated burst can't drag a bin".
-3. **פיצ'רים של זמן מקומי** - `bins['local'] = bins['ts']`; לכל מצלמה מנסה `tz_convert(cam_tzinfo(cam))` (Bangkok evening != Istanbul evening); אם נכשל: נשאר UTC. יוצר `hod` (‏hour-of-day bin), `dow` (‏day-of-week), `how = dow * 96 + hod` (‏hour-of-week bin).
-4. **‏Era detection** - הבלוק החשוב. האוסף מחזיק שאריות של epoch ישן יותר (הגריד המקורי של יוני) מופרד מה-era הנוכחי בחור-רב-שבועות (הקולקטור סייר במדינות אחרות וישנים נוקו). ערבוב epochs חוצה חור כזה שובר כל split מבוסס-זמן (train יהיה עולם אחד, test אחר), לכן כל המידול משתמש רק ב-**era האחרון**: כל מה שאחרי החור האחרון > `ERA_GAP_H = 72` שעות.
+3. **פיצ'רים של זמן מקומי** - `bins['local'] = bins['ts']`; לכל מצלמה מנסה `tz_convert(cam_tzinfo(cam))` (Bangkok evening != Istanbul evening); אם נכשל: נשאר UTC. יוצר `hod` (hour-of-day bin), `dow` (day-of-week), `how = dow * 96 + hod` (hour-of-week bin).
+4. **Era detection** - הבלוק החשוב. האוסף מחזיק שאריות של epoch ישן יותר (הגריד המקורי של יוני) מופרד מה-era הנוכחי בחור-רב-שבועות (הקולקטור סייר במדינות אחרות וישנים נוקו). ערבוב epochs חוצה חור כזה שובר כל split מבוסס-זמן (train יהיה עולם אחד, test אחר), לכן כל המידול משתמש רק ב-**era האחרון**: כל מה שאחרי החור האחרון > `ERA_GAP_H = 72` שעות.
    - `_obs_times = pd.Series(bins.loc[bins.n > 0, 'ts'].sort_values().unique())`.
    - `_breaks = _obs_times[_obs_times.diff() > pd.Timedelta(hours=72)]`.
    - אם קיים breaks: `era_start = _breaks.iloc[-1]`; מוריד את כל bins לפני זה, מדפיס `era cut: modeling on data from ... (dropped N bins of an older epoch across a >72h hole)`.
-5. **סינון מצלמות זכאיות + מפת כיסוי** - `span = obs.groupby('cam_id').agg(bins_obs, first, last)`, `span_days`. `ELIGIBLE = sorted(...)` = מצלמות עם >= `MIN_HOURS * 4` bins. אחר-כך `cov = pivot_table` (‏cam x day, values=n bins/day) - יוצר heatmap ירוק (‏YlGn) שמראה כיסוי לפי יום.
+5. **סינון מצלמות זכאיות + מפת כיסוי** - `span = obs.groupby('cam_id').agg(bins_obs, first, last)`, `span_days`. `ELIGIBLE = sorted(...)` = מצלמות עם >= `MIN_HOURS * 4` bins. אחר-כך `cov = pivot_table` (cam x day, values=n bins/day) - יוצר heatmap ירוק (YlGn) שמראה כיסוי לפי יום.
 
 **למה:** לגרוב את הזרם הגולמי לצורה שהמודל יכול לעבוד עליה. חיתוך epoch הוא הכי מעניין: הפרויקט למד מהמהלכים של הגריד וקידק ש-CI/CD מודל מקומי לא יערבב יקיצות של הקולקטור עם השבתות ארוכות.
-
-**אלטרנטיבות:** interpolation על הפערים היה פשוט יותר אבל שקרי - הצפצוף המדומה יסתיר את החור האמיתי. הבחירה: NaN במקום אינטרפולציה, era-cut במקום שילוב.
 
 **פלטים:**
 
@@ -2478,9 +2302,7 @@ ibb_taksim            432 2026-08-05 12:15 2026-08-13 05:00        7.7
 ...
 ```
 
-+ heatmap כיסוי.
-
-**שונה מהראשית?** לא, זהה. שוב, ההערה: "identical to the local notebook - the CSV cache is shared".
+בתוספת heatmap כיסוי.
 
 </div>
 
@@ -2561,24 +2383,22 @@ plt.tight_layout(); plt.show()
 <a id="cell-44"></a>
 <div dir="rtl">
 
-### תא 44 - code - 11c-VM: profile x EWMA + band
+### תא 43 - code - 11c: profile x EWMA + band
 
-**מה עושה:** הליבה של פרק החיזוי - **המנצח האופרטיבי**. numpy בלבד. חמישה בלוקים:
+**מה עושה:** הליבה של פרק החיזוי - המנצח האופרטיבי. numpy בלבד. חמישה בלוקים:
 
 1. **קבועים** - `Z_FLAG=3.5, MIN_DELTA=3.0, EWMA_A=0.25, HOLD_FRAC=0.25`.
 2. **הכנה** - `work = bins[bins.cam_id.isin(ELIGIBLE)]`. `work['y'] = groupby('cam_id')['person'].transform(ffill(limit=2))` - מילוי קדימה עד 2 bins (לא יותר, כי גרירת ערך ישן על חור ארוך שקרית). `t_split = work.ts.min() + (work.ts.max()-work.ts.min()) * (1 - 0.25)` - 25% אחרונים = holdout. `span_days_all`; `key = 'how' if >= 7 days else 'hod'` - אם מספיק היסטוריה: פרופיל שעה-של-שבוע (168 סלוטים); אחרת: פרופיל שעה-של-יום בלבד (24 סלוטים).
 3. **בניית הפרופיל + MAD** - `prof = work[work.ts <= t_split].groupby(['cam_id', key]).y.median()` - החציון פר (מצלמה, שעה של יום/שבוע). `res['exp0']` = לכל שורה, ה-`prof.get((c, s), NaN)`. `mad = ((res.y - res.exp0).abs().groupby(res.cam_id).median() * 1.4826).clip(lower=1.0)` - MAD כללי לכל מצלמה. מדפיס `profile key: how (hour-of-week; 12.3 days of history)`.
-4. **`expected_series(dfc, cam)`** - הפונקציה שממש מייצרת חיזוי מתוקן:
+4. **`expected_series(dfc, cam)`** - הפונקציה שמייצרת חיזוי מתוקן:
    - `e0 = np.array([prof.get((cam, s), NaN) for s in dfc[key]])` - הפרופיל הגולמי.
    - לוללת ה-EWMA: `lvl = 1.0`. לכל שורה: `out.append(e * lvl if e is finite else NaN)`; אם `a` ו-`e` finite ו-`e >= 1`: `lvl = (1-A)*lvl + A * clip(a/e, 0.4, 2.5)`. הרעיון: הפרופיל מספר על **צורה** יחסית, ה-`lvl` מתקן את **הרמה** בזמן אמת. `clip(0.4, 2.5)` מונע אם או חד של דגימה יחידה מקרעת את הרמה.
-5. **‏Mini-eval + גרפים + summary עתידי** - שלושה חלקים:
-   - **Backtest קטן על holdout** - לכל אופק `h` ב-`(4, 48)` (‏1h ו-12h קדימה): לכל מצלמה, `tgt = dfc.y.shift(-h)`, `tst = dfc.ts > t_split`. משווה 3 מודלים: `persistence` (‏y חצי בעבר), `seasnaive24` (‏y.shift(96-h) = יום קודם), `profile`. `mae = (pred[tst] - tgt[tst]).abs().mean()`. מדפיס טבלה של MAE פר אופק.
-   - **גרפים actual vs expected** - `show` = 4 מצלמות הכי טריות. לכל אחת: 36 שעות אחרונות, `expected_series`, `band = 3.5 * mad[cam]`. `fill_between(np.clip(exp-band, 0, None), exp+band)` - רצועה סביב הצפוי. `plot exp` (‏dashed), `plot actual`. scatter אדום על spikes (`resid > 0`), scatter סגול עם `marker='v'` על שקט חריג (`resid < 0`). הצבע הסגול הוא **המקרה הסטטי-שקט** שחלק 4 לא יכול לתפוס.
-   - **‏Next 12h summary** - `future = date_range(work.ts.max()+15min, periods=48, freq='15min')`. לכל cam: המרה לזמן מקומי, `slots = weekday*96 + hour*4 + minute//15` (או רק hour*4+minute//15 ב-hod), `exp_f = np.array([prof.get((cam, s), NaN) for s in slots])`. אם finite: `i = nanargmax(exp_f)`, שומר `peak_local, peak_people, now_expected`. מדפיס DataFrame - השורה שדוח יומי עתידי יכול לצטט ("tomorrow's expected peak at Taksim ~14:00").
+5. **Mini-eval + גרפים + summary עתידי** - שלושה חלקים:
+   - **Backtest קטן על holdout** - לכל אופק `h` ב-`(4, 48)` (1h ו-12h קדימה): לכל מצלמה, `tgt = dfc.y.shift(-h)`, `tst = dfc.ts > t_split`. משווה 3 מודלים: `persistence` (y חצי בעבר), `seasnaive24` (y.shift(96-h) = יום קודם), `profile`. `mae = (pred[tst] - tgt[tst]).abs().mean()`. מדפיס טבלה של MAE פר אופק.
+   - **גרפים actual vs expected** - `show` = 4 מצלמות הכי טריות. לכל אחת: 36 שעות אחרונות, `expected_series`, `band = 3.5 * mad[cam]`. `fill_between(np.clip(exp-band, 0, None), exp+band)` - רצועה סביב הצפוי. `plot exp` (dashed), `plot actual`. scatter אדום על spikes (`resid > 0`), scatter סגול עם `marker='v'` על שקט חריג (`resid < 0`). הצבע הסגול הוא **המקרה הסטטי-שקט** שחלק 4 לא יכול לתפוס.
+   - **Next 12h summary** - `future = date_range(work.ts.max()+15min, periods=48, freq='15min')`. לכל cam: המרה לזמן מקומי, `slots = weekday*96 + hour*4 + minute//15` (או רק hour*4+minute//15 ב-hod), `exp_f = np.array([prof.get((cam, s), NaN) for s in slots])`. אם finite: `i = nanargmax(exp_f)`, שומר `peak_local, peak_people, now_expected`. מדפיס DataFrame - השורה שדוח יומי עתידי יכול לצטט ("tomorrow's expected peak at Taksim ~14:00").
 
-**למה:** התא הזה הוא הבשורה של פרק 11 בתאומה. זו הוכחה שמודל פשוט מאוד (חציון + EWMA + MAD) יכול לגלות אנומליות בשני הכיוונים ולהוציא תחזית 12 שעות שאפשר להכניס לדוח יומי. numpy = מסוגל לרוץ ליד הקולקטור על 1 GB RAM.
-
-**אלטרנטיבות:** ARIMA/Prophet/GRU נבחנו במחברת הראשית ובוזבזו כי הם דורשים torch/statsmodels ופיצוץ הזיכרון. הפרופיל פשוט + EWMA לרוב תואם אותם על אופק קצר, ולא נופל כשמצלמה נופלת יום.
+**למה:** הוכחה שמודל פשוט מאוד (חציון + EWMA + MAD) יכול לגלות אנומליות בשני הכיוונים ולהוציא תחזית 12 שעות שאפשר להכניס לדוח יומי. numpy = מסוגל לרוץ ליד הקולקטור על 1 GB RAM.
 
 **פלטים:**
 
@@ -2590,21 +2410,18 @@ h
 720min               4.7          3.8     3.1
 ```
 
-+ 4 גרפים של actual vs expected + טבלת peak time פר מצלמה.
-
-**שונה מהראשית?** מהותית! המחברת הראשית מריצה **סולם מלא** של מודלים (persistence, seasonal-naive, profile, ridge, GRU) עם backtest מלא, table של השוואות ורעיונות ל-hybrid. התאומה שומרת רק את הצורה שיכולה לרוץ על VM (numpy pure) - זה מה שהקולקטור **יכול לעשות** בפועל אם ההוספה תופעל. הפרק הפך מ-lab notebook לפרוטוטיפ operational.
+בתוספת 4 גרפים של actual vs expected + טבלת peak time פר מצלמה.
 
 </div>
 
 ```python
-# 11c-VM. The operational forecaster: profile x EWMA level + MAD band.
+# 11c. The operational forecaster: profile x EWMA level + MAD band.
 #
 # Numpy only - this is the piece that could run ON the e2-micro next to
-# the collector (milliseconds per camera, no torch, no sklearn). The local
-# notebook's ladder is the evidence for WHY this simple shape is the right
-# production choice: on short history the seasonal profile is brutally
-# hard to beat, and it degrades gracefully when a stream disappears for a
-# day (the band just widens - no retraining, no crash).
+# the collector (milliseconds per camera, no torch, no sklearn). On short
+# history the seasonal profile is brutally hard to beat, and it degrades
+# gracefully when a stream disappears for a day (the band just widens - no
+# retraining, no crash).
 Z_FLAG, MIN_DELTA, EWMA_A = 3.5, 3.0, 0.25
 HOLD_FRAC = 0.25
 
@@ -2630,7 +2447,7 @@ def expected_series(dfc, cam):
     return np.array(out)
 
 # Mini-eval on the holdout tail: does the profile beat the two dumb
-# baselines? (The full ladder lives in the local notebook.)
+# baselines?
 rows = []
 for h in (4, 48):                                        # 1h and 12h ahead
     maes = {'persistence': [], 'seasnaive24': [], 'profile': []}
@@ -2701,66 +2518,60 @@ print(pd.DataFrame(summary).set_index('cam'))
 <a id="cell-45"></a>
 <div dir="rtl">
 
-## חלק 12 - איך הדשבורד עובד במצב twin
+## חלק 12 - איך הדשבורד עובד
 
-### תא 45 - markdown - הסבר על tabs + פורט + restart
+### תא 44 - markdown - הסבר על tabs + פורט + restart
 
-**מה עושה:** תא ההסבר הסופי של המחברת התאומה, שמתאר איך הדשבורד עובד ב-`?mode=twin`. הדשבורד מוגש על ידי אותו שרת HTTP קטן (`app.dashboard_server`) כמו במחברת הראשית, אבל התאומה פותחת אותו ב-**twin mode** (`?mode=twin`). Twin mode הוא סביבת הסקירה / התיוג של המפעיל עבור נתוני הפרודקשן האמיתיים של ה-VM (הקולקטור על ה-VM של GCP כותב ל-Firestore, וה-ReID DB + review pool שלו הם מה שהדשבורד הזה מציג).
+**מה עושה:** תא ההסבר הסופי של המחברת, שמתאר איך הדשבורד עובד ב-`?mode=twin`. הדשבורד מוגש על ידי שרת HTTP קטן (`app.dashboard_server`) ופתוח ב-**twin mode** (`?mode=twin`). Twin mode הוא סביבת הסקירה / התיוג של המפעיל עבור נתוני הפרודקשן האמיתיים של ה-VM (הקולקטור על ה-VM של GCP כותב ל-Firestore, וה-ReID DB + review pool שלו הם מה שהדשבורד הזה מציג).
 
 **Tabs (twin-mode):**
 
-- **Analysis** - גריד 2x2 + KPIs + אנומליה + אירועים אופרטיביים, בדיוק כמו במחברת הראשית. מאחר שהתאומה משקפת את גריד ה-VM לטורקיה, האריחים כאן הם המצלמות של ה-VM עצמו.
+- **Analysis** - גריד 2x2 + KPIs + אנומליה + אירועים אופרטיביים. מאחר שהמחברת משקפת את גריד ה-VM לטורקיה, האריחים כאן הם המצלמות של ה-VM עצמו.
 - **Search** - חיפוש דמיון תמונות + browse לפי מחלקה/זמן על pools של review + live-samples של הקולקטור.
-- **Reinforcement learning** *(רק ב-twin)* - שולחן העבודה של התיוג. כל verdict שאתה שומר עושה hot-reload ל-confidence של הקולקטור פר-מצלמה בתוך ~7 דקות וגם מזין את המייצא-של-תיוג לאימון (‏`tools/export_labels.py`). Review ממוקם מעל Learning-proof כדי שפאנל הפעולה יהיה למעלה וגרף התוצאה אחריו.
+- **Reinforcement learning** - שולחן העבודה של התיוג. כל verdict שאתה שומר עושה hot-reload ל-confidence של הקולקטור פר-מצלמה בתוך ~7 דקות וגם מזין את המייצא-של-תיוג לאימון (`tools/export_labels.py`). Review ממוקם מעל Learning-proof כדי שפאנל הפעולה יהיה למעלה וגרף התוצאה אחריו.
 
-**לא נראה במצב twin:** Send Report From VM (‏digest פעמיים ביום + מייל לפי דרישה מחווטים במקום אחר, לא מהכפתור הזה), Live Analysis 🔬 לכל אריח (ה-VM לא מריץ את השכבות החיות האלו), Window analysis, ותפריטי class/time בסטריפ של model-view. כמו כן, אין טאב Snapshots - זו סביבת הסקירה, לא אוסף screenshots.
+**לא נראה במצב twin:** Send Report From VM (digest פעמיים ביום + מייל לפי דרישה מחווטים במקום אחר, לא מהכפתור הזה), Live Analysis לכל אריח (ה-VM לא מריץ את השכבות החיות האלו), Window analysis, ותפריטי class/time בסטריפ של model-view. כמו כן, אין טאב Snapshots - זו סביבת הסקירה, לא אוסף screenshots.
 
-**פורט** - אותו auto-scan של פורט חופשי (‏8000-8020). אם 8000 עסוק המחברת הזאת בוחרת את הפורט החופשי הבא ומדפיסה את ה-URL.
+**פורט** - auto-scan של פורט חופשי (8000-8020). אם 8000 עסוק המחברת בוחרת את הפורט החופשי הבא ומדפיסה את ה-URL.
 
-**‏Restart** - טען מחדש את הדף (‏Ctrl+F5) אחרי שינוי כל קובץ `src/web/*.html` או `.js`.
+**Restart** - טען מחדש את הדף (Ctrl+F5) אחרי שינוי כל קובץ `src/web/*.html` או `.js`.
 
-**למה:** להבטיח שהמפעיל מבין ש-`?mode=twin` הוא לא סתם דגל cosmetic - הוא מפעיל טאב שלם (‏Reinforcement learning) שלא קיים במצב main, ומסתיר תכונות שלא רלוונטיות לסביבת הסקירה.
-
-**שונה מהראשית?** התא **הזה** קיים רק בתאומה. במחברת הראשית פרק 12 לא קיים כלל - הדשבורד מוצג בפרק 7 עם `?mode=main` וזה סוף הסיפור. התאומה מוסיפה תא הסבר נפרד כדי לתעד את mode ה-twin, שהיא הגדולה שלה: להיות סביבת סקירה + תיוג אמיתית של הקולקטור.
+**למה:** להבטיח שהמפעיל מבין ש-`?mode=twin` הוא לא סתם דגל cosmetic - הוא מפעיל טאב שלם (Reinforcement learning) ומסתיר תכונות שלא רלוונטיות לסביבת הסקירה.
 
 </div>
 
 ```markdown
 ## How this dashboard works
 
-The dashboard below is served by the same tiny local HTTP server
-(`app.dashboard_server`) as the main notebook, but this notebook opens it
-in **twin mode** (`?mode=twin`). Twin mode is the operator's review /
-tagging environment for the VM's actual production data (the collector on
-the GCP VM writes to Firestore, and its ReID DB + review pool are what
-this dashboard shows).
+The dashboard below is served by a tiny local HTTP server
+(`app.dashboard_server`) in **twin mode** (`?mode=twin`). Twin mode is the
+operator's review / tagging environment for the VM's actual production
+data (the collector on the GCP VM writes to Firestore, and its ReID DB +
+review pool are what this dashboard shows).
 
 **Tabs (twin-mode)**:
 
-- **Analysis** - 2x2 grid + KPIs + anomaly + operational-events, exactly
-  as in main. Since the twin mirrors the VM's Turkey grid, the tiles here
-  are the VM's own cameras.
+- **Analysis** - 2x2 grid + KPIs + anomaly + operational-events. Since
+  this notebook mirrors the VM's Turkey grid, the tiles here are the VM's
+  own cameras.
 - **Search** - image-similarity + class/time browse over the collector's
   review + live-samples pools.
-- **Reinforcement learning** *(twin only)* - the tagging workbench. Every
-  verdict you save hot-reloads the collector's per-camera confidence
-  within ~7 minutes AND feeds the training exporter
-  (`tools/export_labels.py`). Review is placed above Learning-proof so
-  the action panel is on top and the outcome chart follows.
+- **Reinforcement learning** - the tagging workbench. Every verdict you
+  save hot-reloads the collector's per-camera confidence within ~7 minutes
+  AND feeds the training exporter (`tools/export_labels.py`). Review is
+  placed above Learning-proof so the action panel is on top and the
+  outcome chart follows.
 
 **Not visible in twin mode**: Send Report From VM (twice-daily digest
 + on-demand email are wired elsewhere, not from this button), per-tile
-Live Analysis 🔬 (the VM does not run these live layers), Window
+Live Analysis (the VM does not run these live layers), Window
 analysis, and the class/time dropdowns in the model-view strip. Also, no
 Snapshots tab - this is the review environment, not a screenshot
 collector.
 
-**Port** - same free-port auto-scan (8000-8020). If 8000 is busy this
+**Port** - free-port auto-scan (8000-8020). If 8000 is busy this
 notebook picks the next free one and prints the URL.
 
 **Restart** - reload the page (Ctrl+F5) after changing any
 `src/web/*.html` or `.js` file.
 ```
-
-
-</content>
