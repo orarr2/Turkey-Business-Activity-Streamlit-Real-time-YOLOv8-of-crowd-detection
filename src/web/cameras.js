@@ -18,41 +18,38 @@ const tvkurHls = (id) => `/tvkur/${id}/master.m3u8`;
 // `placeholder_*` fields are what the tile shows before Firestore's
 // config/grid doc arrives; they get replaced on the first snapshot.
 //
-// 2026-07: the Istanbul slots (Sultanahmet + Taksim) were swapped for two
-// more Konya webcamera24/tvkur cams because IBB tightened its geo-block to
-// Turkey-only. Keep in sync with GRID_SLOTS in src/app/cameras.py.
+// slot_id values are generic slot_1..slot_4 to match GRID_SLOTS in
+// src/app/cameras.py and the Firestore config/grid schema. Placeholders
+// carry the current Turkey primaries (Istanbul IBB HLS).
 const CLOUD_SLOTS = [
   {
-    slot_id:          "slot_konya_hukumet",
-    display_area:     "Konya - Hükümet",
-    placeholder_name: "Konya - Hükümet Meydanı",
-    placeholder_hls:  tvkurHls("c77i84vbb2nj4i0fr80g"),
-    placeholder_page: "https://webcamera24.com/camera/turkey/8043-sarraflar-yeralti-carsisi/",
+    slot_id:          "slot_1",
+    display_area:     "Istanbul - Taksim",
+    placeholder_name: "Taksim Meydani (live)",
+    placeholder_hls:  "https://kamerayayin.ibb.istanbul/turistikcam/taksim.stream/playlist.m3u8",
+    placeholder_page: "https://istanbuluseyret.ibb.gov.tr/taksim-yeni/",
   },
   {
-    slot_id:          "slot_otogar",
-    display_area:     "Konya - Otogar",
-    placeholder_name: "Konya - Otogar Kavşağı",
-    placeholder_hls:  tvkurHls("c77i91vbb2nj4i0fr81g"),
-    placeholder_page: "https://webcamera24.com/camera/turkey/8044-otogar-kavsagi/",
+    slot_id:          "slot_2",
+    display_area:     "Istanbul - Beyazit",
+    placeholder_name: "Beyazit Meydani (live)",
+    placeholder_hls:  "https://kamerayayin.ibb.istanbul/turistikcam/beyazitmeydan.stream/playlist.m3u8",
+    placeholder_page: "https://istanbuluseyret.ibb.gov.tr/beyazit-meydani-yeni/",
   },
   {
-    slot_id:          "slot_kulturpark",
-    display_area:     "Konya - Kültürpark",
-    placeholder_name: "Konya - Kültürpark",
-    placeholder_hls:  tvkurHls("c77i6hb84cnrb6mlji3g"),
-    placeholder_page: "https://webcamera24.com/camera/turkey/8058-kulturpark/",
+    slot_id:          "slot_3",
+    display_area:     "Istanbul - Sarachane",
+    placeholder_name: "Sarachane (live)",
+    placeholder_hls:  "https://kamerayayin.ibb.istanbul/turistikcam/sarachane.stream/playlist.m3u8",
+    placeholder_page: "https://istanbuluseyret.ibb.gov.tr/sarachane-yeni/",
   },
   {
-    slot_id:          "slot_millet_caddesi",
-    display_area:     "Konya - Millet Caddesi",
-    placeholder_name: "Konya - Millet Caddesi / Hastane Kavşağı",
-    placeholder_hls:  tvkurHls("c77i9cfbb2nj4i0fr82g"),
-    placeholder_page: "https://webcamera24.com/camera/turkey/8046-millet-caddesi/",
+    slot_id:          "slot_4",
+    display_area:     "Istanbul - Sultanahmet",
+    placeholder_name: "Sultanahmet (live)",
+    placeholder_hls:  "https://kamerayayin.ibb.istanbul/turistikcam/sultanahmet1.stream/playlist.m3u8",
+    placeholder_page: "https://istanbuluseyret.ibb.gov.tr/sultanahmet-1-yeni/",
   },
-  // konya_ince_minareli (tram view, tvkur c77ib8vbb2nj4i0fr8bg) is cataloged
-  // in app/cameras.py but kept OUT of the grid - four slots is the cadence
-  // budget on the free-tier VM.
 ];
 
 // Local-mode override. When the notebook's Section 7 serves this dashboard it
