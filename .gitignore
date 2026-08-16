@@ -40,6 +40,11 @@ firebase-service-account.json
 *serviceAccount*.json
 *firebase-adminsdk*.json
 *-firebase-*.json
+
+# YouTube session cookies - contain live session tokens; NEVER commit.
+yt_cookies.txt
+*_cookies.txt
+youtube.com_cookies.txt
 # Firebase CLI project binding — copy .firebaserc.example to .firebaserc
 .firebaserc
 .env
