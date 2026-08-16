@@ -2320,6 +2320,37 @@ function start(cfg) {
   setInterval(renderCombinedChart, 4000);
   renderCombinedChart();
 
+  // 4d. Re-ID summary (per-camera unique / total / regulars from OSNet
+  // appearance registry). Empty in local mode until the cloud slots line up.
+  onSnapshot(collection(db, "reid_stats"), (snap) => {
+    renderReidTable(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+  }, () => {});
+
+  // 4e. Operational events (loiter / returning / static-departed) - last
+  // 24h, newest first, capped at 120 rows so the table stays scrollable.
+  const evSince = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+  const evQ = query(
+    collection(db, "events"),
+    where("ts", ">=", evSince),
+    orderBy("ts", "desc"),
+    limit(120),
+  );
+  onSnapshot(evQ, (snap) => {
+    renderEventsTable(snap.docs.map((d) => d.data()));
+  }, (err) => console.warn("events subscription failed:", err));
+
+  // 4f. VM status heartbeat (CPU/RAM/disk/uptime) written by the collector
+  // every ~80s. Absence for >5 min flips the VM card to DEAD.
+  onSnapshot(doc(db, "vm_status", "latest"), (snap) => {
+    if (snap.exists()) renderVmCard(snap.data());
+  }, (err) => console.warn("vm_status subscription failed:", err));
+  setInterval(() => renderVmCard(null), 15000);   // just refresh the age label
+
+  // 4g. Camera health matrix: derived client-side from each tile's last
+  // sample age. Refresh once per 5 s so status labels stay current even
+  // when Firestore is silent (which is the exact state we want to show).
+  setInterval(renderCameraHealth, 5000);
+  renderCameraHealth();
 }
 
 // cloud slot_id -> local tile slot_id. Rebuilt on every config/grid change:
@@ -3613,3 +3644,330 @@ async function renderAlCurve() {
 }
 renderAlCurve();
 setInterval(renderAlCurve, 300000);
+
+
+// ---- VM heartbeat card (System health section) -----------------------------
+// The collector writes vm_status/latest with load/mem/disk/uptime from /proc.
+// Dashboard subscribes and renders here. Freshness is judged by updated_at:
+// <5min = OK, 5-15min = STALE, >15min or missing = DEAD.
+
+let _lastVmStatus = null;
+
+function _fmtUptime(sec) {
+  if (sec == null) return "-";
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+function _fmtAge(ageSec) {
+  if (ageSec == null) return "-";
+  if (ageSec < 60) return `${ageSec}s ago`;
+  if (ageSec < 3600) return `${Math.floor(ageSec / 60)}m ago`;
+  if (ageSec < 86400) return `${Math.floor(ageSec / 3600)}h ago`;
+  return `${Math.floor(ageSec / 86400)}d ago`;
+}
+
+function renderVmCard(data) {
+  if (data) _lastVmStatus = data;
+  const d = _lastVmStatus;
+  const $ = (id) => document.getElementById(id);
+  const live = $("vm-live"); if (!live) return;
+
+  // Freshness from updated_at (Firestore Timestamp -> Date)
+  let ageSec = null;
+  if (d && d.updated_at) {
+    const ts = typeof d.updated_at.toDate === "function"
+        ? d.updated_at.toDate() : new Date(d.updated_at);
+    ageSec = Math.max(0, Math.floor((Date.now() - ts.getTime()) / 1000));
+  }
+  const state = !d ? "dead" : ageSec == null ? "unk"
+              : ageSec < 300 ? "ok" : ageSec < 900 ? "stale" : "dead";
+  live.className = `sys-live ${state}`;
+  live.textContent = state === "ok" ? "live"
+                   : state === "stale" ? "stale"
+                   : state === "dead" ? "silent" : "unknown";
+  $("vm-age").textContent = d
+      ? `heartbeat ${_fmtAge(ageSec)}${d.error ? " . " + d.error : ""}`
+      : "no heartbeat yet";
+  if (!d) return;
+
+  // Load
+  const loadEl = $("vm-load");
+  if (loadEl) {
+    loadEl.textContent = d.load1 != null ? d.load1.toFixed(2) : "-";
+    loadEl.className = "sm-val" + (d.load1 > 2 ? " hot" : d.load1 > 1 ? " warn" : "");
+  }
+
+  // Memory
+  const memEl = $("vm-mem");
+  if (memEl) {
+    if (d.mem_total_mb) {
+      const used = d.mem_used_mb || 0;
+      const pct = Math.round((used / d.mem_total_mb) * 100);
+      memEl.textContent = `${used} / ${d.mem_total_mb} MB (${pct}%)`;
+      memEl.className = "sm-val" + (pct > 90 ? " hot" : pct > 75 ? " warn" : "");
+    } else memEl.textContent = "-";
+  }
+
+  // Swap
+  const swapEl = $("vm-swap");
+  if (swapEl) {
+    if (d.swap_total_mb) {
+      const su = d.swap_used_mb || 0;
+      const spct = Math.round((su / d.swap_total_mb) * 100);
+      swapEl.textContent = `${su} / ${d.swap_total_mb} MB (${spct}%)`;
+      swapEl.className = "sm-val" + (spct > 80 ? " hot" : spct > 50 ? " warn" : "");
+    } else swapEl.textContent = "none";
+  }
+
+  // Disk
+  const diskEl = $("vm-disk");
+  if (diskEl) {
+    if (d.disk_total_gb) {
+      const avail = d.disk_avail_gb || 0;
+      const pctFree = Math.round((avail / d.disk_total_gb) * 100);
+      diskEl.textContent = `${avail} / ${d.disk_total_gb} GB (${pctFree}% free)`;
+      diskEl.className = "sm-val" + (pctFree < 10 ? " hot" : pctFree < 25 ? " warn" : "");
+    } else diskEl.textContent = "-";
+  }
+
+  const upEl = $("vm-uptime");
+  if (upEl) upEl.textContent = _fmtUptime(d.uptime_sec);
+
+  // Country: read from the last config/grid we captured.
+  const cEl = $("vm-country");
+  if (cEl && currentGridConfig && currentGridConfig.country) {
+    const c = String(currentGridConfig.country);
+    cEl.textContent = c.charAt(0).toUpperCase() + c.slice(1);
+  }
+}
+
+
+// ---- Camera health matrix (System health section) -------------------------
+// Age-based freshness per slot. Data source: each tile's lastSampleMs, which
+// is set inside setLatest() whenever a latest/{slot} write arrives. We don't
+// hit Firestore here - the subscription already keeps tileState fresh.
+
+function renderCameraHealth() {
+  const tbody = document.getElementById("cam-health-rows");
+  const live = document.getElementById("cam-live");
+  if (!tbody) return;
+  const now = Date.now();
+  const rows = GRID_SLOTS.map((slot) => {
+    const st = tileState[slot.slot_id] || {};
+    const ageMs = st.lastSampleMs ? (now - st.lastSampleMs) : null;
+    const ageSec = ageMs != null ? Math.floor(ageMs / 1000) : null;
+    let statusClass, statusLbl;
+    if (ageSec == null)          { statusClass = "unk";   statusLbl = "no data"; }
+    else if (ageSec < 90)        { statusClass = "ok";    statusLbl = "OK"; }
+    else if (ageSec < 300)       { statusClass = "stale"; statusLbl = "STALE"; }
+    else                         { statusClass = "dead";  statusLbl = "DEAD"; }
+    const camName = st.cloudCamName || slot.placeholder_name || slot.slot_id;
+    return { slot_id: slot.slot_id, area: slot.display_area,
+             cam: camName, statusClass, statusLbl,
+             ageLbl: ageSec == null ? "-" : _fmtAge(ageSec) };
+  });
+  // Aggregate live/stale/dead pill for the card title
+  const nDead  = rows.filter((r) => r.statusClass === "dead").length;
+  const nStale = rows.filter((r) => r.statusClass === "stale").length;
+  const nOk    = rows.filter((r) => r.statusClass === "ok").length;
+  if (live) {
+    if (nDead === rows.length)      { live.className = "sys-live dead";  live.textContent = "all dead"; }
+    else if (nDead || nStale)       { live.className = "sys-live stale"; live.textContent = `${nOk}/${rows.length} live`; }
+    else                            { live.className = "sys-live ok";    live.textContent = `${nOk}/${rows.length} live`; }
+  }
+  tbody.innerHTML = rows.map((r) => `
+    <tr>
+      <td>${escapeHtml(r.area)}</td>
+      <td>${escapeHtml(r.cam)}</td>
+      <td><span class="cam-status ${r.statusClass}">
+            <span class="dot"></span>${r.statusLbl}</span></td>
+      <td>${escapeHtml(r.ageLbl)}</td>
+    </tr>`).join("");
+}
+
+
+// ---- Operational events (loiter / returning / static-departed) --------------
+
+const EVENT_LABELS = {
+  loiter:           { icon: "⏱", label: "prolonged presence" },
+  returning:        { icon: "↩", label: "returning visitor" },
+  static_departed:  { icon: "📤", label: "static object left" },
+};
+
+// Keep the events list in module scope so the accordion can look up prior
+// sightings of the same entity without re-querying Firestore.
+let _ALL_EVENTS = [];
+
+function renderEventsTable(events) {
+  const wrap = document.getElementById("events-table-wrap");
+  if (!wrap) return;
+  _ALL_EVENTS = events;
+  const slotLabel = (id) => {
+    if (LOCAL_MODE) {
+      const tid = cloudToTile(id);
+      const st = tid && tileState[tid];
+      return (st && st.cloudCamName) || id;
+    }
+    const slot = GRID_SLOTS.find((s) => s.slot_id === id);
+    return slot ? slot.display_area : id;
+  };
+  toggleSection("events-section", events.length > 0);
+  if (!events.length) return;
+  const rows = events.slice(0, 60).map((e, i) => {
+    const meta = EVENT_LABELS[e.kind] || { icon: "•", label: e.kind };
+    const detail = e.kind === "loiter"
+        ? `${e.cls ?? "?"} stationary ${Math.round((e.duration_sec ?? 0) / 60)} min`
+        : e.kind === "returning"
+        ? `${e.cls ?? "?"} #${e.entity_id ?? "?"} back after ${Math.round((e.gap_seconds ?? 0) / 60)} min`
+        : e.kind === "static_departed"
+        ? `${e.cls ?? "?"} static ${Math.round((e.dwell_sec ?? 0) / 60)} min - now gone`
+        : "";
+    const snap = e.snapshot_url || e.fullframe_url;
+    const canExpand = e.entity_id != null;
+    const toggle = canExpand
+        ? `<span class="row-toggle" data-idx="${i}" title="show all sightings of this entity">&#9656;</span>`
+        : "";
+    return `<tr class="ev-row">
+      <td>${toggle} ${fmtTime(e.ts)}</td>
+      <td>${escapeHtml(slotLabel(e.slot))}</td>
+      <td>${meta.icon} ${escapeHtml(meta.label)}</td>
+      <td>${escapeHtml(detail)}</td>
+      <td>${snap ? `<a href="${snap}" target="_blank" rel="noopener">view</a>` : "-"}</td>
+    </tr>
+    <tr class="ev-accordion" data-idx="${i}" hidden><td colspan="5"></td></tr>`;
+  }).join("");
+  wrap.innerHTML = `<table class="reid">
+    <thead><tr>
+      <th>Time</th><th>Area</th><th>Event</th><th>Detail</th><th>Snapshot</th>
+    </tr></thead>
+    <tbody>${rows}</tbody></table>`;
+  wrap.querySelectorAll(".row-toggle").forEach((t) => {
+    t.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      toggleEventAccordion(parseInt(t.dataset.idx, 10), t);
+    });
+  });
+}
+
+function toggleEventAccordion(idx, toggleEl) {
+  const wrap = document.getElementById("events-table-wrap");
+  const row = wrap.querySelector(`.ev-accordion[data-idx="${idx}"]`);
+  if (!row) return;
+  if (!row.hidden) {
+    row.hidden = true;
+    toggleEl.innerHTML = "&#9656;";
+    return;
+  }
+  const target = _ALL_EVENTS[idx];
+  if (!target || target.entity_id == null) return;
+  const related = _ALL_EVENTS
+      .filter((e) => e.entity_id === target.entity_id && e.slot === target.slot)
+      .sort((a, b) => (a.ts || "").localeCompare(b.ts || ""));
+  const cell = row.querySelector("td");
+  const appendGallery = () => {
+    if (!target.cam_id) return;
+    fetch(`/api/entity-gallery?cam_id=${encodeURIComponent(target.cam_id)}` +
+          `&entity_id=${encodeURIComponent(target.entity_id)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((g) => {
+        if (!g || !(g.sightings || []).length || row.hidden) return;
+        const thumbs = g.sightings.map((s, i) => `
+          <a href="${s.url}" target="_blank" rel="noopener" class="ev-card">
+            <img src="${s.url}" loading="lazy" alt="appearance ${i + 1}"/>
+            <div class="ev-ts">${s.ts ? fmtTime(s.ts) : ""}</div>
+          </a>`).join("");
+        const div = document.createElement("div");
+        div.className = "ev-strip";
+        div.innerHTML = `<div class="ev-note">Every stored appearance of
+            #${target.entity_id} (${g.sightings.length} crops, newest first).</div>
+          <div class="ev-cards">${thumbs}</div>`;
+        cell.appendChild(div);
+      })
+      .catch(() => {});
+  };
+  if (related.length <= 1) {
+    cell.innerHTML = `<div class="ev-empty">
+      Only this sighting fired an event in the last 24h window -
+      the appearance gallery below shows every stored look at it.
+    </div>`;
+    appendGallery();
+  } else {
+    const cards = related.map((e, k) => {
+      const url = e.snapshot_url || e.fullframe_url;
+      const badge = e === target ? "this event" : `#${k + 1}`;
+      const sim = e.similarity != null
+          ? `<div class="ev-sim">similarity ${Math.round(e.similarity * 100)}%</div>`
+          : "";
+      return `<div class="ev-card ${e === target ? "current" : ""}">
+        <div class="ev-badge">${badge}</div>
+        ${url ? `<a href="${url}" target="_blank" rel="noopener">
+                  <img src="${url}" loading="lazy" alt="sighting ${k+1}"/>
+                </a>` : `<div class="ev-nosnap">no snapshot saved</div>`}
+        <div class="ev-ts">${fmtTime(e.ts)}</div>
+        ${sim}
+      </div>`;
+    }).join("");
+    cell.innerHTML = `<div class="ev-strip">
+      <div class="ev-note">All ${related.length} sightings of
+        <b>${target.cls ?? "?"} #${target.entity_id}</b>
+        at ${escapeHtml((GRID_SLOTS.find(s=>s.slot_id===target.slot)||{}).display_area || target.slot)}
+        in the last 24h - compare side by side.</div>
+      <div class="ev-cards">${cards}</div>
+    </div>`;
+    appendGallery();
+  }
+  row.hidden = false;
+  toggleEl.innerHTML = "&#9662;";
+}
+
+
+// ---- Re-ID summary table ---------------------------------------------------
+
+function renderReidTable(docs) {
+  const wrap = document.getElementById("reid-table-wrap");
+  if (!wrap) return;
+  const slotIds = new Set(GRID_SLOTS.map((s) => s.slot_id));
+  const rows = docs.filter((d) => {
+    const tid = cloudToTile(d.id);
+    return tid && slotIds.has(tid);
+  });
+  toggleSection("reid-section", rows.length > 0);
+  if (!rows.length) return;
+  const tr = (cells) => `<tr>${cells.map((c) => `<td>${c}</td>`).join("")}</tr>`;
+  const slotLabel = (id) => {
+    if (LOCAL_MODE) {
+      const tid = cloudToTile(id);
+      const st = tid && tileState[tid];
+      return (st && st.cloudCamName) || id;
+    }
+    const slot = GRID_SLOTS.find((s) => s.slot_id === id);
+    return slot ? slot.display_area : id;
+  };
+  const total = (r, k) => Object.values(r.per_class ?? {}).reduce((s, p) => s + (p[k] ?? 0), 0);
+  wrap.innerHTML = `
+    <table class="reid">
+      <thead><tr>
+        <th>Slot</th><th>Camera (now)</th><th>Unique entities</th><th>Total sightings</th>
+        <th>Regulars (&ge;3)</th>
+      </tr></thead>
+      <tbody>
+        ${rows.map((r) => tr([
+          escapeHtml(slotLabel(r.id)),
+          escapeHtml(r.cam_id ?? "-"),
+          r.total_unique ?? total(r, "unique") ?? "-",
+          r.total_sightings ?? total(r, "total_sightings") ?? "-",
+          r.regulars ?? total(r, "regulars") ?? "-",
+        ])).join("")}
+      </tbody>
+    </table>
+    <div class="footnote" style="margin-top:8px">
+      OSNet appearance-embedder estimates over a rolling 48h registry -
+      robust to lighting and viewpoint changes, still an estimate rather
+      than a biometric identity system. Entities age out after 48h of
+      absence, newest-in oldest-out.
+    </div>`;
+}

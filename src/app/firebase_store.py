@@ -121,6 +121,15 @@ class FirebaseStore:
             "per_class":       stats.get("per_class") or {},
         })
 
+    def write_vm_status(self, status: dict) -> None:
+        """Overwrite the VM status doc used by the dashboard's system-health
+        card. `status` includes CPU load, memory MB, disk, uptime. The
+        dashboard subscribes to vm_status/latest and colors the card based
+        on how recent updated_at is."""
+        status = dict(status)
+        status.setdefault("updated_at", dt.datetime.now(dt.timezone.utc))
+        self.db.collection("vm_status").document("latest").set(status)
+
     def write_grid_config(self, slots_meta: list[dict],
                           country: str | None = None) -> None:
         """Publish which cam is currently active in each slot.

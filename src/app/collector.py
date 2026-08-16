@@ -1974,6 +1974,47 @@ def _restore_state(firebase, slot_ids: set[str]) -> None:
 _ANALYSIS_STATE_PATH = Path("data/analysis_state.json")
 _ANALYSIS_STATE_EVERY_ROUNDS = 5
 
+# VM heartbeat: cheap /proc snapshot (no psutil dependency) pushed to
+# Firestore so the dashboard's system-health card can show CPU load,
+# RAM, disk and uptime without SSH.
+_VM_STATUS_EVERY_ROUNDS = 2
+
+
+def _vm_status_snapshot() -> dict:
+    """CPU load, memory, disk, uptime from /proc + statvfs. Linux-only;
+    returns {"error": ...} on non-Linux hosts (macOS dev boxes)."""
+    try:
+        with open("/proc/loadavg") as f:
+            load1, load5, load15, *_ = f.read().split()
+        mem: dict[str, int] = {}
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    mem[k.strip()] = int(v.strip().split()[0])
+        with open("/proc/uptime") as f:
+            uptime_sec = float(f.read().split()[0])
+        st = os.statvfs("/")
+        total_mb = mem.get("MemTotal", 0) // 1024
+        avail_mb = mem.get("MemAvailable", 0) // 1024
+        swap_total_mb = mem.get("SwapTotal", 0) // 1024
+        swap_used_mb = (mem.get("SwapTotal", 0) - mem.get("SwapFree", 0)) // 1024
+        return {
+            "load1":         float(load1),
+            "load5":         float(load5),
+            "load15":        float(load15),
+            "mem_total_mb":  total_mb,
+            "mem_avail_mb":  avail_mb,
+            "mem_used_mb":   total_mb - avail_mb,
+            "swap_total_mb": swap_total_mb,
+            "swap_used_mb":  swap_used_mb,
+            "disk_total_gb": (st.f_blocks * st.f_frsize) // (1024 ** 3),
+            "disk_avail_gb": (st.f_bavail * st.f_frsize) // (1024 ** 3),
+            "uptime_sec":    int(uptime_sec),
+        }
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
 
 def _save_analysis_state(presence, static_watch) -> None:
     try:
@@ -2369,6 +2410,11 @@ def main() -> None:
                     print(f"  ! review overrides reload failed: {e}")
             if _round_counter % _ANALYSIS_STATE_EVERY_ROUNDS == 0:
                 _save_analysis_state(presence, static_watch)
+            if _round_counter % _VM_STATUS_EVERY_ROUNDS == 0 and firebase:
+                try:
+                    firebase.write_vm_status(_vm_status_snapshot())
+                except Exception as e:
+                    print(f"  ! vm_status write failed: {type(e).__name__}: {e}")
             if _round_counter % _ADAPTER_CHECK_EVERY_ROUNDS == 0:
                 try:
                     from app import adapters

@@ -230,6 +230,167 @@
     table.reid td.spike { color: #ef4444; font-weight: 600; }
     table.reid td.drop  { color: #f0a35e; font-weight: 600; }
 
+    /* "estimate" tag on the re-ID section title. */
+    .est-tag { display: inline-block; margin-left: 8px; padding: 2px 8px;
+               border-radius: 999px; font-size: 11px; font-weight: 500;
+               background: rgba(139,144,154,0.15); color: #8b909a;
+               vertical-align: middle; }
+
+    /* Entity accordion in the Operational events table: click the toggle
+       next to a row's time to see every stored sighting of the same
+       entity side-by-side. */
+    .row-toggle { display: inline-block; cursor: pointer;
+                  padding: 0 4px; color: #4f8cff; user-select: none; }
+    .row-toggle:hover { color: #e7e9ee; }
+    .ev-accordion td { background: #0c0e13; padding: 10px 14px;
+                       border-bottom: 1px solid #232733; }
+    .ev-strip .ev-note { color: #8b909a; font-size: 12px; margin-bottom: 8px; }
+    .ev-strip .ev-note b { color: #e7e9ee; }
+    .ev-cards { display: flex; gap: 10px; flex-wrap: wrap; }
+    .ev-card { background: #0f1115; border: 1px solid #232733;
+               border-radius: 8px; padding: 6px; width: 160px;
+               display: flex; flex-direction: column; gap: 4px; }
+    .ev-card.current { border-color: #4f8cff; box-shadow: 0 0 0 1px rgba(79,140,255,0.35); }
+    .ev-badge { font-size: 10px; color: #8b909a; text-transform: uppercase;
+                letter-spacing: 0.04em; }
+    .ev-card.current .ev-badge { color: #4f8cff; }
+    .ev-card img { display: block; width: 100%; height: 90px;
+                   object-fit: contain; background: #05070a;
+                   border-radius: 4px; border: 1px solid #232733; }
+    .ev-nosnap { height: 90px; display: flex; align-items: center;
+                 justify-content: center; color: #6f7480; font-size: 11px;
+                 border-radius: 4px; background: #05070a;
+                 border: 1px dashed #2c3140; }
+    .ev-ts { font-size: 11px; color: #e7e9ee; }
+    .ev-sim { font-size: 10px; color: #f0a35e; }
+    .ev-empty { color: #8b909a; font-size: 12px; padding: 6px 0; }
+
+    /* Field row used by Window analysis + search filters. */
+    .field-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+        font-size: 12px; color: #8b909a; margin-top: 6px; }
+    .field-row label { display: flex; gap: 4px; align-items: center; }
+    .field-row input[type="datetime-local"],
+    .field-row input[type="text"],
+    .field-row input[type="number"] { background: #0c0e13;
+        border: 1px solid #2c3140; color: #e7e9ee; border-radius: 6px;
+        padding: 4px 6px; font-size: 12px; }
+    .field-row button { background: #2563eb; color: #fff; border: 0;
+        border-radius: 6px; padding: 5px 12px; font-size: 12px; cursor: pointer; }
+    .field-row button:disabled { opacity: 0.5; cursor: default; }
+
+    /* Semantic Search panel: image + class + time -> ranked crop matches. */
+    .search-wrap { background: #171a21; border: 1px solid #232733;
+                   border-radius: 12px; padding: 16px; margin-top: 16px; }
+    .search-wrap h2 { margin: 0 0 10px; font-size: 15px; font-weight: 600; }
+    .search-wrap .sub { color: #8b909a; font-size: 12px; margin-bottom: 12px; }
+    .search-form { display: grid; gap: 12px;
+                   grid-template-columns: minmax(220px, 1fr) 2fr; }
+    @media (max-width: 720px) { .search-form { grid-template-columns: 1fr; } }
+    .search-form fieldset { margin: 0; padding: 10px 12px 12px;
+        background: #0c0e13; border: 1px solid #232733; border-radius: 10px; }
+    .search-form legend { color: #8b909a; font-size: 10px;
+        text-transform: uppercase; letter-spacing: 0.05em; padding: 0 6px; }
+    #drop { border: 2px dashed #3a4258; border-radius: 10px;
+            padding: 18px 12px; text-align: center; cursor: pointer;
+            background: linear-gradient(180deg, rgba(79,140,255,0.03), rgba(79,140,255,0));
+            transition: border-color .15s, background .15s, transform .05s; }
+    #drop:hover { border-color: #4f8cff;
+                  background: linear-gradient(180deg, rgba(79,140,255,0.09), rgba(79,140,255,0.02)); }
+    #drop.hover { border-color: #4f8cff; background: rgba(79,140,255,0.08); transform: scale(0.998); }
+    #drop input { display: none; }
+    #drop .icon { font-size: 22px; line-height: 1; margin-bottom: 6px; color: #4f8cff; }
+    #drop .primary { font-size: 13px; color: #e7e9ee; font-weight: 500; }
+    #drop .hint { font-size: 11px; color: #8b909a; margin-top: 4px; }
+    #drop.has-file { border-style: solid; border-color: #4f8cff;
+        background: rgba(79,140,255,0.08); }
+    #drop-clear { display: none; background: none; border: 0; color: #ef4444;
+        font-size: 11px; cursor: pointer; margin-top: 4px; padding: 2px 6px; }
+    #drop.has-file + #drop-clear { display: inline-block; }
+    .chip-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+    .chip { display: inline-block; padding: 3px 10px; border-radius: 999px;
+        font-size: 12px; cursor: pointer; user-select: none;
+        background: #0c0e13; color: #8b909a; border: 1px solid #2c3140; }
+    .chip.on { background: rgba(79,140,255,0.20); color: #e7e9ee; border-color: #4f8cff; }
+    .chip:hover { border-color: #4f8cff; color: #e7e9ee; }
+    .strictness-row { display: flex; gap: 6px; margin-top: 6px; }
+    .strict-btn { flex: 1; padding: 4px 8px; border-radius: 6px; font-size: 11px;
+        background: #0c0e13; color: #8b909a; border: 1px solid #2c3140; cursor: pointer; }
+    .strict-btn.on { background: rgba(79,140,255,0.18); color: #e7e9ee; border-color: #4f8cff; }
+    .strict-hint { color: #6f7480; font-size: 10px; margin-top: 4px; }
+    .search-actions { display: flex; gap: 10px; align-items: center;
+        margin-top: 14px; flex-wrap: wrap; }
+    .search-actions button { background: #4f8cff; color: #fff; border: 0;
+        border-radius: 8px; padding: 8px 18px; font-size: 13px; font-weight: 600; cursor: pointer; }
+    .search-actions button.secondary { background: transparent;
+        color: #8b909a; border: 1px solid #2c3140; padding: 6px 12px; font-weight: 500; }
+    .search-actions button.secondary:hover { color: #e7e9ee; border-color: #4f8cff; }
+    .search-actions button:disabled { opacity: 0.45; cursor: default; }
+    #search-status { font-size: 12px; color: #8b909a; }
+    #search-status.err { color: #ef4444; }
+    #search-preview { display: flex; gap: 12px; flex-wrap: wrap;
+                      margin-top: 12px; align-items: flex-start; }
+    #search-preview img { max-width: 320px; max-height: 220px; border-radius: 8px;
+                          border: 1px solid #232733; }
+    #search-preview .qobjs { font-size: 12px; color: #8b909a; line-height: 1.5; }
+    #search-preview .qobjs b { color: #e7e9ee; }
+    #search-results { display: grid; gap: 10px; margin-top: 12px;
+                      grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
+    #search-results .hit { background: #0c0e13; border: 1px solid #232733;
+        border-radius: 10px; padding: 6px; display: flex; flex-direction: column; gap: 4px; }
+    #search-results .hit img { width: 100%; height: 100px; object-fit: contain;
+        background: #05070a; border-radius: 6px; }
+    #search-results .hit .meta { font-size: 10px; color: #8b909a; line-height: 1.4; }
+    #search-results .simbar { height: 4px; border-radius: 3px;
+        background: #232733; overflow: hidden; }
+    #search-results .simbar i { display: block; height: 100%; background: #f0a35e; }
+    #search-results .hit.strong .simbar i { background: #36d399; }
+    #search-results .badge { display: inline-block; padding: 1px 6px;
+        border-radius: 999px; font-size: 10px; }
+    #search-results .badge.strong { background: rgba(54,211,153,0.12); color: #36d399; }
+    #search-results .badge.weak   { background: rgba(240,163,94,0.12); color: #f0a35e; }
+    #search-registry table { width: 100%; border-collapse: collapse; font-size: 12px;
+                             margin-top: 12px; }
+    #search-registry th, #search-registry td { text-align: left; padding: 5px 8px;
+                             border-bottom: 1px solid #232733; }
+    #search-registry th { color: #8b909a; font-weight: 500; font-size: 10px;
+                          text-transform: uppercase; letter-spacing: 0.04em; }
+
+    /* System health: VM stats card + camera health matrix, side-by-side
+       on desktop, stacked on narrow viewports. */
+    .sys-health-grid { display: grid; gap: 12px;
+                       grid-template-columns: 1fr 1fr; margin-top: 10px; }
+    @media (max-width: 900px) { .sys-health-grid { grid-template-columns: 1fr; } }
+    .sys-card { background: #0c0e13; border: 1px solid #232733;
+                border-radius: 10px; padding: 12px 14px; }
+    .sys-card-title { color: #e7e9ee; font-weight: 600; font-size: 13px;
+                      margin-bottom: 8px; display: flex;
+                      justify-content: space-between; align-items: baseline; }
+    .sys-card-title .sys-live { font-size: 10px; padding: 1px 8px;
+                                border-radius: 999px; font-weight: 500; }
+    .sys-card-title .sys-live.ok    { background: rgba(54,211,153,0.15); color: #36d399; }
+    .sys-card-title .sys-live.stale { background: rgba(240,163,94,0.15); color: #f0a35e; }
+    .sys-card-title .sys-live.dead  { background: rgba(239,68,68,0.15);  color: #ef4444; }
+    .sys-metrics { display: grid; gap: 6px 14px;
+                   grid-template-columns: 1fr 1fr; font-size: 12px; }
+    .sys-metrics .sm { display: flex; justify-content: space-between; }
+    .sys-metrics .sm-lbl { color: #8b909a; }
+    .sys-metrics .sm-val { color: #e7e9ee; font-weight: 600;
+                           font-variant-numeric: tabular-nums; }
+    .sys-metrics .sm-val.warn { color: #f0a35e; }
+    .sys-metrics .sm-val.hot  { color: #ef4444; }
+    .sys-sub { color: #6f7480; font-size: 11px; margin-top: 8px; }
+    #cam-health-table { font-size: 12px; }
+    #cam-health-table td { padding: 6px 8px; }
+    .cam-status { display: inline-flex; align-items: center; gap: 4px;
+                  padding: 1px 8px; border-radius: 999px;
+                  font-size: 10px; font-weight: 600; }
+    .cam-status .dot { width: 6px; height: 6px; border-radius: 50%;
+                       background: currentColor; }
+    .cam-status.ok    { background: rgba(54,211,153,0.15); color: #36d399; }
+    .cam-status.stale { background: rgba(240,163,94,0.15); color: #f0a35e; }
+    .cam-status.dead  { background: rgba(239,68,68,0.15);  color: #ef4444; }
+    .cam-status.unk   { background: rgba(139,144,154,0.15); color: #8b909a; }
+
 
     /* "Model view - live": one annotated frame per slot. Compacted to a
        4-wide single row on desktop (each card is roughly HALF the width the
@@ -409,6 +570,24 @@
              posts to this server's /api/send-report, which composes the
              report from live data and mails it from the project mailbox
              (archive CC'd). app.js shows exactly one variant by host. -->
+      <a id="send-report-public"
+         href="https://github.com/orarr2/Turkey-Business-Activity-Streamlit-Real-time-YOLOv8-of-crowd-detection/actions/workflows/send-report.yml"
+         target="_blank" rel="noopener"
+         title="Opens the send form: enter a destination address and press Run workflow - the report is built from the live data and sent from the project mailbox"
+         style="display:inline-block;background:#2563eb;color:#fff;text-decoration:none;
+                border-radius:8px;padding:7px 14px;font-size:14px;font-weight:600">
+        📧 Send Report From VM</a>
+      <div id="send-report-private" style="display:none;align-items:center;gap:8px">
+        <span id="send-report-msg" style="font-size:12.5px;color:#94a3b8"></span>
+        <input id="send-report-to" type="email" placeholder="you@example.com"
+               style="background:#0f172a;border:1px solid #334155;color:#e2e8f0;
+                      border-radius:8px;padding:7px 10px;font-size:13.5px;width:210px">
+        <button id="send-report-btn"
+                title="Builds the report from the live data right now and sends it from the project mailbox to the entered address (archive CC'd)"
+                style="cursor:pointer;background:#2563eb;border:0;color:#fff;
+                       border-radius:8px;padding:7px 14px;font-size:14px;font-weight:600">
+          📧 Send Report From VM</button>
+      </div>
     </div>
   </header>
 
@@ -459,6 +638,216 @@
       <div id="gallery-wrap" style="display:grid;gap:10px;margin-top:10px;
            grid-template-columns:repeat(auto-fill, minmax(210px, 1fr))"></div>
     </div>
+
+    <!-- Semantic Search: image-similarity OR class/time browse over the
+         collector's crop index. Backed by POST /api/search. Three modes
+         through one submit path: image + filters -> similarity match;
+         no image + class/time -> browse. -->
+    <div class="search-wrap" data-tab="investigation">
+      <h2>Search - what has the system seen?</h2>
+      <div class="sub">Search by image, by object class, by time - or any
+        combination. Leave the photo out to browse recent detections.</div>
+      <div class="search-form">
+        <fieldset>
+          <legend>Reference photo (optional)</legend>
+          <label id="drop">
+            <input type="file" id="search-file" accept="image/*" />
+            <div class="icon">⬆</div>
+            <div class="primary">Drop or click to pick</div>
+            <div class="hint">a cropped photo of one person/vehicle
+              works best</div>
+          </label>
+          <button id="drop-clear" type="button">✕ clear photo</button>
+          <button id="search-reset" type="button" style="background:none;
+              border:0;color:#8b909a;font-size:11px;cursor:pointer;padding:2px 6px;
+              margin-top:2px">↺ reset all filters</button>
+          <div class="strictness-row">
+            <button class="strict-btn" data-strict="0.30">Loose</button>
+            <button class="strict-btn on" data-strict="0.55">Balanced</button>
+            <button class="strict-btn" data-strict="0.80">Strict</button>
+          </div>
+          <div class="strict-hint" style="line-height:1.5">
+            match strictness - only used when a photo is provided:<br>
+            <b>Loose</b> - casts the widest net: more results, expect
+            lookalike noise mixed in.<br>
+            <b>Balanced</b> - solid visual matches only; the sensible
+            default.<br>
+            <b>Strict</b> - near-identical appearance only: fewest results,
+            highest confidence it is the same object.</div>
+        </fieldset>
+        <fieldset>
+          <legend>Filters</legend>
+          <div>
+            <div style="color:#8b909a;font-size:11px">Object class
+              <span style="color:#6f7480">(pick any; none = all)</span></div>
+            <div class="chip-row" id="class-chips">
+              <span class="chip" data-cls="person">person</span>
+              <span class="chip" data-cls="car">car</span>
+              <span class="chip" data-cls="truck">truck</span>
+              <span class="chip" data-cls="bus">bus</span>
+              <span class="chip" data-cls="motorcycle">motorcycle</span>
+              <span class="chip" data-cls="bicycle">bicycle</span>
+              <span class="chip" data-cls="train">train</span>
+            </div>
+          </div>
+          <div class="field-row">
+            <label>from <input type="datetime-local" id="search-from" /></label>
+            <label>to <input type="datetime-local" id="search-to" /></label>
+            <button type="button" class="secondary" id="preset-1h">last 1h</button>
+            <button type="button" class="secondary" id="preset-24h">last 24h</button>
+            <button type="button" class="secondary" id="preset-week">last 7d</button>
+          </div>
+          <div class="field-row">
+            <label>how many results
+              <input type="number" id="search-top" value="12" min="1" max="200" /></label>
+          </div>
+        </fieldset>
+      </div>
+      <div class="search-actions">
+        <button id="search-go">Search</button>
+        <span id="search-status"></span>
+      </div>
+      <div id="search-preview" hidden></div>
+      <div id="search-results"></div>
+      <div id="search-registry"></div>
+    </div>
+
+    <!-- Deep-window / Window analysis (local mode only - needs the
+         dashboard server's /api/deep-analyze). Grabs a longer frame window
+         from ONE camera, threads detections into per-INDIVIDUAL tracks by
+         position + motion, and profiles what each one did: path, speed,
+         moving vs standing, direction, closest neighbor. -->
+    <div class="model-section" data-tab="investigation" id="deepwin-section">
+      <h2>Window analysis - number the individuals, profile each one</h2>
+      <div class="sub">Pick a camera id (as in <code>cameras.py</code>, e.g.
+        the one shown on the tile), choose the window length, and run. Every
+        individual in view gets a number and a movement trail; the table
+        tells you who moved, how fast, in which direction, and who stood
+        still. Ids are stable <i>within</i> the window - two identical-looking
+        objects are told apart by where they are and how they move, which is
+        also why an individual that left the frame cannot be re-claimed
+        after a long gap. Local dashboard only (runs on this machine's
+        model via the dashboard server).</div>
+      <div class="field-row" style="margin-top:8px">
+        <label>camera id <input type="text" id="deepwin-cam"
+               placeholder="e.g. taksim_yeni" style="width:180px" /></label>
+        <label>frames <input type="number" id="deepwin-frames" value="12"
+               min="4" max="24" style="width:60px" /></label>
+        <label>every Nth frame <input type="number" id="deepwin-stride" value="12"
+               min="4" max="40" style="width:60px" /></label>
+        <label title="run the skeleton pass too: posture labels (crouching, fall)
+and arm gestures (hand raised, wave). Doubles the inference cost">
+          <input type="checkbox" id="deepwin-pose" /> pose</label>
+        <label title="detect face boxes on the final frame (needs FACE_MODEL
+pointing at a YuNet .onnx; detection only, no identification)">
+          <input type="checkbox" id="deepwin-faces" /> faces</label>
+        <label title="crosshair overlay locked on one individual: the first
+alerting one, else the largest person in view">
+          <input type="checkbox" id="deepwin-lock" /> target lock</label>
+        <button type="button" id="deepwin-go">analyze window</button>
+        <span id="deepwin-status"></span>
+      </div>
+      <div id="deepwin-result" hidden style="margin-top:10px">
+        <a id="deepwin-img-link" target="_blank" rel="noopener">
+          <img id="deepwin-img" alt="individual trails"
+               style="max-width:100%;border-radius:6px" hidden /></a>
+        <div id="deepwin-summary" class="sub" style="margin-top:6px"></div>
+        <div id="deepwin-table" style="overflow-x:auto"></div>
+      </div>
+    </div>
+    <script>
+    (function () {
+      const go = document.getElementById("deepwin-go");
+      if (!go) return;
+      const st = document.getElementById("deepwin-status");
+      go.addEventListener("click", async () => {
+        const cam = (document.getElementById("deepwin-cam").value || "").trim();
+        if (!cam) { st.textContent = "enter a camera id"; return; }
+        const frames = document.getElementById("deepwin-frames").value || 12;
+        const stride = document.getElementById("deepwin-stride").value || 12;
+        const pose = document.getElementById("deepwin-pose").checked;
+        const faces = document.getElementById("deepwin-faces").checked;
+        const lock = document.getElementById("deepwin-lock").checked;
+        go.disabled = true;
+        st.textContent = "grabbing + analyzing (10-30s)...";
+        try {
+          const r = await fetch(`/api/deep-analyze?cam=${encodeURIComponent(cam)}`
+                                + `&frames=${frames}&stride=${stride}`
+                                + (pose ? "&pose=1" : "")
+                                + (faces ? "&faces=1" : "")
+                                + (lock ? "&lock=auto" : ""),
+                                { method: "POST" });
+          const data = await r.json();
+          if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+          st.textContent = "";
+          renderDeepWin(data);
+        } catch (e) {
+          st.textContent = `failed: ${e.message}`;
+        } finally {
+          go.disabled = false;
+        }
+      });
+      function esc(s) {
+        return String(s).replace(/[&<>"']/g,
+          (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;",
+                    '"': "&quot;", "'": "&#39;" }[c]));
+      }
+      function renderDeepWin(d) {
+        const wrap = document.getElementById("deepwin-result");
+        const img = document.getElementById("deepwin-img");
+        const link = document.getElementById("deepwin-img-link");
+        wrap.hidden = false;
+        if (d.image_url) {
+          const u = d.image_url + "?t=" + Date.now();
+          img.src = u; img.hidden = false; link.href = u;
+        } else {
+          img.hidden = true;
+        }
+        let summary =
+          `${d.cam_name}: ${d.individuals} individual(s) over ${d.window_sec}s`
+          + ` (${d.frames} frames) - ${d.moving} moving, ${d.stationary} standing still`;
+        if (d.labels && Object.keys(d.labels).length) {
+          summary += " . " + Object.entries(d.labels)
+            .map(([k, v]) => `${v} ${k}`).join(", ");
+        }
+        if (d.lock) summary += ` . locked on #${d.lock.track_id}`;
+        if (d.faces_available === false) {
+          summary += " . faces: model not configured (set FACE_MODEL)";
+        } else if (typeof d.faces === "number") {
+          summary += ` . ${d.faces} face(s)`;
+        }
+        document.getElementById("deepwin-summary").textContent = summary;
+        const rows = (d.tracks || []).map((t) => `<tr>
+          <td>#${t.id}</td><td>${esc(t.cls ?? "?")}</td>
+          <td>${t.sightings}</td>
+          <td>${Math.round((t.moving_frac ?? 0) * 100)}%</td>
+          <td>${t.stationary ? "standing" : esc(t.direction ?? "-")}</td>
+          <td>${t.mean_speed_px_s ?? "-"}</td>
+          <td>${t.kmh_est != null ? "~" + t.kmh_est : "-"}</td>
+          <td>${t.alert ? "&#9888; " : ""}${esc(t.label ?? "-")}${
+            (t.pose_flags || []).length
+              ? " . " + esc(t.pose_flags.join(", ")) : ""}</td>
+          <td>${(t.gestures || []).length ? esc(t.gestures.join(", ")) : "-"}</td>
+          <td>${t.nn_min_px != null ? Math.round(t.nn_min_px) : "-"}</td>
+          <td>${(t.zones || []).length}</td>
+        </tr>`).join("");
+        document.getElementById("deepwin-table").innerHTML = `
+          <table class="reid"><thead><tr>
+            <th title="individual number, drawn on the image">id</th>
+            <th>class</th>
+            <th title="frames this individual was matched in">seen</th>
+            <th title="fraction of its steps it actually moved">moving</th>
+            <th title="dominant screen direction of its net movement">direction</th>
+            <th title="mean speed, pixels per second">px/s</th>
+            <th title="rough speed estimate for vehicles (class-length ruler, +/- 30-50%)">km/h</th>
+            <th title="behavior verdict (kinematics + posture when pose ran); warning = worth a look">behavior</th>
+            <th title="arm-level gestures over the window (pose mode only)">gesture</th>
+            <th title="closest same-class neighbor during the window, px">nearest</th>
+            <th title="how many map zones it visited">zones</th>
+          </tr></thead><tbody>${rows}</tbody></table>`;
+      }
+    })();
+    </script>
 
     <!-- Model quality tab: scoreboard cards (accuracy / precision / recall
          / F1), per-class breakdown, learning-proof table (per-camera
@@ -574,6 +963,69 @@
       <div id="anomaly-table-wrap"></div>
     </div>
 
+    <!-- Re-ID summary: aggregated per-camera state (unique / total /
+         regulars). Sits between the count-driven sections (Footfall +
+         Anomaly events) and the entity-driven ones (Operational events +
+         Review). Uses the OSNet appearance registry that the collector
+         maintains as a 48h rolling window. -->
+    <div class="reid-wrap" id="reid-section" data-tab="analysis" hidden>
+      <h2>Re-identification - returning entities per camera
+        <span class="est-tag">appearance-based estimate</span></h2>
+      <div id="reid-table-wrap"></div>
+    </div>
+
+    <!-- Operational events: loiter / parked-too-long / returning visitors,
+         last 24h from Firestore events collection. Every row with an
+         entity_id gets an expand toggle that opens the per-entity gallery
+         served by /api/entity-gallery. -->
+    <div class="anomaly-wrap" id="events-section" data-tab="analysis" hidden>
+      <h2>Operational events - last 24h (prolonged presence, returning visitors)</h2>
+      <div id="events-table-wrap"></div>
+    </div>
+
+    <!-- System health: VM heartbeat card + per-slot camera freshness
+         matrix. VM stats come from Firestore vm_status/latest (written by
+         the collector every ~80s from /proc + statvfs). Camera health is
+         derived client-side from each tile's last-sample age. -->
+    <div class="anomaly-wrap" id="system-health-section" data-tab="analysis">
+      <h2>System health</h2>
+      <div class="sys-health-grid">
+        <div class="sys-card" id="vm-card">
+          <div class="sys-card-title">
+            <span>Cloud VM (turkey-collector)</span>
+            <span class="sys-live unk" id="vm-live">unknown</span>
+          </div>
+          <div class="sys-metrics">
+            <div class="sm"><span class="sm-lbl">CPU load (1m)</span>
+                            <span class="sm-val" id="vm-load">-</span></div>
+            <div class="sm"><span class="sm-lbl">Memory</span>
+                            <span class="sm-val" id="vm-mem">-</span></div>
+            <div class="sm"><span class="sm-lbl">Swap</span>
+                            <span class="sm-val" id="vm-swap">-</span></div>
+            <div class="sm"><span class="sm-lbl">Disk free</span>
+                            <span class="sm-val" id="vm-disk">-</span></div>
+            <div class="sm"><span class="sm-lbl">Uptime</span>
+                            <span class="sm-val" id="vm-uptime">-</span></div>
+            <div class="sm"><span class="sm-lbl">Country</span>
+                            <span class="sm-val" id="vm-country">-</span></div>
+          </div>
+          <div class="sys-sub" id="vm-age">no heartbeat yet</div>
+        </div>
+        <div class="sys-card" id="cam-health-card">
+          <div class="sys-card-title">
+            <span>Cameras (freshness)</span>
+            <span class="sys-live unk" id="cam-live">unknown</span>
+          </div>
+          <table class="reid" id="cam-health-table">
+            <thead><tr><th>Slot</th><th>Camera</th><th>Status</th><th>Last frame</th></tr></thead>
+            <tbody id="cam-health-rows"></tbody>
+          </table>
+          <div class="sys-sub">OK &lt; 90s . STALE 90-300s . DEAD &gt; 300s .
+            based on the latest Firestore write per slot.</div>
+        </div>
+      </div>
+    </div>
+
     <!-- Frame-based review UI. Canvas shows the whole frame with every
          detection overlaid; user clicks each box to verdict it, and can
          draw NEW boxes for objects the model missed (the FN signal that
@@ -681,9 +1133,9 @@
   <!-- firebase-config.js is gitignored per-clone; see docs/firebase_setup.md -->
   <!-- ?v=N is a cache-buster: bump it whenever any of the JS files changes,
        so the browser doesn't serve a stale ES-module from disk cache. -->
-  <script type="module" src="./firebase-config.js?v=42"></script>
-  <script type="module" src="./cameras.js?v=42"></script>
-  <script type="module" src="./app.js?v=84"></script>
+  <script type="module" src="./firebase-config.js?v=44"></script>
+  <script type="module" src="./cameras.js?v=44"></script>
+  <script type="module" src="./app.js?v=86"></script>
 
 
   <style>
@@ -1465,6 +1917,249 @@
     }
     refresh();
     setInterval(refresh, 10000);
+  })();
+  </script>
+
+  <!-- Semantic Search UI. INLINE and NON-MODULE on purpose: it wires POST
+       /api/search on this same server, has no Firebase dependency, and
+       keeps working even if firebase-app.js fails to load. Three modes:
+       image mode, class/time browse, or both combined. -->
+  <script>
+  (function initSearch() {
+    const $ = (id) => document.getElementById(id);
+    const drop = $("drop"), fileInput = $("search-file"), goBtn = $("search-go");
+    const resetBtn = $("search-reset"), clearBtn = $("drop-clear");
+    const statusEl = $("search-status"), previewEl = $("search-preview");
+    const resultsEl = $("search-results"), registryEl = $("search-registry");
+    const chipRow = $("class-chips");
+    if (!drop || !fileInput || !goBtn) return;
+
+    const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+    // reference photo (optional)
+    let queryFile = null;
+    const setFile = (f) => {
+      if (!f || !f.type || !f.type.startsWith("image/")) return;
+      queryFile = f;
+      drop.classList.add("has-file");
+      drop.querySelector(".primary").textContent =
+          `${f.name} (${(f.size / 1024).toFixed(0)} KB) ready`;
+      drop.querySelector(".hint").textContent =
+          "similarity match uses this photo. clear to browse without.";
+    };
+    const clearFile = () => {
+      queryFile = null; fileInput.value = "";
+      drop.classList.remove("has-file");
+      drop.querySelector(".primary").textContent = "Drop or click to pick";
+      drop.querySelector(".hint").textContent =
+          "a cropped photo of one person/vehicle works best";
+    };
+    fileInput.addEventListener("change", () => setFile(fileInput.files[0]));
+    clearBtn.addEventListener("click", (e) => { e.preventDefault(); clearFile(); });
+    ["dragover", "dragenter"].forEach((ev) => drop.addEventListener(ev, (e) => {
+      e.preventDefault(); drop.classList.add("hover");
+    }));
+    ["dragleave", "drop"].forEach((ev) => drop.addEventListener(ev, (e) => {
+      e.preventDefault(); drop.classList.remove("hover");
+    }));
+    drop.addEventListener("drop", (e) => setFile(e.dataTransfer.files[0]));
+
+    // class chips (multi-select)
+    chipRow.addEventListener("click", (e) => {
+      const chip = e.target.closest(".chip");
+      if (chip) chip.classList.toggle("on");
+    });
+    const getSelectedClasses = () => [...chipRow.querySelectorAll(".chip.on")]
+        .map((c) => c.dataset.cls);
+
+    // strictness preset
+    let strictness = 0.55;
+    document.querySelectorAll(".strict-btn").forEach((b) => {
+      b.addEventListener("click", (e) => {
+        e.preventDefault();
+        document.querySelectorAll(".strict-btn").forEach((x) => x.classList.remove("on"));
+        b.classList.add("on");
+        strictness = parseFloat(b.dataset.strict);
+      });
+    });
+
+    // time presets. datetime-local wants YYYY-MM-DDTHH:MM in LOCAL time.
+    const toLocalDT = (d) => {
+      const pad = (n) => String(n).padStart(2, "0");
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
+             `T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    };
+    const setRange = (hours) => {
+      const now = new Date();
+      const from = new Date(now.getTime() - hours * 3600 * 1000);
+      $("search-from").value = toLocalDT(from);
+      $("search-to").value = toLocalDT(now);
+    };
+    // Track the last-clicked preset so a Search a minute later refreshes
+    // "to" to now - otherwise crops written seconds after the preset click
+    // fall outside the frozen window.
+    let lastPreset = null;
+    $("preset-1h").addEventListener("click", (e) => { e.preventDefault(); setRange(1);       lastPreset = 1; });
+    $("preset-24h").addEventListener("click", (e) => { e.preventDefault(); setRange(24);     lastPreset = 24; });
+    $("preset-week").addEventListener("click", (e) => { e.preventDefault(); setRange(24 * 7); lastPreset = 24 * 7; });
+    $("search-from").addEventListener("input", () => { lastPreset = null; });
+    $("search-to").addEventListener("input",   () => { lastPreset = null; });
+    setRange(24); lastPreset = 24;
+
+    // reset
+    resetBtn.addEventListener("click", () => {
+      clearFile();
+      chipRow.querySelectorAll(".chip.on").forEach((c) => c.classList.remove("on"));
+      $("search-from").value = ""; $("search-to").value = "";
+      $("search-top").value = 12;
+      previewEl.hidden = true; previewEl.innerHTML = "";
+      resultsEl.innerHTML = ""; registryEl.innerHTML = "";
+      statusEl.className = ""; statusEl.textContent = "";
+      goBtn.disabled = false;
+      window.scrollTo({ top: document.querySelector(".search-wrap").offsetTop - 20,
+                        behavior: "smooth" });
+    });
+
+    // submit
+    goBtn.addEventListener("click", async () => {
+      goBtn.disabled = true;
+      statusEl.className = "";
+      const hasImage = !!queryFile;
+      statusEl.textContent = hasImage
+          ? "searching by image... (first search loads the model, ~10 s)"
+          : "browsing...";
+      if (lastPreset !== null) setRange(lastPreset);
+      try {
+        const params = new URLSearchParams({ top: $("search-top").value });
+        if (hasImage) params.set("min_sim", String(strictness));
+        const cls = getSelectedClasses();
+        if (cls.length) params.set("classes", cls.join(","));
+        // datetime-local strings are LOCAL wall-clock; server compares
+        // epoch seconds against file mtimes. Serializing raw would shift
+        // local time as UTC and drop the window hours into the future.
+        const toEpoch = (v) => v ? String(Math.floor(new Date(v).getTime() / 1000)) : "";
+        const from = toEpoch($("search-from").value), to = toEpoch($("search-to").value);
+        if (from) params.set("from", from);
+        if (to)   params.set("to", to);
+
+        const opts = hasImage
+            ? { method: "POST", body: queryFile,
+                headers: { "Content-Type": queryFile.type || "application/octet-stream" } }
+            : { method: "POST" };
+        const r = await fetch(`/api/search?${params}`, opts);
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+        render(data);
+        const mode = data.mode || (hasImage ? "image" : "browse");
+        const fb = data.fallback
+            ? ` . <span style="color:#f0a35e">auto-loose fallback</span>`
+            : "";
+        statusEl.innerHTML =
+          `done . ${data.snapshot_matches.length} snapshot` +
+          (mode === "image"
+              ? ` + ${data.registry_matches.length} registry matches`
+              : " results") +
+          ` . ${mode} mode . ${data.index_size} crops indexed` + fb;
+      } catch (err) {
+        statusEl.className = "err";
+        statusEl.textContent = `search failed: ${err.message}`;
+      } finally {
+        goBtn.disabled = false;
+      }
+    });
+
+    // render
+    function render(data) {
+      previewEl.innerHTML = "";
+      const mode = data.mode || "image";
+      if (mode === "image") {
+        previewEl.hidden = false;
+        if (data.query_preview_jpeg_b64) {
+          const img = new Image();
+          img.src = "data:image/jpeg;base64," + data.query_preview_jpeg_b64;
+          previewEl.appendChild(img);
+        }
+        const info = document.createElement("div");
+        info.className = "qobjs";
+        info.innerHTML = data.query_objects.length
+          ? "query objects:<br>" + data.query_objects.map((q) =>
+              q.cls === "image"
+                ? "<b>whole image</b> (nothing detected - treated as a ready-made crop)"
+                : `<b>${esc(q.cls)}</b> conf ${q.conf}`).join("<br>")
+          : "nothing usable found in the image";
+        previewEl.appendChild(info);
+      } else {
+        previewEl.hidden = true;
+      }
+
+      resultsEl.innerHTML = "";
+      for (const m of data.snapshot_matches) {
+        const d = document.createElement("div");
+        d.className = "hit" + (m.strong ? " strong" : "");
+        const isBrowse = mode === "browse" || m.browse_only;
+        const seenAt = m.seen_at
+            ? esc(String(m.seen_at).replace("T", " ").replace("Z", " UTC"))
+            : "";
+        const badge = isBrowse
+            ? `<span class="badge weak">${esc(m.cls)}</span>`
+            : `<span class="badge ${m.strong ? "strong" : "weak"}">
+                 ${m.strong ? "match" : "similar"} ${(m.similarity * 100).toFixed(1)}%
+               </span>`;
+        const bar = isBrowse ? "" :
+            `<div class="simbar"><i style="width:${(m.similarity * 100).toFixed(0)}%"></i></div>`;
+        d.innerHTML = `
+          <a href="${m.url}" target="_blank" rel="noopener">
+            <img src="${m.url}" loading="lazy" alt="match"/></a>
+          ${bar}
+          <div class="meta">${badge}<br>${esc(m.cls)}
+            ${seenAt ? `<br><span style="color:#6f7480">${seenAt}</span>` : ""}
+          </div>`;
+        resultsEl.appendChild(d);
+      }
+      if (!data.snapshot_matches.length) {
+        const empty = data.index_size === 0;
+        const noQueryObjects = mode === "image"
+            && (!data.query_objects || data.query_objects.length === 0);
+        const wholeImage = mode === "image"
+            && (data.query_objects || []).every((q) => q.cls === "image");
+        let msg;
+        if (empty) {
+          msg = "The pool is empty - the collector fills it as it samples. Try again in a few minutes.";
+        } else if (mode === "image" && noQueryObjects) {
+          msg = "No person/vehicle detected in the uploaded photo. Try a tighter crop of one object, or press <b>Loose</b> and search again.";
+        } else if (mode === "image" && wholeImage) {
+          msg = `No stored crop matches the uploaded photo above the current strictness. Try <b>Loose</b>, or crop the photo to just one person/vehicle. (${data.index_size} crops searched)`;
+        } else if (mode === "image") {
+          msg = `No stored crop is similar enough to the query above the current strictness. Try <b>Loose</b> or clear the class chips. (${data.index_size} crops searched)`;
+        } else {
+          msg = `No detections in this time window match those class chips. Try <b>last 24h</b> or <b>last 7d</b>, or clear the class chips. (pool: ${data.index_size} crops)`;
+        }
+        resultsEl.innerHTML =
+          `<div class="empty" style="color:#8b909a;padding:12px;font-size:12px;line-height:1.5">${msg}</div>`;
+      }
+
+      if (data.registry_matches && data.registry_matches.length) {
+        const rows = data.registry_matches.map((m) => `
+          <tr>
+            <td><span class="badge ${m.strong ? "strong" : "weak"}">
+                ${(m.similarity * 100).toFixed(1)}%</span></td>
+            <td>${esc(m.cls)}</td><td>#${m.entity_id}</td><td>${esc(m.cam_id)}</td>
+            <td>${m.sightings}</td>
+            <td>${esc(String(m.first_seen).slice(0, 16))}</td>
+            <td>${esc(String(m.last_seen).slice(0, 16))}</td>
+          </tr>`).join("");
+        registryEl.innerHTML = `
+          <table>
+            <thead><tr><th>similarity</th><th>class</th><th>entity</th>
+              <th>camera</th><th>sightings</th><th>first seen</th>
+              <th>last seen</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>`;
+      } else {
+        registryEl.innerHTML = "";
+      }
+    }
   })();
   </script>
 
