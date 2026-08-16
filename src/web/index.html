@@ -41,9 +41,24 @@
     .tabbar button:hover { color: #e7e9ee; }
     main[data-active-tab="analysis"] > [data-tab]:not([data-tab="analysis"]),
     main[data-active-tab="investigation"] > [data-tab]:not([data-tab="investigation"]),
+    main[data-active-tab="model"] > [data-tab]:not([data-tab="model"]),
     main[data-active-tab="rl"]       > [data-tab]:not([data-tab="rl"]) {
       display: none !important;
     }
+
+    /* Model-quality scoreboard cards - 4 up on desktop, 2 up on tablets. */
+    .model-kpi-grid { display: grid; gap: 10px; margin-top: 14px;
+                      grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    @media (max-width: 900px) { .model-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    .kpi-card { background: #171a21; border: 1px solid #232733;
+                border-radius: 12px; padding: 12px 14px; display: flex;
+                flex-direction: column; gap: 4px; }
+    .kpi-card .lbl { color: #8b909a; font-size: 11px;
+                     text-transform: uppercase; letter-spacing: 0.05em; }
+    .kpi-card .val { font-size: 26px; font-weight: 700; color: #e7e9ee;
+                     line-height: 1.1; font-variant-numeric: tabular-nums; }
+    .kpi-card .sub { color: #6f7480; font-size: 11px; }
+    .kpi-card.na .val { color: #6f7480; }
 
     .grid { display: grid; gap: 8px;
             grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -403,6 +418,7 @@
   <nav class="tabbar" id="tabbar">
     <button data-tab-btn="analysis" class="on">Analysis</button>
     <button data-tab-btn="investigation">Investigation</button>
+    <button data-tab-btn="model">Model quality</button>
     <button data-tab-btn="rl">Reinforcement learning</button>
   </nav>
 
@@ -418,6 +434,18 @@
     <!-- 2x2 grid of camera tiles (LIVE VIDEO + counts only). Cells filled by app.js. -->
     <div class="grid" id="tiles" data-tab="analysis"></div>
 
+    <!-- Model view - live: the collector's annotated frame per slot, updated
+         each sample. Same 2x2 geometry as the live-video grid at the top.
+         Skeletons built up-front so all four cells are visible immediately.
+         Frames come from Firestore latest/{slot_id}.live_annotated_url and
+         from web/snapshots/model_view/ when the notebook's local producers
+         are running. Heatmap toggle (🔥) per cell hits /api/heatmap. -->
+    <div class="model-section" data-tab="analysis">
+      <h2>Model view - live (the collector's annotated frames - the source
+        of every count on this page)</h2>
+      <div class="model-strip" id="model-strip"></div>
+    </div>
+
     <!-- Investigation tab: EVERY saved detection sample (a read plate, a
          crossing, a loiter alert, a posture...) with its full frame -
          the standing proof gallery, reachable whether or not an analysis
@@ -430,6 +458,76 @@
         Click an image for the original.</div>
       <div id="gallery-wrap" style="display:grid;gap:10px;margin-top:10px;
            grid-template-columns:repeat(auto-fill, minmax(210px, 1fr))"></div>
+    </div>
+
+    <!-- Model quality tab: scoreboard cards (accuracy / precision / recall
+         / F1), per-class breakdown, learning-proof table (per-camera
+         per-class confidence adjustments), and two curves: model
+         mistake-rate per tagging batch, and mAP50 per training run. All
+         driven by /api/model-metrics, /api/boost-status, /api/al-curve. -->
+    <div class="anomaly-wrap" id="model-scoreboard-section" data-tab="model">
+      <h2>Model quality - scoreboard</h2>
+      <div class="sub">Live counts from your reviews. Refreshes every 10 s.</div>
+      <div class="model-kpi-grid" id="model-kpi-grid">
+        <div class="kpi-card na" id="kpi-accuracy">
+          <div class="lbl">Accuracy</div><div class="val">-</div>
+          <div class="sub" id="kpi-accuracy-sub">no reviews yet</div>
+        </div>
+        <div class="kpi-card na" id="kpi-precision">
+          <div class="lbl">Precision</div><div class="val">-</div>
+          <div class="sub" id="kpi-precision-sub">TP / (TP + FP)</div>
+        </div>
+        <div class="kpi-card na" id="kpi-recall">
+          <div class="lbl">Recall</div><div class="val">-</div>
+          <div class="sub" id="kpi-recall-sub">TP / (TP + FN)</div>
+        </div>
+        <div class="kpi-card na" id="kpi-f1">
+          <div class="lbl">F1</div><div class="val">-</div>
+          <div class="sub" id="kpi-f1-sub">2 P R / (P + R)</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="anomaly-wrap" id="model-perclass-section" data-tab="model" hidden>
+      <h2>Per-class breakdown</h2>
+      <div id="perclass-table-wrap"></div>
+    </div>
+
+    <!-- Learning proof: for every (camera, class) the user has ever verdicted,
+         show the baseline confidence, the direction it moved, and the current
+         value the collector is using right now. Section hides itself when the
+         review store is empty so a fresh install has zero visual noise. -->
+    <div class="anomaly-wrap" id="boost-section" data-tab="model" hidden>
+      <h2>Learning proof - how your reviews changed the model
+        <span class="fallback-badge">per-camera, per-class confidence</span></h2>
+      <div id="boost-table-wrap"></div>
+      <!-- Model mistake-rate per tagging batch (5 frames each). Data rides
+           the /api/model-metrics poll. -->
+      <div id="curve-wrap" hidden style="margin-top:14px">
+        <h3 style="font-size:13px;margin:0 0 6px">Is it getting better? -
+          model mistake rate per tagging batch</h3>
+        <div style="max-width:640px"><canvas id="learning-curve" height="130"></canvas></div>
+        <div class="footnote" style="margin-top:6px">
+          Each point = one batch of ~5 frames you reviewed: the share of
+          boxes you marked wrong/relabeled plus objects you added by hand.
+          A falling line means the model makes fewer mistakes on your
+          checks. Note: the queue deliberately serves the HARDEST frames,
+          so a plateau is normal - a sustained rise is the real warning.
+        </div>
+      </div>
+      <!-- Active-learning curve: one point per training run, candidate
+           mAP50 on the chronological val split. Data from /api/al-curve. -->
+      <div id="al-curve-wrap" hidden style="margin-top:14px">
+        <h3 style="font-size:13px;margin:0 0 6px">Training runs - labels vs
+          model quality (mAP50)</h3>
+        <div style="max-width:640px"><canvas id="al-curve" height="130"></canvas></div>
+        <div class="footnote" style="margin-top:6px">
+          Each point = one fine-tuning run of the detection head on your
+          reviewed frames. Colored = promoted to the collector, grey =
+          rejected by the gate. The dashed line is the untouched base
+          model on the same validation frames.
+        </div>
+      </div>
     </div>
 
     <!-- Deep-window / Window analysis removed 2026-08-12 per operator: the
@@ -583,9 +681,9 @@
   <!-- firebase-config.js is gitignored per-clone; see docs/firebase_setup.md -->
   <!-- ?v=N is a cache-buster: bump it whenever any of the JS files changes,
        so the browser doesn't serve a stale ES-module from disk cache. -->
-  <script type="module" src="./firebase-config.js?v=41"></script>
-  <script type="module" src="./cameras.js?v=41"></script>
-  <script type="module" src="./app.js?v=83"></script>
+  <script type="module" src="./firebase-config.js?v=42"></script>
+  <script type="module" src="./cameras.js?v=42"></script>
+  <script type="module" src="./app.js?v=84"></script>
 
 
   <style>
@@ -1204,22 +1302,166 @@
   </script>
 
   <script>
-  // Model-quality header line - same /api/model-metrics contract as the VM
-  // edition (header_line), refreshed every 10 s. Only the local backend
-  // answers the endpoint; on the hosted copy the line goes stale-grey.
+  // Header line + Model-quality tab scoreboard/per-class/learning curve.
+  // Same /api/model-metrics contract, refreshed every 10 s. On the hosted
+  // copy where no local backend answers, the header line goes stale-grey
+  // and the Model tab shows the "no reviews yet" placeholders.
   (function initModelMetrics() {
     const el = document.getElementById("model-metrics-line");
-    if (!el) return;
+    const highlight = (s) => String(s || "").replace(
+        /(\d+(?:\.\d+)?)\s*(%|reviews|classes|boxes|objects|thresholds)/g,
+        (_, n, u) => "<b>" + n + "</b>" + (u === "%" ? "" : " ") + u);
+    const $ = (id) => document.getElementById(id);
+    const esc = (s) => String(s ?? "").replace(/[&<>"]/g,
+        (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));
+
+    function fmtPct(v) { return v == null ? null : (v * 100).toFixed(1) + "%"; }
+    function setKpi(id, value, subtext) {
+      const card = $(id); if (!card) return;
+      const val = card.querySelector(".val");
+      const sub = card.querySelector(".sub");
+      if (value == null || value === undefined) {
+        card.classList.add("na"); if (val) val.textContent = "-";
+      } else {
+        card.classList.remove("na"); if (val) val.textContent = value;
+      }
+      if (subtext != null && sub) sub.textContent = subtext;
+    }
+    function renderPerClass(data) {
+      const section = $("model-perclass-section"), wrap = $("perclass-table-wrap");
+      if (!section || !wrap) return;
+      const rows = data.per_class || [];
+      section.hidden = rows.length === 0;
+      if (!rows.length) return;
+      const body = rows.map((r) => `
+        <tr>
+          <td>${esc(r.cls)}</td>
+          <td class="delta-num">${r.n}</td>
+          <td class="delta-num">${fmtPct(r.precision) || "-"}</td>
+          <td class="delta-num">${fmtPct(r.recall) || "-"}</td>
+          <td class="delta-num">${r.fn ?? 0}</td>
+        </tr>`).join("");
+      wrap.innerHTML = `<table class="reid">
+        <thead><tr><th>Class</th><th>N verdicts</th><th>Precision</th>
+          <th>Recall</th><th>Missed (FN)</th></tr></thead>
+        <tbody>${body}</tbody></table>`;
+    }
+
+    // Learning curve: mistake rate per batch. Piggybacks on the same poll.
+    let curveChart = null;
+    function renderCurve(points) {
+      const wrap = $("curve-wrap");
+      if (!wrap || typeof Chart === "undefined") return;
+      const pts = (points || []).filter((p) => p.error_rate != null);
+      wrap.hidden = pts.length < 2;   // one point isn't a trend
+      if (pts.length < 2) return;
+      const labels = pts.map((p) => `batch ${p.batch}`);
+      const data = pts.map((p) => Math.round(p.error_rate * 100));
+      if (curveChart) {
+        curveChart.data.labels = labels;
+        curveChart.data.datasets[0].data = data;
+        curveChart.update("none");
+        return;
+      }
+      curveChart = new Chart($("learning-curve"), {
+        type: "line",
+        data: { labels, datasets: [{
+          label: "model mistakes among your checks (%)",
+          data, borderColor: "#f0a35e", backgroundColor: "#f0a35e33",
+          fill: true, tension: 0.25, pointRadius: 4,
+        }]},
+        options: {
+          animation: false, responsive: true,
+          scales: { y: { min: 0, max: 100,
+                         ticks: { callback: (v) => v + "%" } } },
+          plugins: { legend: { display: false } },
+        },
+      });
+    }
+
     async function refresh() {
       try {
         const r = await fetch("/api/model-metrics", { cache: "no-store" });
-        if (!r.ok) { el.classList.add("stale"); return; }
+        if (!r.ok) { if (el) el.classList.add("stale"); return; }
         const data = await r.json();
-        el.classList.remove("stale");
-        el.textContent = data.header_line || "Model: -";
+        if (el) {
+          el.classList.remove("stale");
+          el.innerHTML = highlight(data.header_line || "Model: -");
+        }
+        setKpi("kpi-accuracy",  data.accuracy != null ? fmtPct(data.accuracy)  : null,
+               data.n_precision ? `${data.tp || 0}/${data.n_precision} verdicts` : "no reviews yet");
+        const prec = (data.tp != null && data.fp != null && (data.tp + data.fp) > 0)
+              ? data.tp / (data.tp + data.fp) : null;
+        setKpi("kpi-precision", prec != null ? fmtPct(prec) : null,
+               data.n_precision ? `${data.tp || 0} correct of ${data.n_precision}` : "TP / (TP + FP)");
+        setKpi("kpi-recall",    data.recall != null ? fmtPct(data.recall) : null,
+               data.n_recall ? `${data.n_recall} recall sample` : "TP / (TP + FN)");
+        setKpi("kpi-f1",        data.f1 != null ? data.f1.toFixed(3) : null,
+               data.f1 != null ? "harmonic mean" : "2 P R / (P + R)");
+        renderPerClass(data);
+        renderCurve(data.curve);
       } catch (_) {
-        el.classList.add("stale");
+        if (el) el.classList.add("stale");
       }
+    }
+    refresh();
+    setInterval(refresh, 10000);
+  })();
+  </script>
+
+  <!-- Learning-proof table: per-camera per-class confidence adjustments -->
+  <script>
+  (function initBoostStatus() {
+    const section = document.getElementById("boost-section");
+    const wrap    = document.getElementById("boost-table-wrap");
+    if (!section || !wrap) return;
+    const esc = (s) => String(s ?? "").replace(/[&<>"]/g,
+        (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));
+    const arrow = (d) =>
+        d === "stricter" ? "▲ stricter" :
+        d === "looser"   ? "▼ looser"   : "-";
+    const fmt = (n) => Number(n).toFixed(3);
+    const signed = (n) => (n > 0 ? "+" : "") + fmt(n);
+    async function refresh() {
+      let data;
+      try {
+        const r = await fetch("/api/boost-status", { cache: "no-store" });
+        if (!r.ok) return;
+        data = await r.json();
+      } catch { return; }
+      const rows = data.rows || [];
+      section.hidden = rows.length === 0;
+      if (!rows.length) return;
+      const body = rows.map((r) => `
+        <tr>
+          <td>${esc(r.cam_id)}</td>
+          <td>${esc(r.cls)}</td>
+          <td class="delta-num">${fmt(r.baseline)}</td>
+          <td class="delta-num">${fmt(r.current)}</td>
+          <td class="${r.direction} delta-num">${signed(r.delta)}</td>
+          <td class="${r.direction}">${arrow(r.direction)}</td>
+          <td class="delta-num">${r.approved}</td>
+          <td class="delta-num">${r.rejected}</td>
+        </tr>`).join("");
+      wrap.innerHTML = `<table class="reid">
+        <thead><tr>
+          <th>Camera</th><th>Class</th><th>Baseline</th><th>Current</th>
+          <th>&Delta;</th><th>Direction</th>
+          <th>&#10004; correct</th><th>&#10007; wrong</th>
+        </tr></thead>
+        <tbody>${body}</tbody></table>
+        <div class="footnote" style="margin-top:8px">
+          <b>Direction, in plain words:</b>
+          <b>&#9660; looser</b> = confidence bar DROPPED because you confirmed
+          real objects the model was hesitating on - it now catches more like
+          them (fixes misses).
+          <b>&#9650; stricter</b> = the bar ROSE because you rejected false
+          detections - lookalikes stop firing (fixes noise).<br>
+          Every "correct" verdict moves the bar down by ${fmt(data.step || 0.015)};
+          every "wrong" moves it up. Values clamped to [${fmt(data.min_conf || 0.20)},
+          ${fmt(data.max_conf || 0.60)}]. Applied to the live collector within
+          ~7 minutes of each submit.
+        </div>`;
     }
     refresh();
     setInterval(refresh, 10000);
