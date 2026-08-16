@@ -8,7 +8,7 @@
   <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
-  <title>Business Activity - Live Footfall (4 cameras)</title>
+  <title>Turkey - Business Activity Live Footfall</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
   <style>
@@ -167,6 +167,17 @@
     .fallback-badge { display: inline-block; padding: 2px 6px;
                       border-radius: 999px; font-size: 10px;
                       background: rgba(240,163,94,0.15); color: #f0a35e; }
+
+    /* Country badge in the header - reflects the country currently backing
+       the grid (read live from config/grid.country). Turkey is the expected
+       state; anything else means the VM's country ladder degraded to a
+       fallback pool (should not happen once the ladder is locked). */
+    .country-badge { display: inline-block; padding: 2px 10px;
+                     border-radius: 999px; font-size: 12px; font-weight: 500;
+                     margin-left: 10px; vertical-align: middle;
+                     background: rgba(79,140,255,0.15); color: #4f8cff; }
+    .country-badge.warn { background: rgba(240,163,94,0.15); color: #f0a35e; }
+    .country-badge.err  { background: rgba(239,68,68,0.15);  color: #ef4444; }
 
     .big-chart-wrap canvas { width: 100% !important; height: 280px !important; }
     .footnote { color: #6f7480; font-size: 11px; }
@@ -360,7 +371,9 @@
 <body>
   <header>
     <div>
-      <h1>Business Activity - Live Footfall</h1>
+      <h1>Turkey - Business Activity Live Footfall
+        <span id="country-badge" class="country-badge"
+              title="active country from the VM collector (config/grid.country)">🇹🇷 Turkey</span></h1>
       <div class="sub">4 cameras · people + vehicle counts (burst-median YOLO) ·
         scene-gated anomalies (extreme load / obstruction / darkness) · streamed from Firestore</div>
       <!-- Model quality scoreboard - computed on the server from the review
@@ -570,9 +583,9 @@
   <!-- firebase-config.js is gitignored per-clone; see docs/firebase_setup.md -->
   <!-- ?v=N is a cache-buster: bump it whenever any of the JS files changes,
        so the browser doesn't serve a stale ES-module from disk cache. -->
-  <script type="module" src="./firebase-config.js?v=40"></script>
-  <script type="module" src="./cameras.js?v=40"></script>
-  <script type="module" src="./app.js?v=82"></script>
+  <script type="module" src="./firebase-config.js?v=41"></script>
+  <script type="module" src="./cameras.js?v=41"></script>
+  <script type="module" src="./app.js?v=83"></script>
 
 
   <style>
@@ -913,7 +926,7 @@
     async function loadNext() {
       _resetEditor();
       try {
-        const r = await fetch("/api/review-frame?scope=local",
+        const r = await fetch("/api/review-frame?scope=local&country=turkey",
                               { cache: "no-store" });
         const data = await r.json();
         if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
@@ -984,7 +997,7 @@
     async function loadStrip() {
       if (!stripEl) return;
       try {
-        const r = await fetch("/api/review-frames-list?scope=local", { cache: "no-store" });
+        const r = await fetch("/api/review-frames-list?scope=local&country=turkey", { cache: "no-store" });
         if (!r.ok) return;
         const data = await r.json();
         const frames = data.frames || [];

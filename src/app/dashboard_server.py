@@ -1017,15 +1017,26 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
         self._send_json(200, {"ok": True, "saved": row})
 
     def _analysis_saved(self) -> None:
-        """GET /api/analysis/saved - manifest of saved detection events."""
+        """GET /api/analysis/saved[?country=turkey] - manifest of saved
+        detection events. Optional country filter keeps only events whose
+        cam_id belongs to the given country pool (Repo #1 default is
+        turkey - the VM's auto-fallback to TH/JP/US leaves foreign items
+        in the shared bank; the filter hides them from a country-locked
+        dashboard)."""
         import json as _json
         from pathlib import Path
+        from urllib.parse import parse_qs, urlparse
         man = (Path(__file__).resolve().parent.parent / "web" / "snapshots"
                / "detections" / "saved.json")
         try:
             items = _json.loads(man.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             items = []
+        q = parse_qs(urlparse(self.path).query)
+        allowed = self._resolve_scope(q)
+        if allowed is not None:
+            items = [it for it in items
+                     if (it.get("cam_id") or it.get("cam") or "") in allowed]
         self._send_json(200, {"items": items})
 
     def _visual_search(self) -> None:
@@ -1347,8 +1358,7 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json(200, s)
                 return
             from app.labels import sample_frame
-            scope = (q.get("scope") or [""])[0].strip()
-            allowed = self._local_pick_ids() if scope == "local" else None
+            allowed = self._resolve_scope(q)
             s = sample_frame(_review_store(), SNAPSHOTS_DIR,
                              allowed_cams=(allowed or None))
             if s is None:
@@ -1387,22 +1397,49 @@ class DashboardHandler(http.server.SimpleHTTPRequestHandler):
                 cam = parts[1]
         return cam
 
+    @staticmethod
+    def _country_cam_ids(country: str) -> set:
+        """Cam ids belonging to the given country per app/cameras.py
+        country_pool. Empty set on unknown country or import error."""
+        try:
+            from app.cameras import country_pool
+            return set(country_pool((country or "").lower()))
+        except Exception:
+            return set()
+
+    def _resolve_scope(self, q) -> set | None:
+        """Resolve the allowed cam_id set from a request's query string.
+        Order: scope=local (only if the operator has picked cameras) ->
+        country=<name> (Turkey by contract of Repo #1) -> no filter.
+        Returns None when no filter should apply."""
+        scope = (q.get("scope") or [""])[0].strip()
+        country = (q.get("country") or [""])[0].strip().lower()
+        if scope == "local":
+            picks = self._local_pick_ids()
+            if picks:
+                return picks
+        if country:
+            pool = self._country_cam_ids(country)
+            if pool:
+                return pool
+        return None
+
     def _review_frames_list(self) -> None:
-        """GET /api/review-frames-list[?scope=local] -> every stored frame +
-        review status, newest first. Powers the strip that re-opens
-        reviewed frames. scope=local (the MAIN edition) keeps only frames
-        from the operator's picked cameras - the VM bank's pulled frames
-        (tr_*, konya_*...) belong to the VM edition only."""
+        """GET /api/review-frames-list[?scope=local][&country=turkey] ->
+        every stored frame + review status, newest first. Powers the strip
+        that re-opens reviewed frames. Filter precedence: scope=local (only
+        when the operator has picked cameras) -> country pool -> no filter.
+        Frames from the VM's auto-fallback pools (th_*, jp_*, us_*) are
+        excluded when country=turkey is set."""
         try:
             from urllib.parse import parse_qs, urlparse
             from app.labels import list_frames
             frames = list_frames(_review_store(), SNAPSHOTS_DIR)
             q = parse_qs(urlparse(self.path).query)
-            if (q.get("scope") or [""])[0] == "local":
-                allowed = self._local_pick_ids()
-                if allowed:
-                    frames = [f for f in frames
-                              if self._frame_cam(f) in allowed]
+            allowed = self._resolve_scope(q)
+            if allowed is not None:
+                frames = [f for f in frames
+                          if self._frame_cam(f) in allowed]
             self._send_json(200, {"frames": frames})
         except Exception as e:
             print(f"  ! review-frames-list failed: {type(e).__name__}: {e}")

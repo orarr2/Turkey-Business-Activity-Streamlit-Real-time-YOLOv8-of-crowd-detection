@@ -2182,9 +2182,9 @@ def main() -> None:
     # country when the active one is fully dark. tvkur (Konya) cams keep the
     # fast-fail lane. `--country` pins a starting country; otherwise it
     # begins at the top of the priority order (Turkey).
-    from app.cameras import COUNTRIES, COUNTRY_ORDER, country_pool
-    country_pools = {c: country_pool(c) for c in COUNTRY_ORDER}
-    director = CountryDirector(country_pools, COUNTRY_ORDER,
+    from app.cameras import COUNTRIES, COLLECTOR_COUNTRY_LADDER, country_pool
+    country_pools = {c: country_pool(c) for c in COLLECTOR_COUNTRY_LADDER}
+    director = CountryDirector(country_pools, COLLECTOR_COUNTRY_LADDER,
                                n_slots=len(GRID_SLOTS))
     if getattr(args, "country", None) and args.country in director.pools:
         director.switch_to(args.country)
@@ -2209,7 +2209,7 @@ def main() -> None:
     slot_ids = [s["slot_id"] for s in GRID_SLOTS]
     _pool0 = director.pools[director.active]
     print("country grid: "
-          f"{' -> '.join(COUNTRY_ORDER)} | active={director.active} "
+          f"{' -> '.join(COLLECTOR_COUNTRY_LADDER)} | active={director.active} "
           f"({len(country_pools[director.active])} cams); widest-grid rule: "
           "first country (by priority) fielding 4 live cams wins; none -> "
           "the grid narrows to 3, then 2, then 1, and widens back as "

@@ -838,7 +838,7 @@ function _eventChip(a, ev) {
 async function openSavedDetections() {
   let items = [];
   try {
-    const r = await fetch("/api/analysis/saved");
+    const r = await fetch("/api/analysis/saved?country=turkey");
     items = (await r.json()).items || [];
   } catch (_) {}
   const bg = document.createElement("div");
@@ -887,7 +887,7 @@ async function renderGallery() {
   if (!wrap) return;
   let items = [];
   try {
-    const r = await fetch("/api/analysis/saved", { cache: "no-store" });
+    const r = await fetch("/api/analysis/saved?country=turkey", { cache: "no-store" });
     items = (await r.json()).items || [];
   } catch (_) { return; }
   if (title) title.textContent =
@@ -2241,6 +2241,7 @@ function start(cfg) {
     if (!snap.exists()) return;
     currentGridConfig = snap.data();
     applyGridConfig(currentGridConfig);
+    updateCountryBadge(currentGridConfig.country);
   }, (err) => console.warn("config/grid subscription failed:", err));
 
   // 4b. latest/{slot_id} -> KPI cards.
@@ -2350,6 +2351,25 @@ function rebuildCloudSlotMap(cfg) {
       taken.add(hit.slot_id);
     }
   }
+}
+
+// Country badge in the header - reflects config/grid.country. Turkey is
+// the expected state; anything else means the VM's country ladder is on
+// a non-Turkey pool (should not happen once the ladder is locked, but
+// during the transition period we surface it clearly).
+const _COUNTRY_FLAGS = {
+  turkey: "🇹🇷", thailand: "🇹🇭", japan: "🇯🇵",
+  usa: "🇺🇸", "united states": "🇺🇸",
+};
+function updateCountryBadge(country) {
+  const el = document.getElementById("country-badge");
+  if (!el) return;
+  const c = (country || "").toString().toLowerCase();
+  const nice = c ? c.charAt(0).toUpperCase() + c.slice(1) : "unknown";
+  const flag = _COUNTRY_FLAGS[c] || "🏳";
+  el.textContent = `${flag} ${nice}`;
+  el.classList.toggle("warn", !!c && c !== "turkey");
+  el.classList.toggle("err",  !c);
 }
 
 function applyGridConfig(cfg) {

@@ -768,6 +768,13 @@ COUNTRIES = {
 }
 COUNTRY_ORDER = list(COUNTRIES)
 
+# Production ladder for the collector on the GCP VM. Repo #1 is Turkey-only
+# (operator lockdown 2026-08-16); the country-generic COUNTRY_ORDER above is
+# preserved for tests / probe_country.py / offline tools but the running VM
+# rotates only through this list. If Turkey has no live cameras the grid
+# stays empty on Turkey rather than falling back to Thailand / Japan / USA.
+COLLECTOR_COUNTRY_LADDER = ["turkey"]
+
 
 def country_pool(country: str) -> list[str]:
     """The ordered camera ladder for one country (validated against CAMERAS)."""
