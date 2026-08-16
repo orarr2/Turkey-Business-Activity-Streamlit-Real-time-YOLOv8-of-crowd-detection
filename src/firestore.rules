@@ -50,6 +50,13 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // vm_status/latest - CPU/RAM/disk/uptime heartbeat written by the
+    // collector every ~80s. Read by the dashboard's System health card.
+    match /vm_status/{doc} {
+      allow read: if true;
+      allow write: if false;
+    }
+
     // --- Everything else: locked. No reads, no writes. ---
     // Prevents anyone from reading collections you didn't intend to expose or
     // writing junk into arbitrary new collections.
