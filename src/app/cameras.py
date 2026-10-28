@@ -503,11 +503,11 @@ CAMERAS = {
         "page": "https://webcamera24.com/camera/thailand/sukhumvit-street/",
         "embed": "https://www.youtube.com/embed/Q71sLS8h9a4?autoplay=1&mute=1&playsinline=1&enablejsapi=1",
     },
-    "th_chaweng_hooters": {
-        "name": "Chaweng Beach Rd (Koh Samui)", "city": "Koh Samui", "country": "thailand",
-        "kind": "youtube", "url": "https://www.youtube.com/watch?v=VR-x3HdhKLQ",
-        "page": "https://webcamera24.com/camera/thailand/7108-hooters-cam-chaweng-live-street-webcam-stream-p-hd/",
-        "embed": "https://www.youtube.com/embed/VR-x3HdhKLQ?autoplay=1&mute=1&playsinline=1&enablejsapi=1",
+    "th_bangkok_elgaucho": {
+        "name": "El Gaucho / Soi 11 Sukhumvit (Bangkok)", "city": "Bangkok", "country": "thailand",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=UemFRPrl1hk",
+        "page": "https://www.youtube.com/watch?v=UemFRPrl1hk",
+        "embed": "https://www.youtube.com/embed/UemFRPrl1hk?autoplay=1&mute=1&playsinline=1&enablejsapi=1",
     },
     "th_nanai_road": {
         "name": "Nanai Rd (Patong)", "city": "Patong", "country": "thailand",
@@ -540,17 +540,17 @@ CAMERAS = {
         "page": "https://www.youtube.com/watch?v=UemFRPrl1hk",
         "embed": "https://www.youtube.com/embed/UemFRPrl1hk?autoplay=1&mute=1&playsinline=1&enablejsapi=1",
     },
-    "th_chaweng_pancake": {
-        "name": "Chaweng - Pancake Man (Koh Samui)", "city": "Koh Samui", "country": "thailand",
-        "kind": "youtube", "url": "https://www.youtube.com/watch?v=e9T0L_POAOk",
-        "page": "https://www.youtube.com/watch?v=e9T0L_POAOk",
-        "embed": "https://www.youtube.com/embed/e9T0L_POAOk?autoplay=1&mute=1&playsinline=1&enablejsapi=1",
+    "th_chaweng_bondi": {
+        "name": "Bondi Aussie Bar & Grill (Chaweng, Koh Samui)", "city": "Koh Samui", "country": "thailand",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=Jv_2vPCbZUo",
+        "page": "https://www.youtube.com/watch?v=Jv_2vPCbZUo",
+        "embed": "https://www.youtube.com/embed/Jv_2vPCbZUo?autoplay=1&mute=1&playsinline=1&enablejsapi=1",
     },
-    "th_chaweng_murphys": {
-        "name": "Chaweng - Murphy's Irish Pub (Koh Samui)", "city": "Koh Samui", "country": "thailand",
-        "kind": "youtube", "url": "https://www.youtube.com/watch?v=OBJ5Q0lWbqk",
-        "page": "https://www.youtube.com/watch?v=OBJ5Q0lWbqk",
-        "embed": "https://www.youtube.com/embed/OBJ5Q0lWbqk?autoplay=1&mute=1&playsinline=1&enablejsapi=1",
+    "th_samui_fallback": {
+        "name": "The Real Samui Webcam (Koh Samui, fallback)", "city": "Koh Samui", "country": "thailand",
+        "kind": "youtube", "url": "https://www.youtube.com/watch?v=OdY-pbgl1Mk",
+        "page": "https://www.youtube.com/watch?v=OdY-pbgl1Mk",
+        "embed": "https://www.youtube.com/embed/OdY-pbgl1Mk?autoplay=1&mute=1&playsinline=1&enablejsapi=1",
     },
 
     # --- Japan (crossings / downtown streets) ---
@@ -748,12 +748,18 @@ TURKEY_POOL = TURKEY_YT + TURKEY_IBB + TURKEY_KONYA + TURKEY_TAIL
 # listing (street / traffic / crossing views), deepest bench so a dead
 # camera backfills without leaving the country.
 THAILAND_POOL = [
-    # Koh Samui / Chaweng Beach Rd - busy pedestrian nightlife strip,
-    # operator-pinned 2026-10-28 as the preferred live source.
-    "th_chaweng_hooters", "th_green_mango", "th_chaweng_pancake", "th_chaweng_murphys",
-    # Mainland bench kept behind Samui so the grid stays on Samui when
-    # all four are up, and falls back cleanly if any single Chaweng cam dies.
-    "th_sukhumvit", "th_nanai_road", "th_patong_sainamyen",
+    # Operator-pinned 2026-10-28 - the four live sources the user watches
+    # directly in his browser; verified live on YouTube at pin time:
+    #   th_bangkok_elgaucho = UemFRPrl1hk (El Gaucho, Soi 11 Sukhumvit, Bangkok)
+    #   th_chaweng_bondi    = Jv_2vPCbZUo (Bondi Aussie Bar, Chaweng, Koh Samui)
+    #   th_green_mango      = DwKCna1mumk (Hush Bar / Soi Green Mango, Chaweng)
+    #   th_patong_sainamyen = _nvG0c9keWI (Sainamyen Rd, Patong, Phuket)
+    "th_bangkok_elgaucho", "th_chaweng_bondi", "th_green_mango", "th_patong_sainamyen",
+    # Fifth-cam fallback from the same channel (The Real Samui Webcam);
+    # picked up by rotation only if one of the four primaries dies.
+    "th_samui_fallback",
+    # Older mainland bench kept behind the operator picks as cold spare.
+    "th_sukhumvit", "th_nanai_road",
     "th_petchaburi_traffic", "th_sukhumvit_soi11",
 ]
 JAPAN_POOL = [
@@ -1073,7 +1079,10 @@ def build_grid_slots(country: str = "turkey") -> list[dict]:
 
 # Default grid = the top-priority country (Turkey). The collector rebuilds
 # these when the active country changes.
-GRID_SLOTS = build_grid_slots("turkey")
+# The initial grid starts on the first country in the collector's
+# ladder (previously hardcoded to Turkey, which left every restart
+# fighting IBB's dead CDN for several minutes before rotating out).
+GRID_SLOTS = build_grid_slots(COLLECTOR_COUNTRY_LADDER[0])
 
 # Backward compat for the viewer notebook / smoke tests: the four primary cams.
 GRID_CAMERAS = [s["primary"] for s in GRID_SLOTS]
