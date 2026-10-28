@@ -748,9 +748,13 @@ TURKEY_POOL = TURKEY_YT + TURKEY_IBB + TURKEY_KONYA + TURKEY_TAIL
 # listing (street / traffic / crossing views), deepest bench so a dead
 # camera backfills without leaving the country.
 THAILAND_POOL = [
-    "th_sukhumvit", "th_chaweng_hooters", "th_nanai_road", "th_patong_sainamyen",
-    "th_petchaburi_traffic", "th_green_mango",
-    "th_sukhumvit_soi11", "th_chaweng_pancake", "th_chaweng_murphys",
+    # Koh Samui / Chaweng Beach Rd - busy pedestrian nightlife strip,
+    # operator-pinned 2026-10-28 as the preferred live source.
+    "th_chaweng_hooters", "th_green_mango", "th_chaweng_pancake", "th_chaweng_murphys",
+    # Mainland bench kept behind Samui so the grid stays on Samui when
+    # all four are up, and falls back cleanly if any single Chaweng cam dies.
+    "th_sukhumvit", "th_nanai_road", "th_patong_sainamyen",
+    "th_petchaburi_traffic", "th_sukhumvit_soi11",
 ]
 JAPAN_POOL = [
     "jp_shinsaibashi", "jp_kabukicho_crossing", "jp_kabukicho_shinjuku", "jp_cross_space",
@@ -777,7 +781,10 @@ COUNTRY_ORDER = list(COUNTRIES)
 # shut down kamerayayin.ibb.istanbul CDN (connection refused worldwide),
 # so Turkey stays first for when IBB returns, with Thailand / Japan / USA
 # as working fallbacks (YouTube Live via the bgutil PoT provider).
-COLLECTOR_COUNTRY_LADDER = ["turkey", "thailand", "japan", "usa"]
+# 2026-10-28 operator override: pin to Thailand only. Turkey IBB CDN is down
+# and Turkey's YouTube bench has two broken links; the Chaweng (Koh Samui)
+# pedestrian cams below are the user's preferred live source.
+COLLECTOR_COUNTRY_LADDER = ["thailand"]
 
 
 def country_pool(country: str) -> list[str]:
