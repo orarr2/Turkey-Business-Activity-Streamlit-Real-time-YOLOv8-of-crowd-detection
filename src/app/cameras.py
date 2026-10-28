@@ -737,7 +737,11 @@ TURKEY_TAIL = [
     "ulus_parki_yeni", "pierre_lotti_yeni", "emirgan_yeni", "kiz_kulesi_yeni",
     "hidiv_kasri_yeni", "dragos_yeni",
 ]
-TURKEY_POOL = TURKEY_IBB + TURKEY_YT + TURKEY_KONYA + TURKEY_TAIL
+# YouTube-backed cams first (Bulancak / Golden Horn / Giresun / Ankara) because
+# IBB's kamerayayin.ibb.istanbul CDN went silent on 2026-10-28 (connection
+# refused worldwide). IBB stays in the pool so the grid auto-reclaims those
+# four spots the moment IBB answers again.
+TURKEY_POOL = TURKEY_YT + TURKEY_IBB + TURKEY_KONYA + TURKEY_TAIL
 
 # Foreign ladders: the operator's four per country first (verified live
 # 2026-07-17), then the spares discovered from the same webcamera24 country
