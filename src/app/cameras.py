@@ -768,12 +768,12 @@ COUNTRIES = {
 }
 COUNTRY_ORDER = list(COUNTRIES)
 
-# Production ladder for the collector on the GCP VM. Repo #1 is Turkey-only
-# (operator lockdown 2026-08-16); the country-generic COUNTRY_ORDER above is
-# preserved for tests / probe_country.py / offline tools but the running VM
-# rotates only through this list. If Turkey has no live cameras the grid
-# stays empty on Turkey rather than falling back to Thailand / Japan / USA.
-COLLECTOR_COUNTRY_LADDER = ["turkey"]
+# Production ladder for the collector on the GCP VM. Rotates through
+# countries when the current one has no live cameras. 2026-10-28: IBB
+# shut down kamerayayin.ibb.istanbul CDN (connection refused worldwide),
+# so Turkey stays first for when IBB returns, with Thailand / Japan / USA
+# as working fallbacks (YouTube Live via the bgutil PoT provider).
+COLLECTOR_COUNTRY_LADDER = ["turkey", "thailand", "japan", "usa"]
 
 
 def country_pool(country: str) -> list[str]:
